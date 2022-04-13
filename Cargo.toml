@@ -1,8 +1,25 @@
 [package]
 name = "scryer"
 version = "0.1.0"
-edition = "2018"
+edition = "2021"
+
+[lib]
+name = "scryer"
+path = "src/lib.rs"
+
+[[bin]]
+name = "scryer"
+path = "src/main.rs"
 
 [dependencies]
 scry_isa = { path = "../scry_isa" }
+scryasm = { path = "../scryasm" }
 num-traits = "0.2.14"
+bitvec = "1.0.0"
+byteorder = "1.4.3"
+quickcheck = "1.0.3"
+
+[dev-dependencies]
+quickcheck_macros = "1.0.0"
+
+

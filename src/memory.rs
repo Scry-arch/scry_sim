@@ -1,38 +1,24 @@
-use crate::report::{Report, Reporter};
-use num_traits::{Bounded, FromPrimitive, One, Unsigned, Zero};
-use std::{net::Shutdown::Write, ops::Add};
-
-/// A trait for types usable as memory addresses
-pub trait Address: Sized + Copy + Bounded + Zero + One + Unsigned + FromPrimitive
-{
-	/// Returns whether the given address is aligned to the
-	/// given power of 2 plus 1.
-	/// I.e. `x.is_aligned(0)` returns whether x is aligned to 2^1=2,
-	/// `x.is_aligned(1)` returns whether x is aligned to 4, etc.
-	fn is_aligned(self, pow2: i8) -> bool
-	{
-		(self % FromPrimitive::from_i8(pow2).unwrap()) == Self::zero()
-	}
-}
+use crate::data::{Value, ValueState};
+use bitvec::vec::BitVec;
 
 /// The memory report data
 struct ReportData
 {
 	/// The number of instruction bytes that were requested
 	/// divided by 2.
-	instr_read: u16,
+	instr_read: usize,
 
 	// The number of data bytes requested
-	data_read: u16,
+	data_read: usize,
 
 	// The number of data written
-	data_write: u16,
+	data_write: usize,
 
 	// The number of data requests that weren't aligned to the native word size
-	unaligned_read: u16,
+	unaligned_read: usize,
 
 	// The number of writes that weren't aligned to the native word size
-	unaligned_write: u16,
+	unaligned_write: usize,
 }
 impl ReportData
 {
@@ -48,126 +34,260 @@ impl ReportData
 	}
 }
 
-struct Memory<A: Address>
+#[derive(Debug)]
+pub enum MemError
 {
-	/// We track memory blocks that have been written to at least once.
-	mem_blocks: Vec<(A, Vec<u8>)>,
+	/// Memory being read has not been initialized
+	Uninitialized,
+	/// Tried to write a NaR value to memory
+	NarWrite,
+	/// The address being accesses is out of alignment with the data type being
+	/// accessed
+	UnalignedAddr,
+	/// The range of addresses requested includes invalid ones
+	InvalidAddr,
 }
 
-pub struct MemoryInstr<A: Address>
+struct MemBlock
 {
-	memory: Memory<A>,
-	report: ReportData,
+	data: Vec<u8>,
+	initialized: BitVec,
 }
-impl<A: Address> MemoryInstr<A>
-{
-	pub fn read_intr(&mut self, addr: A) -> &[u8; 2]
-	{
-		self.report.instr_read += 1;
-		todo!()
-	}
 
-	pub fn skip(self) -> MemoryRead<A>
-	{
-		MemoryRead {
-			memory: self.memory,
-			report: self.report,
-		}
-	}
-}
-impl<A: Address> Reporter for MemoryInstr<A>
+/// Constructs a block with the given size in bytes.
+/// All bytes are assumed uninitialized
+impl From<usize> for MemBlock
 {
-	type Args = ();
-	type Report = MemoryReport<A>;
-
-	fn step(self, _: Self::Args) -> Self::Report
+	fn from(size: usize) -> Self
 	{
-		MemoryReport {
-			memory: self.memory,
-			report: self.report,
+		Self {
+			data: vec![0; size],
+			initialized: BitVec::repeat(false, size),
 		}
 	}
 }
 
-pub struct MemoryRead<A: Address>
+/// Constructs a block with the given bytes.
+/// All bytes are initialized
+impl From<&[u8]> for MemBlock
 {
-	memory: Memory<A>,
-	report: ReportData,
-}
-impl<A: Address> MemoryRead<A>
-{
-	fn read_data(&mut self, addr: A, bytes: u16) -> &[u8]
+	fn from(bytes: &[u8]) -> Self
 	{
-		self.report.data_read += bytes;
-		todo!()
-	}
-
-	fn write(self, addr: A, data: &[u8]) -> MemoryWrite<A>
-	{
-		let mut write = MemoryWrite {
-			memory: self.memory,
-			report: self.report,
-		};
-		write.write(addr, data);
-		write
-	}
-}
-impl<A: Address> Reporter for MemoryRead<A>
-{
-	type Args = ();
-	type Report = MemoryReport<A>;
-
-	fn step(self, _: Self::Args) -> Self::Report
-	{
-		MemoryReport {
-			memory: self.memory,
-			report: self.report,
+		Self {
+			data: bytes.into(),
+			initialized: BitVec::repeat(true, bytes.len()),
 		}
 	}
 }
 
-pub struct MemoryWrite<A: Address>
+/// Constructs a block with the given bytes.
+/// All bytes are initialized
+impl From<Vec<u8>> for MemBlock
 {
-	memory: Memory<A>,
-	report: ReportData,
-}
-impl<A: Address> MemoryWrite<A>
-{
-	fn write(&mut self, addr: A, data: &[u8])
+	fn from(bytes: Vec<u8>) -> Self
 	{
-		self.report.data_write += data.len() as u16;
-		todo!()
-	}
-}
-impl<A: Address> Reporter for MemoryWrite<A>
-{
-	type Args = ();
-	type Report = MemoryReport<A>;
-
-	fn step(self, _: Self::Args) -> Self::Report
-	{
-		MemoryReport {
-			memory: self.memory,
-			report: self.report,
+		let len = bytes.len();
+		Self {
+			data: bytes,
+			initialized: BitVec::repeat(true, len),
 		}
 	}
 }
 
-pub struct MemoryReport<A: Address>
+impl MemBlock
 {
-	memory: Memory<A>,
-	report: ReportData,
+	/// Appends the given blocks memory at the end of this block's.
+	fn append<T>(&mut self, other: T)
+	where
+		MemBlock: From<T>,
+	{
+		let mut other_block: MemBlock = other.into();
+		self.data.append(&mut other_block.data);
+		self.initialized.append(&mut other_block.initialized);
+	}
+
+	/// Size of memory block in bytes
+	fn size(&self) -> usize
+	{
+		assert!(self.data.len() == self.initialized.len());
+		self.data.len()
+	}
+
+	/// Try to read a given amount of bytes starting from the given address.
+	fn read(&self, addr: usize, size: usize) -> Result<&[u8], (MemError, usize)>
+	{
+		let range = addr..(addr + size);
+		self.data
+			.get(range.clone())
+			.map_or(Err((MemError::InvalidAddr, self.size())), |slice| {
+				if let Some((uninit, _)) = self
+					.initialized
+					.get(range)
+					.unwrap()
+					.into_iter()
+					.enumerate()
+					.find(|(_, init)| !init.as_ref())
+				{
+					Err((MemError::Uninitialized, addr + uninit))
+				}
+				else
+				{
+					assert_eq!(slice.len(), size);
+					Ok(slice)
+				}
+			})
+	}
+
+	fn write(&mut self, addr: usize, bytes: &[u8]) -> Result<(), (MemError, usize)>
+	{
+		let range = addr..(addr + bytes.len());
+		let size = self.size();
+		self.data
+			.get_mut(range.clone())
+			.map_or(Err((MemError::InvalidAddr, size)), |slice| {
+				assert_eq!(bytes.len(), slice.len());
+				slice
+					.into_iter()
+					.zip(bytes.into_iter())
+					.for_each(|(mem, val)| {
+						*mem = *val;
+					});
+				Ok(())
+			})
+			.and_then(|_| {
+				self.initialized
+					.get_mut(range)
+					.unwrap()
+					.into_iter()
+					.for_each(|mut init| *init = true);
+				Ok(())
+			})
+	}
 }
 
-impl<A: Address> Report for MemoryReport<A>
+pub struct Memory
 {
-	type Reporter = MemoryInstr<A>;
+	/// Offsets + memory blocks
+	/// Sorted by offset, biggest to smallest
+	blocks: Vec<(usize, MemBlock)>,
+	mem_report: ReportData,
+}
 
-	fn reset(self) -> Self::Reporter
+impl Memory
+{
+	/// Construct a new memory object with only the given block
+	pub fn new(mem: Vec<u8>, offset: usize) -> Self
 	{
-		MemoryInstr {
-			memory: self.memory,
-			report: ReportData::new(),
+		Self {
+			blocks: vec![(offset, mem.into())],
+			mem_report: ReportData::new(),
 		}
+	}
+
+	/// Read from the given address, putting the read values into the given
+	/// slice
+	///
+	/// This read does not update the read report in any way
+	fn read_no_report(&self, addr: usize, size: usize) -> Result<&[u8], (MemError, usize)>
+	{
+		self.blocks
+			.iter()
+			.find(|(offset, _)| *offset <= addr)
+			.ok_or((MemError::InvalidAddr, addr))
+			.and_then(|(offset, mem)| mem.read(addr - offset, size))
+	}
+
+	/// Read from the given address, into the given value, the given number of
+	/// elements
+	///
+	/// Updates the report as a data read.
+	pub fn read_data(
+		&mut self,
+		addr: usize,
+		into: &mut Value,
+		len: usize,
+	) -> Result<(), (MemError, usize)>
+	{
+		let mut found_uninit = None;
+		let scale = into.scale();
+		let size = into.size();
+		for (idx, val) in into.iter_mut().enumerate()
+		{
+			self.read_no_report(addr + (idx * scale), scale)
+				.and_then(|bytes| {
+					val.set_val(bytes);
+					Ok(())
+				})
+				.and_then(|_| {
+					self.mem_report.data_read += size;
+					if addr % scale != 0
+					{
+						self.mem_report.unaligned_read += len;
+					}
+					Ok(())
+				})
+				.err()
+				.map(|err| {
+					if let (MemError::Uninitialized, addr) = err
+					{
+						found_uninit = Some(addr);
+					}
+					*val = ValueState::Nar(0);
+				});
+		}
+		found_uninit.map_or(Ok(()), |addr| Err((MemError::Uninitialized, addr)))
+	}
+
+	/// Read 2 bytes from the given address into the slice.
+	///
+	/// Updates the report as an instruction read.
+	pub fn read_instr(&mut self, addr: usize) -> Result<[u8; 2], MemError>
+	{
+		if addr % 2 != 0
+		{
+			Err(MemError::UnalignedAddr)
+		}
+		else
+		{
+			self.read_no_report(addr, 2)
+				.and_then(|bytes| Ok([bytes[0], bytes[1]]))
+				.and_then(|bytes| {
+					self.mem_report.instr_read += 1;
+					Ok(bytes)
+				})
+				.or_else(|err| Err(err.0))
+		}
+	}
+
+	pub fn write(&mut self, addr: usize, from: &Value) -> Result<(), (MemError, usize)>
+	{
+		let (offset, mem) = self
+			.blocks
+			.iter_mut()
+			.find(|(offset, _)| *offset < addr)
+			.ok_or((MemError::InvalidAddr, addr))?;
+
+		for (idx, val) in from.iter().enumerate()
+		{
+			let element_addr = (addr - *offset) + (idx * from.scale());
+			if let ValueState::Val(bytes) = val
+			{
+				mem.write(element_addr, bytes.as_ref())?;
+				self.mem_report.data_write += from.size();
+				if addr % from.scale() != 0
+				{
+					self.mem_report.unaligned_write += from.len();
+				}
+			}
+			else if let ValueState::Nar(_) = val
+			{
+				return Err((MemError::NarWrite, element_addr));
+			}
+			else
+			{
+				// For Nan, nothing should be written
+			}
+		}
+		Ok(())
 	}
 }
