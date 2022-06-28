@@ -13,7 +13,7 @@ fn test_raw_program<'a, I: Iterator<Item = &'a str> + Clone>(
 	inputs: impl IntoIterator<Item = Value>,
 	expected_outputs: impl IntoIterator<Item = Value>,
 	max_execs: usize,
-) -> Result<(), &'static str>
+) -> Result<(), String>
 {
 	let object = Raw::assemble(asm).unwrap();
 	let mem = scryer::memory::Memory::new(object, 0);
@@ -24,45 +24,74 @@ fn test_raw_program<'a, I: Iterator<Item = &'a str> + Clone>(
 		match exec.execute()
 		{
 			ExecResult::Ok(x) => exec = x,
-			ExecResult::Done(mut result) =>
+			ExecResult::Done(result) =>
 			{
 				let expected = expected_outputs.into_iter().collect::<Vec<_>>();
 				let actual = result.into_iter().collect::<Vec<_>>();
-				assert_eq!(expected, actual);
-				return Ok(());
+
+				if expected == actual
+				{
+					return Ok(());
+				}
+				else
+				{
+					return Err(format!("{:?} != {:?}", expected, actual));
+				}
 			},
-			_ => return Err("Unexpected execution"),
+			_ => return Err("Unexpected execution".into()),
 		}
 	}
-	Err("Timeout")
+	Err("Timeout".into())
 }
 
 macro_rules! test_program {
 	(
 		($timeout:expr) $inputs:expr => $outputs:expr;
-		$asm:literal
+		$($asm:tt)*
 	) => {
-		test_raw_program(std::iter::once($asm), $inputs, $outputs, $timeout).is_ok()
+		let result = test_raw_program(std::iter::once(stringify!($($asm)*)), $inputs, $outputs, $timeout);
+
+		match result {
+			Ok(_) => true,
+			Err(e) => {
+				println!("{}", e);
+				false
+			}
+		}
 	};
 }
 
-/// Tests that a function comprising just an immediate return returns the inputs
-/// given to it.
-///
-/// Tests up to 4 inputs
+/// Tests that a function comprising just an immediate return returns nothing
+/// regardless of inputs.
 #[quickcheck]
-fn empty_function_returns_inputs(
-	input: (Option<Value>, Option<Value>, Option<Value>, Option<Value>),
+fn empty_function_returns_nothing(inputs: Vec<Value>) -> bool
+{
+	test_program! {
+		(2) inputs => [];
+					ret ret_loc
+		ret_loc:
+	}
+}
+
+/// Tests that a function comprising just an immediate return returns nothing
+/// regardless of inputs.
+///
+/// Tested for up to 4 inputs
+#[quickcheck]
+fn identity_function_returns_inputs(
+	inputs: (Option<Value>, Option<Value>, Option<Value>, Option<Value>),
 ) -> bool
 {
-	let inputs = input
+	let inputs = inputs
 		.0
 		.into_iter()
-		.chain(input.1.into_iter())
-		.chain(input.2.into_iter())
-		.chain(input.3.into_iter());
+		.chain(inputs.1.into_iter())
+		.chain(inputs.2.into_iter())
+		.chain(inputs.3.into_iter());
 	test_program! {
 		(2) inputs.clone() => inputs;
-		"ret 0"
+					echo =>ret_loc
+					ret ret_loc
+		ret_loc:
 	}
 }

@@ -47,15 +47,24 @@ impl Executor
 		{
 			let raw_instr = self.memory.read_instr(addr).unwrap();
 			let instr = Instruction::decode(byteorder::LittleEndian::read_u16(&raw_instr));
-
-			match instr
 			{
-				Instruction::Call(CallVariant::Ret, offset) =>
+				match instr
 				{
-					assert_eq!(offset.value(), 0);
-					self.control.ret(addr + ((offset.value() * 2) as usize))
-				},
-				_ => todo!(),
+					Instruction::Call(CallVariant::Ret, offset) =>
+					{
+						assert_eq!(offset.value(), 0);
+						self.control.ret(addr + ((offset.value() * 2) as usize));
+						// Discard everything in the ready queue
+						let _ = self.operands.ready_iter(&mut self.memory);
+					},
+					Instruction::EchoLong(offset) =>
+					{
+						self.operands.reorder_ready(offset.value() as usize);
+						// Discard (now empty) ready queue
+						let _ = self.operands.ready_iter(&mut self.memory);
+					},
+					_ => todo!(),
+				}
 			}
 			ExecResult::Ok(self)
 		}

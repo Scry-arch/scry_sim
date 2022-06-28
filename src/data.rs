@@ -178,7 +178,8 @@ impl<N: PrimInt> From<N> for Value
 	}
 }
 
-// An instruction operand
+/// An instruction operand
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub enum Operand
 {
 	/// A value ready to be used in instructions as is.
@@ -207,6 +208,7 @@ impl Operand
 	}
 }
 
+#[derive(Debug)]
 struct ReportData
 {
 	/// How many operands at the head of the queue were consumed.
@@ -255,6 +257,7 @@ impl ReportData
 }
 
 /// The instruction input operand queue
+#[derive(Debug)]
 pub struct OperandQueue
 {
 	/// Stack of operand queues for (nested) callers of the current function
@@ -408,6 +411,19 @@ impl OperandQueue
 			})
 			.unwrap_or(Operand::Val(Value::new_nar::<u8>(0)));
 		self.push_op_unreported(target_idx, op);
+	}
+
+	/// Moves all operands on `src_idx` queue to the back of the `dest_idx`
+	/// queue. If `src_idx`
+	pub fn reorder_ready(&mut self, dest_idx: usize)
+	{
+		while let Some(op) = self.ready.remove(0).map(|op| {
+			self.report.reorders += 1;
+			op
+		})
+		{
+			self.push_op_unreported(dest_idx, op);
+		}
 	}
 
 	/// Pushes the current operand queue onto the queue stack keeping the ready

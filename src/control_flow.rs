@@ -118,6 +118,9 @@ impl ControlFlow
 				{
 					let ret_addr = self.call_frame.ret_addr;
 					self.next_addr = ret_addr + 2;
+
+					// Inputs to retur
+
 					queue.pop_queue();
 					self.call_frame = self.call_stack.pop_back()?;
 					self.report.triggered_returns += 1;
