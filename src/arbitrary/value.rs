@@ -1,6 +1,57 @@
-use crate::data::{Value, ValueState, ValueType};
+use crate::value::{Scalar, Value, ValueType};
 use byteorder::{ByteOrder, LittleEndian};
 use quickcheck::{Arbitrary, Gen};
+
+impl Arbitrary for ValueType
+{
+	fn arbitrary(g: &mut Gen) -> Self
+	{
+		let signed = bool::arbitrary(g);
+		let scale = u8::arbitrary(g) % 4;
+
+		if signed
+		{
+			match scale
+			{
+				0 => Self::new::<i8>(),
+				1 => Self::new::<i16>(),
+				2 => Self::new::<i32>(),
+				3 => Self::new::<i64>(),
+				_ => unreachable!(),
+			}
+		}
+		else
+		{
+			match scale
+			{
+				0 => Self::new::<u8>(),
+				1 => Self::new::<u16>(),
+				2 => Self::new::<u32>(),
+				3 => Self::new::<u64>(),
+				_ => unreachable!(),
+			}
+		}
+	}
+
+	fn shrink(&self) -> Box<dyn Iterator<Item = Self>>
+	{
+		match self
+		{
+			Self::Uint(v) if *v != 0 => Box::new(std::iter::once(Self::Uint(v / 2))),
+			Self::Int(v) =>
+			{
+				let mut result = Vec::new();
+				result.push(Self::Uint(*v));
+				if *v != 0
+				{
+					result.push(Self::Int(*v / 2));
+				}
+				Box::new(result.into_iter())
+			},
+			_ => Box::new(std::iter::empty()),
+		}
+	}
+}
 
 impl Arbitrary for Value
 {
@@ -47,7 +98,7 @@ impl Arbitrary for Value
 
 		match self.iter().next().unwrap()
 		{
-			ValueState::Val(bytes) =>
+			Scalar::Val(bytes) =>
 			{
 				if bytes.iter().all(|b| *b == 0)
 				{
@@ -62,25 +113,12 @@ impl Arbitrary for Value
 						{
 							match pow2_size
 							{
-								0 => result.extend((bytes[0] as i8).shrink().map(|x| x.into())),
-								1 =>
-								{
-									result.extend(
-										LittleEndian::read_i16(&bytes).shrink().map(|x| x.into()),
-									)
-								},
-								2 =>
-								{
-									result.extend(
-										LittleEndian::read_i32(&bytes).shrink().map(|x| x.into()),
-									)
-								},
-								3 =>
-								{
-									result.extend(
-										LittleEndian::read_i64(&bytes).shrink().map(|x| x.into()),
-									)
-								},
+								// Shrinkers for signed ints are bugged, so shrink manually
+								// See: https://github.com/BurntSushi/quickcheck/issues/295#issuecomment-895491930
+								0 => result.push(((bytes[0] as i8) / 2).into()),
+								1 => result.push((LittleEndian::read_i16(&bytes) / 2).into()),
+								2 => result.push((LittleEndian::read_i32(&bytes) / 2).into()),
+								3 => result.push((LittleEndian::read_i64(&bytes) / 2).into()),
 								_ => unreachable!(),
 							}
 						},
@@ -113,9 +151,19 @@ impl Arbitrary for Value
 					}
 				}
 			},
-			ValueState::Nan | ValueState::Nar(_) => (),
+			nan_or_nar =>
+			{
+				// Shrink type
+				result.extend(self.value_type().shrink().map(|new_typ| {
+					match nan_or_nar
+					{
+						Scalar::Nan => Value::new_nan_typed(new_typ),
+						Scalar::Nar(x) => Value::new_nar_typed(new_typ, *x),
+						_ => unreachable!(),
+					}
+				}));
+			},
 		}
-
 		Box::new(result.into_iter())
 	}
 }

@@ -1,212 +1,17 @@
-use crate::memory::{MemError, Memory};
+use crate::{
+	memory::{MemError, Memory},
+	value::Value,
+	CallFrameState, ExecState, OperandState, ValueType,
+};
 use num_traits::PrimInt;
 use std::{
-	cell::{RefCell, RefMut},
-	collections::VecDeque,
-	iter::FromIterator,
+	cell::{Ref, RefCell},
+	collections::{HashMap, VecDeque},
+	fmt::Debug,
+	iter::{once, FromIterator},
+	ops::Deref,
 	rc::Rc,
 };
-
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub enum ValueType
-{
-	/// Unsigned integer with power of 2 bytes
-	Uint(u8),
-
-	/// Signed integer with power of 2 bytes
-	Int(u8),
-}
-
-impl ValueType
-{
-	fn new_typed<N: PrimInt>() -> Self
-	{
-		let size = std::mem::size_of::<N>();
-		assert!(size <= u8::MAX as usize);
-		assert_eq!(size.count_ones(), 1);
-		let pow2_size = size.trailing_zeros();
-		if N::min_value() < N::zero()
-		{
-			ValueType::Int(pow2_size as u8)
-		}
-		else
-		{
-			ValueType::Uint(pow2_size as u8)
-		}
-	}
-}
-
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub enum ValueState
-{
-	/// Value with given data
-	Val(Box<[u8]>),
-
-	/// Not-A-Result: Signifies something went wrong.
-	///
-	/// Given is the address of the instruction that caused it.
-	Nar(usize),
-
-	/// Not-A-Number: Signifies the intentional lack of a value.
-	Nan,
-}
-
-impl ValueState
-{
-	pub fn set_val(&mut self, bytes: &[u8])
-	{
-		if let ValueState::Val(val) = self
-		{
-			assert_eq!(val.len(), bytes.len());
-			val.iter_mut().zip(bytes).for_each(|(v, b)| *v = *b);
-		}
-		else
-		{
-			*self = ValueState::Val(Vec::from(bytes).into_boxed_slice());
-		}
-	}
-}
-
-/// A piece of data.
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub struct Value
-{
-	/// Scalar type of the value
-	typ: ValueType,
-
-	/// Vector length
-	data: Box<[ValueState]>,
-}
-
-impl Value
-{
-	pub fn new(typ: ValueType) -> Self
-	{
-		Self {
-			typ,
-			data: Vec::from([]).into_boxed_slice(),
-		}
-	}
-
-	pub fn new_nan<N: PrimInt>() -> Self
-	{
-		let mut result: Value = N::zero().into();
-		result.data = Vec::from([ValueState::Nan]).into_boxed_slice();
-		result
-	}
-
-	pub fn new_nar<N: PrimInt>(payload: usize) -> Self
-	{
-		let mut result: Value = N::zero().into();
-		result.data = Vec::from([ValueState::Nar(payload)]).into_boxed_slice();
-		result
-	}
-
-	pub fn new_nan_typed(typ: ValueType) -> Self
-	{
-		let mut result = Value::new(typ);
-		result.data = Vec::from([ValueState::Nan]).into_boxed_slice();
-		result
-	}
-
-	pub fn new_nar_typed(typ: ValueType, payload: usize) -> Self
-	{
-		let mut result = Value::new(typ);
-		result.data = Vec::from([ValueState::Nar(payload)]).into_boxed_slice();
-		result
-	}
-
-	pub fn value_type(&self) -> ValueType
-	{
-		self.typ
-	}
-
-	/// Returns the number of bytes one scalar element if this value's type
-	/// takes up
-	pub fn scale(&self) -> usize
-	{
-		match self.typ
-		{
-			ValueType::Uint(x) | ValueType::Int(x) => 2usize.pow(x as u32),
-		}
-	}
-
-	/// Returns the vector length of this value
-	pub fn len(&self) -> usize
-	{
-		// Ensure array is multiple of data type size
-		assert_eq!(self.data.len() % self.scale(), 0);
-		self.data.len() / self.scale()
-	}
-
-	/// Returns the number of bytes this value takes up
-	pub fn size(&self) -> usize
-	{
-		self.data.len()
-	}
-
-	/// Returns the states of each element in the value
-	pub fn iter(&self) -> impl Iterator<Item = &ValueState>
-	{
-		self.data.iter()
-	}
-
-	/// Returns the mutable states of each element in the value.
-	///
-	/// The caller must ensure only valid changes are made.
-	pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut ValueState>
-	{
-		self.data.iter_mut()
-	}
-}
-
-impl<N: PrimInt> From<N> for Value
-{
-	fn from(num: N) -> Self
-	{
-		let le = num.to_le();
-		let bytes = unsafe {
-			std::slice::from_raw_parts(
-				std::mem::transmute::<&N, *const u8>(&le),
-				std::mem::size_of::<N>(),
-			)
-		};
-
-		let mut result = Self::new(ValueType::new_typed::<N>());
-		result.data = Vec::from([ValueState::Val(Box::from(bytes))]).into_boxed_slice();
-		result
-	}
-}
-
-/// An instruction operand
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub enum Operand
-{
-	/// A value ready to be used in instructions as is.
-	Val(Value),
-
-	/// A value that needs to be read from memory before first use.
-	///
-	/// If ok, value has been read and is ready for use.
-	/// If Err, the first element is the address to read from,
-	/// and the second is the number of scalars to read
-	Read(Rc<RefCell<Result<Value, (usize, usize, ValueType)>>>),
-}
-
-impl Operand
-{
-	fn is_non_ready_read(&self) -> bool
-	{
-		if let Operand::Read(op) = self
-		{
-			if let Err(_) = *(op.borrow())
-			{
-				return true;
-			}
-		}
-		false
-	}
-}
 
 #[derive(Debug)]
 struct ReportData
@@ -256,6 +61,124 @@ impl ReportData
 	}
 }
 
+/// An instruction operand.
+///
+/// Differs from values in that they may not actually be available yet or may be
+/// connected to other operands that use the same value.
+/// This can happen during a read from memory. Initially the read is issued but
+/// not yet needed. The operand may then be cloned e.g. by a duplicate
+/// instruction. The resulting operands are then connected, such that when one
+/// of them is consumed by an instruction, e.g. an add, the memory
+/// read is actually performed and all connected operands now used the read
+/// value.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct Operand
+{
+	op: Rc<RefCell<OperandState<(usize, usize, ValueType)>>>,
+}
+impl Operand
+{
+	/// Constructs an operand that needs to read from the given address the
+	/// given amount of scalars of the given type.
+	pub fn read_typed(address: usize, len: usize, typ: ValueType) -> Self
+	{
+		Self {
+			op: Rc::new(OperandState::MustRead((address, len, typ)).into()),
+		}
+	}
+
+	/// Constructs an operand that needs to read from the given address the
+	/// given amount of scalars.
+	///
+	/// The type of the scalars is equivalent to the given type parameter.
+	pub fn read<N: PrimInt>(address: usize, len: usize) -> Self
+	{
+		Self::read_typed(address, len, ValueType::new::<N>())
+	}
+
+	/// If this operand must still read its value from memory returns
+	/// the address, number of scalars to read, and their type.
+	///
+	/// Otherwise return `None`.
+	pub fn must_read(&self) -> Option<(usize, usize, ValueType)>
+	{
+		if let OperandState::MustRead((addr, len, typ)) = *(*self.op).borrow()
+		{
+			Some((addr, len, typ))
+		}
+		else
+		{
+			None
+		}
+	}
+
+	/// Returns a reference to this operands value if available.
+	///
+	/// Otherwise, calls the given function with the address, number of scalars,
+	/// and type to read from memory. The function performs the read and returns
+	/// the resulting value, which is saved in the operand and a reference to it
+	/// returned. If the function fails, the error is returned.
+	pub(crate) fn get_value_or<E, F: FnOnce(usize, usize, ValueType) -> Result<Value, E>>(
+		&mut self,
+		f: F,
+	) -> Result<impl '_ + Deref<Target = Value>, E>
+	{
+		match *(*self.op).borrow()
+		{
+			OperandState::MustRead((addr, len, typ)) =>
+			{
+				let new_value = f(addr, len, typ)?;
+				*(*self.op).borrow_mut() = OperandState::Ready(new_value)
+			},
+			_ => (),
+		}
+		if let Some(v) = self.get_value()
+		{
+			Ok(v)
+		}
+		else
+		{
+			unreachable!()
+		}
+	}
+
+	/// Returns a reference to this operands value if available.
+	pub fn get_value(&self) -> Option<impl '_ + Deref<Target = Value>>
+	{
+		if let OperandState::Ready(_) = *(*self.op).borrow()
+		{
+			Some(Ref::map((*self.op).borrow(), |b| {
+				match b
+				{
+					OperandState::Ready(v) => v,
+					_ => unreachable!(),
+				}
+			}))
+		}
+		else
+		{
+			None
+		}
+	}
+
+	/// Sets the operand's value.
+	///
+	/// Any operand connected to this one will also see the set value.
+	pub fn set_value(&mut self, v: Value)
+	{
+		*(*self.op).borrow_mut() = OperandState::Ready(v);
+	}
+}
+impl From<Value> for Operand
+{
+	fn from(v: Value) -> Self
+	{
+		Self {
+			op: Rc::new(OperandState::Ready(v).into()),
+		}
+	}
+}
+
 /// The instruction input operand queue
 #[derive(Debug)]
 pub struct OperandQueue
@@ -271,7 +194,6 @@ pub struct OperandQueue
 
 	report: ReportData,
 }
-
 impl OperandQueue
 {
 	pub fn new(ready_ops: impl Iterator<Item = Value>) -> Self
@@ -279,7 +201,7 @@ impl OperandQueue
 		Self {
 			stack: VecDeque::new(),
 			queue: VecDeque::new(),
-			ready: VecDeque::from_iter(ready_ops.map(|v| Operand::Val(v))),
+			ready: VecDeque::from_iter(ready_ops.map(|v| v.into())),
 			report: ReportData::new(),
 		}
 	}
@@ -309,30 +231,16 @@ impl OperandQueue
 
 			fn next(&mut self) -> Option<Self::Item>
 			{
-				self.queue.ready.pop_front().and_then(|op| {
+				self.queue.ready.pop_front().and_then(|mut op| {
 					let mut err = None;
-					let val = match op
-					{
-						Operand::Val(v) => v,
-						Operand::Read(op) =>
-						{
-							RefMut::map((*op).borrow_mut(), |op| {
-								match op
-								{
-									Ok(v) => v,
-									Err((addr, len, typ)) =>
-									{
-										let mut v = Value::new(*typ);
-										err = self.mem.read_data(*addr, &mut v, *len).err();
-										*op = Ok(v);
-										op.as_mut().ok().unwrap()
-									},
-								}
-							})
-							.clone()
-						},
-					};
-
+					let val = op
+						.get_value_or::<(), _>(|addr, len, typ| {
+							let mut v = Value::new_nar_typed(typ, 0);
+							err = self.mem.read_data(addr, &mut v, len).err();
+							Ok(v)
+						})
+						.unwrap()
+						.clone();
 					self.queue.report.ready_consumed += 1;
 					self.queue.report.ready_consumed_bytes += val.size();
 					Some((val, err))
@@ -345,7 +253,7 @@ impl OperandQueue
 			{
 				self.queue.report.discarded_non_ready_reads +=
 					self.queue.ready.iter().fold(0, |mut acc, op| {
-						if op.is_non_ready_read()
+						if op.must_read().is_some()
 						{
 							acc += 1;
 						}
@@ -371,30 +279,14 @@ impl OperandQueue
 	}
 
 	/// Pushes the given operand to the back of the queue at the given index.
-	pub fn push_op(&mut self, idx: usize, op: Operand)
+	pub fn push_operand(&mut self, idx: usize, op: Operand)
 	{
 		self.report.added += 1;
-		if let Operand::Val(v) = &op
+		if let Some(v) = op.get_value()
 		{
 			self.report.added_bytes += v.size()
 		}
 		self.push_op_unreported(idx, op);
-	}
-
-	/// Pushes the given value to the back of the queue at the given index.
-	pub fn push_val(&mut self, idx: usize, v: Value)
-	{
-		self.push_op(idx, Operand::Val(v));
-	}
-
-	/// Pushes the given read type from the given address onto the queue at the
-	/// given idx
-	pub fn push_read(&mut self, idx: usize, addr: usize, typ: ValueType, len: usize)
-	{
-		self.push_op(
-			idx,
-			Operand::Read(Rc::new(RefCell::new(Err((addr, len, typ))))),
-		);
 	}
 
 	/// Moves the operand found on the queue with index `src_q_idx`, position
@@ -409,7 +301,7 @@ impl OperandQueue
 				self.report.reorders += 1;
 				op
 			})
-			.unwrap_or(Operand::Val(Value::new_nar::<u8>(0)));
+			.unwrap_or(Value::new_nar::<u8>(0).into());
 		self.push_op_unreported(target_idx, op);
 	}
 
@@ -446,12 +338,131 @@ impl OperandQueue
 				.iter()
 				.flat_map(|qs| qs.iter())
 				.fold(0, |mut acc, op| {
-					if op.is_non_ready_read()
+					if op.must_read().is_some()
 					{
 						acc += 1;
 					}
 					acc
 				});
 		self.queue = self.stack.pop_back().unwrap_or(VecDeque::new());
+	}
+
+	pub fn set_frame_state(&self, idx: usize, to_set: &mut CallFrameState)
+	{
+		let from = if idx == 0
+		{
+			Some(&self.ready).into_iter().chain(self.queue.iter())
+		}
+		else
+		{
+			None.into_iter().chain(self.stack.get(idx - 1).unwrap())
+		};
+		let mut reads = Vec::new();
+		let mut op_queues = HashMap::new();
+
+		let mut convert_queue = |q: &VecDeque<Operand>| {
+			let mut all_ops = q
+				.iter()
+				.map(|op| {
+					match (*op.op).borrow().deref()
+					{
+						OperandState::MustRead(_) =>
+						{
+							OperandState::MustRead(
+								if let Some((idx, _)) = reads
+									.iter()
+									.enumerate()
+									.find(|(_, read_op)| Rc::ptr_eq(read_op, &op.op))
+								{
+									idx
+								}
+								else
+								{
+									reads.push(op.op.clone());
+									reads.len() - 1
+								},
+							)
+						},
+						OperandState::Ready(v) => OperandState::Ready(v.clone()),
+					}
+				})
+				.collect::<Vec<_>>();
+			(all_ops.remove(0), all_ops)
+		};
+		from.enumerate().for_each(|(idx, q)| {
+			if q.len() > 0
+			{
+				op_queues.insert(idx, convert_queue(q));
+			}
+		});
+
+		to_set.op_queues = op_queues;
+		to_set.reads = reads
+			.iter()
+			.map(|op| {
+				if let OperandState::MustRead(addr_len_typ) = (*op).borrow().deref()
+				{
+					*addr_len_typ
+				}
+				else
+				{
+					unreachable!()
+				}
+			})
+			.collect();
+	}
+
+	pub fn set_all_frame_states<'a>(&self, to_set: impl Iterator<Item = &'a mut CallFrameState>)
+	{
+		to_set
+			.enumerate()
+			.for_each(|(idx, frame)| self.set_frame_state(idx, frame));
+	}
+}
+/// Constructs an OperandQueue equivalent to an execution state
+impl<'a> From<&'a ExecState> for OperandQueue
+{
+	fn from(state: &'a ExecState) -> Self
+	{
+		let frame_op_queues = |frame: &CallFrameState| {
+			let reads: Vec<_> = frame
+				.reads
+				.clone()
+				.into_iter()
+				.map(|(addr, len, typ)| Operand::read_typed(addr, len, typ))
+				.collect();
+			frame
+				.op_queues
+				.iter()
+				.fold(VecDeque::new(), |mut queues, (q_idx, (f, q))| {
+					let ops = once(f).chain(q.iter()).cloned().map(|op| {
+						match op
+						{
+							OperandState::MustRead(idx) => reads[idx].clone(),
+							OperandState::Ready(v) => v.clone().into(),
+						}
+					});
+					if queues.len() <= *q_idx
+					{
+						queues.resize_with(*q_idx + 1, VecDeque::new);
+					}
+					queues.get_mut(*q_idx).unwrap().extend(ops);
+					queues
+				})
+		};
+		let mut curr_frame_op_queues = frame_op_queues(&state.frame);
+		let first_queue = curr_frame_op_queues.pop_front().unwrap_or(VecDeque::new());
+		Self {
+			stack: state.frame_stack.clone().into_iter().fold(
+				VecDeque::new(),
+				|mut stack, frame| {
+					stack.push_back(frame_op_queues(&frame));
+					stack
+				},
+			),
+			queue: curr_frame_op_queues,
+			ready: first_queue,
+			report: ReportData::new(),
+		}
 	}
 }

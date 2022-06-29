@@ -1,7 +1,8 @@
-use crate::data::{Value, ValueState};
+use crate::value::{Scalar, Value};
 use bitvec::vec::BitVec;
 
 /// The memory report data
+#[derive(Debug)]
 struct ReportData
 {
 	/// The number of instruction bytes that were requested
@@ -48,6 +49,7 @@ pub enum MemError
 	InvalidAddr,
 }
 
+#[derive(Debug)]
 struct MemBlock
 {
 	data: Vec<u8>,
@@ -165,6 +167,7 @@ impl MemBlock
 	}
 }
 
+#[derive(Debug)]
 pub struct Memory
 {
 	/// Offsets + memory blocks
@@ -232,7 +235,7 @@ impl Memory
 					{
 						found_uninit = Some(addr);
 					}
-					*val = ValueState::Nar(0);
+					*val = Scalar::Nar(0);
 				});
 		}
 		found_uninit.map_or(Ok(()), |addr| Err((MemError::Uninitialized, addr)))
@@ -270,7 +273,7 @@ impl Memory
 		for (idx, val) in from.iter().enumerate()
 		{
 			let element_addr = (addr - *offset) + (idx * from.scale());
-			if let ValueState::Val(bytes) = val
+			if let Scalar::Val(bytes) = val
 			{
 				mem.write(element_addr, bytes.as_ref())?;
 				self.mem_report.data_write += from.size();
@@ -279,7 +282,7 @@ impl Memory
 					self.mem_report.unaligned_write += from.len();
 				}
 			}
-			else if let ValueState::Nar(_) = val
+			else if let Scalar::Nar(_) = val
 			{
 				return Err((MemError::NarWrite, element_addr));
 			}

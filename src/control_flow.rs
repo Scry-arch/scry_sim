@@ -1,13 +1,7 @@
-use crate::data::OperandQueue;
+use crate::{data::OperandQueue, CallFrameState, ControlFlowType, ExecState};
 use std::collections::{HashMap, VecDeque};
 
-enum ControlFlowType
-{
-	Branch(usize),
-	Call(usize),
-	Return,
-}
-
+#[derive(Debug)]
 struct CallFrame
 {
 	/// Where execution should continue after a return instruction
@@ -22,19 +16,36 @@ struct CallFrame
 		ControlFlowType,
 	>,
 }
+impl CallFrame
+{
+	pub fn set_state(&self, to_set: &mut CallFrameState)
+	{
+		to_set.ret_addr = self.ret_addr;
+		to_set.branches = self.branches.clone();
+	}
+}
+impl<'a> From<&'a CallFrameState> for CallFrame
+{
+	fn from(state: &'a CallFrameState) -> Self
+	{
+		Self {
+			ret_addr: state.ret_addr,
+			branches: state.branches.clone(),
+		}
+	}
+}
 
 /// Controls the execution of the program.
+#[derive(Debug)]
 pub struct ControlFlow
 {
-	/// Previously returned address + 2.
-	/// If no control flow is issued, then this is the next address to be
-	/// returned. If not, the control flow decides the next address to be
-	/// issued.
-	next_addr: usize,
+	/// Next instruction to be executed
+	pub next_addr: usize,
 	call_frame: CallFrame,
 	call_stack: VecDeque<CallFrame>,
 	report: ReportData,
 }
+#[derive(Debug)]
 struct ReportData
 {
 	issued_branches: usize,
@@ -74,58 +85,54 @@ impl ControlFlow
 		}
 	}
 
-	/// Returns the address of the next instruction to execute.
+	/// Computes the address of the next instruction to execute
 	///
-	/// The given queue is suitably updated if a call or return is triggered
-	/// before the returned address.
+	/// The given queue is suitably updated if a call or return is triggered.
 	///
-	/// If the call stack is empty after a return is triggered, None is
-	/// returned.
-	pub fn next_addr(&mut self, queue: &mut OperandQueue) -> Option<usize>
+	/// If the call stack is empty after a return is triggered, false is
+	/// returned. Otherwise true
+	pub fn next_addr(&mut self, queue: &mut OperandQueue) -> bool
 	{
-		if let Some(cft) = self
-			.call_frame
-			.branches
-			.remove(&self.next_addr.saturating_sub(2))
+		if let Some(cft) = self.call_frame.branches.remove(&self.next_addr)
 		{
 			use ControlFlowType::*;
 			match cft
 			{
 				Branch(tar) =>
 				{
-					self.next_addr = tar + 2;
+					self.next_addr = tar;
 					self.report.triggered_branches += 1;
-					Some(tar)
 				},
 				Call(tar) =>
 				{
 					let old_next = self.next_addr;
-					self.next_addr = tar + 2;
+					self.next_addr = tar;
 					queue.push_queue();
 					let old_frame = std::mem::replace(
 						&mut self.call_frame,
 						CallFrame {
-							ret_addr: old_next,
+							ret_addr: old_next + 2,
 							branches: HashMap::new(),
 						},
 					);
 					self.call_stack.push_back(old_frame);
 					self.report.triggered_calls += 1;
-					println!("Trigger call: {},{},{}", old_next, self.next_addr, tar);
-					Some(tar)
 				},
 				Return =>
 				{
 					let ret_addr = self.call_frame.ret_addr;
-					self.next_addr = ret_addr + 2;
-
-					// Inputs to retur
+					self.next_addr = ret_addr;
 
 					queue.pop_queue();
-					self.call_frame = self.call_stack.pop_back()?;
+					self.call_frame = if let Some(s) = self.call_stack.pop_back()
+					{
+						s
+					}
+					else
+					{
+						return false;
+					};
 					self.report.triggered_returns += 1;
-					println!("Trigger ret: {},{},{}", ret_addr, self.next_addr, ret_addr);
-					Some(ret_addr)
 				},
 			}
 		}
@@ -133,8 +140,8 @@ impl ControlFlow
 		{
 			// No flow change
 			self.next_addr += 2;
-			Some(self.next_addr - 2)
 		}
+		true
 	}
 
 	/// Issue a branch to trigger at the given location targeting the given
@@ -164,5 +171,53 @@ impl ControlFlow
 			.branches
 			.insert(location_addr, ControlFlowType::Return);
 		self.report.issued_returns += 1;
+	}
+
+	/// Sets the given call frame states' return address and pending control
+	/// flow to the equivalent of the current control flow.
+	///
+	/// The given list is assumed to be in order, where the 0'th element is the
+	/// current call frame.
+	pub fn set_frame_state(&self, to_set: &mut Vec<CallFrameState>)
+	{
+		let set_idx = |vec: &mut Vec<_>, idx, frame: &CallFrame| {
+			if vec.len() == idx
+			{
+				vec.push(Default::default());
+			}
+			assert!(vec.len() > idx);
+			if let Some(state) = vec.get_mut(idx)
+			{
+				frame.set_state(state);
+			}
+			else
+			{
+				unreachable!()
+			}
+		};
+		set_idx(to_set, 0, &self.call_frame);
+		self.call_stack
+			.iter()
+			.enumerate()
+			.for_each(|(i, f)| set_idx(to_set, i + 1, f));
+	}
+}
+/// Constructions a ControlFlow equivalent to an execution state
+impl<'a> From<&'a ExecState> for ControlFlow
+{
+	fn from(state: &'a ExecState) -> Self
+	{
+		Self {
+			next_addr: state.address,
+			call_frame: (&state.frame).into(),
+			call_stack: state.frame_stack.clone().into_iter().fold(
+				VecDeque::new(),
+				|mut stack, frame| {
+					stack.push_back((&frame).into());
+					stack
+				},
+			),
+			report: ReportData::new(),
+		}
 	}
 }

@@ -1,8 +1,12 @@
+mod executor;
+
 use scryasm::{Assemble, Raw};
 use scryer::{
-	data::Value,
 	execution::{ExecResult, Executor},
+	memory::Memory,
+	ExecState, Value,
 };
+
 #[macro_use(quickcheck)]
 extern crate quickcheck_macros;
 
@@ -16,12 +20,12 @@ fn test_raw_program<'a, I: Iterator<Item = &'a str> + Clone>(
 ) -> Result<(), String>
 {
 	let object = Raw::assemble(asm).unwrap();
-	let mem = scryer::memory::Memory::new(object, 0);
+	let mem = Memory::new(object, 0);
 	let mut exec = Executor::new(0, mem, inputs.into_iter());
 	let count = 0;
 	while count <= max_execs
 	{
-		match exec.execute()
+		match exec.step()
 		{
 			ExecResult::Ok(x) => exec = x,
 			ExecResult::Done(result) =>
