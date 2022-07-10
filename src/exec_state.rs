@@ -1,5 +1,5 @@
 use crate::{Value, ValueType};
-use std::{collections::HashMap, fmt::Debug};
+use std::{collections::HashMap, fmt::Debug, iter::once};
 
 /// An instruction operand.
 ///
@@ -64,6 +64,122 @@ pub struct CallFrameState
 	/// Third is the type of scalars to read.
 	pub reads: Vec<(usize, usize, ValueType)>,
 }
+impl CallFrameState
+{
+	/// Returns the number of times the given index is referenced by a MustRead
+	/// operand in the given map
+	pub(crate) fn count_read_refs(&self, idx: usize) -> usize
+	{
+		self.op_queues.iter().fold(0, |c, (_, (f, q))| {
+			once(f).chain(q.iter()).fold(c, |mut c, op| {
+				if let OperandState::MustRead(read_idx) = op
+				{
+					if *read_idx == idx
+					{
+						c += 1;
+					}
+				}
+				c
+			})
+		})
+	}
+
+	/// Returns whether this call frame is valid.
+	///
+	/// It is invalid if:
+	/// * A MustRead operand references a read index that doesn't exist.
+	/// * A read is not references by any MustRead operand.
+	/// * Return address is not 2-byte aligned
+	/// * Any control flow trigger address is not 2-byte aligned
+	/// * Any control flow target address is not 2-byte aligned
+	/// * Any operand queue has more than supported number of operands (4)
+	pub fn valid(&self) -> bool
+	{
+		let unreferenced = (0..self.reads.len()).any(|idx| self.count_read_refs(idx) == 0);
+
+		let wrong_ref = self.op_queues.iter().any(|(_, (op1, op_rest))| {
+			for op in once(op1).chain(op_rest.iter())
+			{
+				match op
+				{
+					OperandState::MustRead(idx) =>
+					{
+						if *idx >= self.reads.len()
+						{
+							return true;
+						}
+					},
+					_ => (),
+				}
+			}
+			false
+		});
+
+		let ret_addr_aligned = self.ret_addr % 2 == 0;
+
+		let ctrl_unaligned = self.branches.iter().any(|(trig, ctrl)| {
+			trig % 2 != 0
+				|| match ctrl
+				{
+					ControlFlowType::Call(targ) | ControlFlowType::Branch(targ) => targ % 2 != 0,
+					_ => false,
+				}
+		});
+
+		let too_many_operands = self
+			.op_queues
+			.iter()
+			.any(|(_, (_, op_rest))| (op_rest.len()) > 3);
+
+		!unreferenced && !wrong_ref && ret_addr_aligned && !ctrl_unaligned && !too_many_operands
+	}
+
+	/// Remove the read with the given index if there is no references to it
+	/// from MustRead operands. Returns whether any reads were removed.
+	fn remove_read_if_unused(&mut self, idx: usize) -> bool
+	{
+		// Remove read with given index, if no operand references it
+		if self.count_read_refs(idx) == 0
+		{
+			// Remove read
+			self.reads.remove(idx);
+			// Correct any references to higher-indexed reads
+			self.op_queues.iter_mut().for_each(|(_, (f, q))| {
+				once(f).chain(q.iter_mut()).for_each(|op| {
+					if let OperandState::MustRead(read_idx) = op
+					{
+						if *read_idx > idx
+						{
+							*read_idx -= 1;
+						}
+					}
+				})
+			});
+			true
+		}
+		else
+		{
+			false
+		}
+	}
+
+	/// Removes any reads that have no MustRead operands referencing them
+	pub fn clean_reads(&mut self)
+	{
+		'outer: loop
+		{
+			for idx in 0..self.reads.len()
+			{
+				if self.remove_read_if_unused(idx)
+				{
+					continue 'outer;
+				}
+			}
+			// All reads have references
+			break;
+		}
+	}
+}
 impl Default for CallFrameState
 {
 	fn default() -> Self
@@ -97,4 +213,28 @@ pub struct ExecState
 	/// The first frame is of the current function's caller, the next is the
 	/// caller of the caller and so on. May be empty.
 	pub frame_stack: Vec<CallFrameState>,
+}
+impl ExecState
+{
+	/// Whether this state is valid.
+	///
+	/// It is invalid if:
+	/// * Any call frame is invalid
+	/// * Next address is not 2-byte aligned
+	pub fn valid(&self) -> bool
+	{
+		once(&self.frame)
+			.chain(self.frame_stack.iter())
+			.all(CallFrameState::valid)
+			&& (self.address % 2 == 0)
+	}
+
+	/// Goes through all pending reads and ensures that they are referenced by
+	/// an operand. Any read not referenced is removed.
+	pub fn clean_reads(&mut self)
+	{
+		once(&mut self.frame)
+			.chain(self.frame_stack.iter_mut())
+			.for_each(CallFrameState::clean_reads);
+	}
 }

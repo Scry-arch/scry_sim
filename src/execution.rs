@@ -3,9 +3,11 @@ use crate::{
 };
 use byteorder::ByteOrder;
 use scry_isa::{CallVariant, Instruction};
+use std::fmt::Debug;
 
 /// The result of performing one execution step
-pub enum ExecResult<I: Iterator<Item = Value>>
+#[derive(Debug)]
+pub enum ExecResult<I: Iterator<Item = Value> + Debug>
 {
 	/// The executor performed the step successfully
 	Ok(Executor),
@@ -72,14 +74,15 @@ impl Executor
 	/// An execution step starts by executing an instruction and then checks
 	/// whether any control flow is triggered. If so, the control flow is then
 	/// executed before the step ends.
-	pub fn step(mut self) -> ExecResult<impl Iterator<Item = Value>>
+	pub fn step(mut self) -> ExecResult<impl Iterator<Item = Value> + Debug>
 	{
 		let raw_instr = self.memory.read_instr(self.control.next_addr).unwrap();
 		let instr = Instruction::decode(byteorder::LittleEndian::read_u16(&raw_instr));
 		{
+			use Instruction::*;
 			match instr
 			{
-				Instruction::Call(CallVariant::Ret, offset) =>
+				Call(CallVariant::Ret, offset) =>
 				{
 					assert_eq!(offset.value(), 0);
 					self.control
@@ -87,10 +90,15 @@ impl Executor
 					// Discard everything in the ready queue
 					let _ = self.operands.ready_iter(&mut self.memory);
 				},
-				Instruction::EchoLong(offset) =>
+				EchoLong(offset) =>
 				{
 					self.operands.reorder_ready(offset.value() as usize);
 					// Discard (now empty) ready queue
+					let _ = self.operands.ready_iter(&mut self.memory);
+				},
+				Nop =>
+				{
+					// Discard ready queue
 					let _ = self.operands.ready_iter(&mut self.memory);
 				},
 				_ => todo!(),

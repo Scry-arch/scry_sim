@@ -1,10 +1,11 @@
 mod executor;
+mod misc;
 
 use scryasm::{Assemble, Raw};
 use scryer::{
 	execution::{ExecResult, Executor},
 	memory::Memory,
-	ExecState, Value,
+	Value,
 };
 
 #[macro_use(quickcheck)]

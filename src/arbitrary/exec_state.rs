@@ -51,14 +51,44 @@ impl<N: PrimInt + AddAssign + Debug + Unsigned + Arbitrary> Arbitrary for SmallI
 	}
 }
 
+/// An address that is guaranteed to be 2-byte aligned
+#[derive(Debug, Clone, Copy)]
+pub struct InstrAddr(pub usize);
+
+impl Arbitrary for InstrAddr
+{
+	fn arbitrary(g: &mut Gen) -> Self
+	{
+		let mut addr = Arbitrary::arbitrary(g);
+		// Ensure is 2-byte aligned
+		if addr % 2 != 0
+		{
+			addr -= 1;
+		}
+		Self(addr)
+	}
+
+	fn shrink(&self) -> Box<dyn Iterator<Item = Self>>
+	{
+		Box::new(self.0.shrink().map(|mut addr| {
+			// Ensure is 2-byte aligned
+			if addr % 2 != 0
+			{
+				addr -= 1;
+			}
+			Self(addr)
+		}))
+	}
+}
+
 impl Arbitrary for ControlFlowType
 {
 	fn arbitrary(g: &mut Gen) -> Self
 	{
 		match u8::arbitrary(g) % 100
 		{
-			0..=39 => Self::Branch(Arbitrary::arbitrary(g)),
-			40..=79 => Self::Call(Arbitrary::arbitrary(g)),
+			0..=39 => Self::Branch(InstrAddr::arbitrary(g).0),
+			40..=79 => Self::Call(InstrAddr::arbitrary(g).0),
 			_ => Self::Return,
 		}
 	}
@@ -67,8 +97,8 @@ impl Arbitrary for ControlFlowType
 	{
 		match self
 		{
-			Self::Branch(t) => Box::new(t.shrink().map(|v| Self::Branch(v))),
-			Self::Call(t) => Box::new(t.shrink().map(|v| Self::Call(v))),
+			Self::Branch(t) => Box::new(InstrAddr(*t).shrink().map(|v| Self::Branch(v.0))),
+			Self::Call(t) => Box::new(InstrAddr(*t).shrink().map(|v| Self::Call(v.0))),
 			Self::Return => Box::new(std::iter::empty()),
 		}
 	}
@@ -78,8 +108,8 @@ impl Arbitrary for CallFrameState
 {
 	fn arbitrary(g: &mut Gen) -> Self
 	{
-		let ret_addr: usize = Arbitrary::arbitrary(g);
-		let branches: HashMap<usize, ControlFlowType> = Arbitrary::arbitrary(g);
+		let ret_addr: usize = InstrAddr::arbitrary(g).0;
+		let branches: Vec<(InstrAddr, ControlFlowType)> = Arbitrary::arbitrary(g);
 
 		let mut op_queues = HashMap::new();
 		let mut reads = Vec::new();
@@ -126,7 +156,10 @@ impl Arbitrary for CallFrameState
 
 		Self {
 			ret_addr,
-			branches,
+			branches: branches
+				.into_iter()
+				.map(|(trig, ctrl)| (trig.0, ctrl))
+				.collect(),
 			op_queues,
 			reads,
 		}
@@ -137,7 +170,7 @@ impl Arbitrary for CallFrameState
 		enum ShrinkState
 		{
 			Start,
-			BranchLoc(usize),
+			BranchTrig(usize),
 			BranchTyp(usize),
 			BranchRem(usize, VecDeque<usize>),
 			Operand(VecDeque<usize>, usize),
@@ -171,25 +204,25 @@ impl Arbitrary for CallFrameState
 						Start => {
 							// Shrink return address
 							let clone = self.original.clone();
-							self.other = Box::new(self.original.ret_addr.shrink().map(move|ret| {
+							self.other = Box::new(InstrAddr(self.original.ret_addr).shrink().map(move|ret| {
 								let mut clone = clone.clone();
-								clone.ret_addr = ret;
+								clone.ret_addr = ret.0;
 								clone
 							}));
-							self.state = BranchLoc(0);
+							self.state = BranchTrig(0);
 							self.next()
 						}
-						BranchLoc(idx) => {
-							// Shrink branch location
+						BranchTrig(idx) => {
+							// Shrink branch trigger address
 							if let Some((addr, _)) = self.original.branches.iter().nth(*idx) {
 
 								let clone = self.original.clone();
 								let addr = *addr;
 								self.other = Box::new(
-									addr.shrink().map(move|new_addr| {
+									InstrAddr(addr).shrink().map(move|new_addr| {
 										let mut clone = clone.clone();
 										let typ = clone.branches.remove(&addr).unwrap();
-										clone.branches.insert(new_addr, typ);
+										clone.branches.insert(new_addr.0, typ);
 										clone
 									})
 								);
@@ -200,7 +233,7 @@ impl Arbitrary for CallFrameState
 							self.next()
 						}
 						BranchTyp(idx) => {
-							// Shrink branch location
+							// Shrink branch type
 							let (addr, typ) = self.original.branches.iter().nth(*idx).unwrap();
 
 							let clone = self.original.clone();
@@ -224,42 +257,11 @@ impl Arbitrary for CallFrameState
 								clone.branches.remove(&addr).unwrap();
 								Some(clone)
 							} else {
-								self.state = BranchLoc(*idx +1);
+								self.state = BranchTrig(*idx +1);
 								self.next()
 							}
 						}
 						Operand(q_idxs,op_idx) => {
-							let count_refs = |idx, from: &HashMap<usize, (OperandState<usize>, Vec<OperandState<usize>>)>|
-								from.iter().fold(0, |c, (_, (f, q))| {
-									once(f).chain(q.iter()).fold(c, |mut c, op| {
-										if let OperandState::MustRead(read_idx) = op
-										{
-											if *read_idx == idx {
-												c += 1;
-											}
-										}
-										c
-									})
-								});
-							let remove_read_if_unused = |rem_idx, rem_from: &mut CallFrameState| {
-								// Remove read with given index, if no operand references it
-								if count_refs(rem_idx, &rem_from.op_queues) == 0{
-									// Remove read
-									rem_from.reads.remove(rem_idx);
-									// Correct any references to higher-indexed reads
-									rem_from.op_queues.iter_mut().for_each(|(_, (f,q))| {
-										once(f).chain(q.iter_mut()).for_each(|op| {
-											if let OperandState::MustRead(read_idx) = op
-											{
-												if *read_idx > rem_idx
-												{
-													*read_idx -= 1;
-												}
-											}
-										})
-									});
-								}
-							};
 							if let Some(q_idx) = q_idxs.front() {
 								// Reduce the index of queues where possible
 								let q_clone = if *q_idx>0 && !self.original.op_queues.contains_key(&(q_idx-1)) {
@@ -276,20 +278,17 @@ impl Arbitrary for CallFrameState
 									// Remove operand
 									let mut rem_clone = self.original.clone();
 									let (op_first, op_rest) = rem_clone.op_queues.get_mut(q_idx).unwrap();
-									let removed = if *op_idx == 0 {
+									if *op_idx == 0 {
 										if op_rest.len() > 0{
-											std::mem::replace(op_first, op_rest.remove(0))
+											*op_first = op_rest.remove(0);
 										} else {
 											// Only one operand in queue, remove whole queue
-											rem_clone.op_queues.remove(q_idx).unwrap().0
+											rem_clone.op_queues.remove(q_idx).unwrap().0;
 										}
 									} else {
-										op_rest.remove(*op_idx-1)
-									};
-
-									if let OperandState::MustRead(idx) = removed {
-										remove_read_if_unused(idx, &mut rem_clone);
+										op_rest.remove(*op_idx-1);
 									}
+									rem_clone.clean_reads();
 
 									match op {
 										OperandState::Ready(v) => {
@@ -311,7 +310,7 @@ impl Arbitrary for CallFrameState
 										}
 										OperandState::MustRead(read_idx) => {
 											// Disconnect from other MustReads by cloning the read and referencing it instead
-											let clone1 = if count_refs(*read_idx, &self.original.op_queues) > 1 {
+											let clone1 = if self.original.count_read_refs(*read_idx) > 1 {
 												let mut clone = self.original.clone();
 												let (first, rest) = clone
 													.op_queues
@@ -335,7 +334,7 @@ impl Arbitrary for CallFrameState
 											*once(first).chain(rest.iter_mut())
 												.nth(*op_idx)
 												.unwrap() = OperandState::Ready(Value::new_nan::<u8>());
-											remove_read_if_unused(*read_idx, &mut clone2);
+											clone2.clean_reads();
 
 											self.other = Box::new([rem_clone, clone2].into_iter().chain(clone1.into_iter()).chain(q_clone.into_iter()));
 										}
@@ -405,8 +404,11 @@ impl Arbitrary for ExecState
 		{
 			stack.push(Arbitrary::arbitrary(g));
 		}
+
 		Self {
-			address: Arbitrary::arbitrary(g),
+			// Ensure that the address may be increased by 2 (after executing an instructino)
+			// without causing overflow
+			address: InstrAddr::arbitrary(g).0 % (usize::MAX - 3),
 			frame: Arbitrary::arbitrary(g),
 			frame_stack: stack,
 		}
@@ -447,5 +449,37 @@ impl Arbitrary for ExecState
 		}
 
 		Box::new(result.into_iter())
+	}
+}
+
+/// Use to generate an ExecState that is guaranteed to not have control flow
+/// that will trigger right after the next instruction.
+#[derive(Clone, Debug)]
+pub struct NoCFExecState(pub ExecState);
+
+impl Arbitrary for NoCFExecState
+{
+	fn arbitrary(g: &mut Gen) -> Self
+	{
+		let mut state = ExecState::arbitrary(g);
+
+		// Remove any control flow that would trigger after next instructions
+		let _ = state.frame.branches.remove(&state.address);
+
+		Self(state)
+	}
+
+	fn shrink(&self) -> Box<dyn Iterator<Item = Self>>
+	{
+		Box::new(self.0.shrink().filter_map(|state| {
+			if state.frame.branches.contains_key(&state.address)
+			{
+				None
+			}
+			else
+			{
+				Some(Self(state))
+			}
+		}))
 	}
 }
