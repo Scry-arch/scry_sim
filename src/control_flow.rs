@@ -1,4 +1,6 @@
-use crate::{data::OperandQueue, CallFrameState, ControlFlowType, ExecState};
+use crate::{
+	data::OperandQueue, metrics::MetricTracker, CallFrameState, ControlFlowType, ExecState, Metric,
+};
 use std::collections::{HashMap, VecDeque};
 
 #[derive(Debug)]
@@ -43,31 +45,6 @@ pub struct ControlFlow
 	pub next_addr: usize,
 	call_frame: CallFrame,
 	call_stack: VecDeque<CallFrame>,
-	report: ReportData,
-}
-#[derive(Debug)]
-struct ReportData
-{
-	issued_branches: usize,
-	issued_calls: usize,
-	issued_returns: usize,
-	triggered_branches: usize,
-	triggered_calls: usize,
-	triggered_returns: usize,
-}
-impl ReportData
-{
-	fn new() -> Self
-	{
-		Self {
-			issued_branches: 0,
-			issued_calls: 0,
-			issued_returns: 0,
-			triggered_branches: 0,
-			triggered_calls: 0,
-			triggered_returns: 0,
-		}
-	}
 }
 
 impl ControlFlow
@@ -81,7 +58,6 @@ impl ControlFlow
 				branches: HashMap::new(),
 			},
 			call_stack: VecDeque::new(),
-			report: ReportData::new(),
 		}
 	}
 
@@ -91,7 +67,8 @@ impl ControlFlow
 	///
 	/// If the call stack is empty after a return is triggered, false is
 	/// returned. Otherwise true
-	pub fn next_addr(&mut self, queue: &mut OperandQueue) -> bool
+	pub fn next_addr(&mut self, queue: &mut OperandQueue, tracker: &mut impl MetricTracker)
+		-> bool
 	{
 		if let Some(cft) = self.call_frame.branches.remove(&self.next_addr)
 		{
@@ -101,7 +78,7 @@ impl ControlFlow
 				Branch(tar) =>
 				{
 					self.next_addr = tar;
-					self.report.triggered_branches += 1;
+					tracker.add_stat(Metric::TriggeredBranches, 1);
 				},
 				Call(tar) =>
 				{
@@ -116,14 +93,14 @@ impl ControlFlow
 						},
 					);
 					self.call_stack.push_back(old_frame);
-					self.report.triggered_calls += 1;
+					tracker.add_stat(Metric::TriggeredCalls, 1);
 				},
 				Return =>
 				{
 					let ret_addr = self.call_frame.ret_addr;
 					self.next_addr = ret_addr;
 
-					queue.pop_queue();
+					queue.pop_queue(tracker);
 					self.call_frame = if let Some(s) = self.call_stack.pop_back()
 					{
 						s
@@ -132,7 +109,7 @@ impl ControlFlow
 					{
 						return false;
 					};
-					self.report.triggered_returns += 1;
+					tracker.add_stat(Metric::TriggeredReturns, 1);
 				},
 			}
 		}
@@ -146,31 +123,41 @@ impl ControlFlow
 
 	/// Issue a branch to trigger at the given location targeting the given
 	/// address.
-	pub fn branch(&mut self, location_addr: usize, target_addr: usize)
+	pub fn branch(
+		&mut self,
+		location_addr: usize,
+		target_addr: usize,
+		tracker: &mut impl MetricTracker,
+	)
 	{
 		self.call_frame
 			.branches
 			.insert(location_addr, ControlFlowType::Branch(target_addr));
-		self.report.issued_branches += 1;
+		tracker.add_stat(Metric::IssuedBranches, 1);
 	}
 
 	/// Issue a branch to trigger at the given location targeting the given
 	/// address.
-	pub fn call(&mut self, location_addr: usize, target_addr: usize)
+	pub fn call(
+		&mut self,
+		location_addr: usize,
+		target_addr: usize,
+		tracker: &mut impl MetricTracker,
+	)
 	{
 		self.call_frame
 			.branches
 			.insert(location_addr, ControlFlowType::Call(target_addr));
-		self.report.issued_calls += 1;
+		tracker.add_stat(Metric::IssuedCalls, 1);
 	}
 
 	/// Issue a return to trigger at the given location
-	pub fn ret(&mut self, location_addr: usize)
+	pub fn ret(&mut self, location_addr: usize, tracker: &mut impl MetricTracker)
 	{
 		self.call_frame
 			.branches
 			.insert(location_addr, ControlFlowType::Return);
-		self.report.issued_returns += 1;
+		tracker.add_stat(Metric::IssuedReturns, 1);
 	}
 
 	/// Sets the given call frame states' return address and pending control
@@ -217,7 +204,6 @@ impl<'a> From<&'a ExecState> for ControlFlow
 					stack
 				},
 			),
-			report: ReportData::new(),
 		}
 	}
 }

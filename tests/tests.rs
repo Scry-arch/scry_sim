@@ -26,7 +26,7 @@ fn test_raw_program<'a, I: Iterator<Item = &'a str> + Clone>(
 	let count = 0;
 	while count <= max_execs
 	{
-		match exec.step()
+		match exec.step(&mut ())
 		{
 			ExecResult::Ok(x) => exec = x,
 			ExecResult::Done(result) =>

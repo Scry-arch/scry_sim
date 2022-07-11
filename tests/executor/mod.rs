@@ -5,8 +5,9 @@ use scryer::{
 	arbitrary::NoCFExecState,
 	execution::{ExecResult, Executor},
 	memory::Memory,
-	ExecState,
+	ExecState, Metric, OperandState, TrackReport,
 };
+use std::iter::once;
 
 mod control_flow;
 
@@ -22,13 +23,13 @@ fn import_export_executor(state: ExecState, mem: Vec<u8>, base_addr: usize) -> b
 }
 
 #[quickcheck]
-fn nop_discards_input(NoCFExecState(state): NoCFExecState) -> TestResult
+fn instruction_nop(NoCFExecState(state): NoCFExecState) -> TestResult
 {
 	let mut nop_encoded = [0; 2];
 	LittleEndian::write_u16(&mut nop_encoded, Instruction::Nop.encode());
 	let exec = Executor::from_state(&state, Memory::new(nop_encoded.into(), state.address));
-
-	match exec.step()
+	let mut metrics = TrackReport::new();
+	match exec.step(&mut metrics)
 	{
 		ExecResult::Ok(exec) =>
 		{
@@ -36,7 +37,7 @@ fn nop_discards_input(NoCFExecState(state): NoCFExecState) -> TestResult
 			expected_state.address += 2;
 			let mut new_op_q = state.frame.op_queues.clone();
 			// Discard ready-queue if present
-			let _ = new_op_q.remove(&0);
+			let discarded = new_op_q.remove(&0);
 			// Reduce all queue indexes by 1
 			expected_state.frame.op_queues = new_op_q
 				.into_iter()
@@ -51,7 +52,42 @@ fn nop_discards_input(NoCFExecState(state): NoCFExecState) -> TestResult
 			}
 			else
 			{
-				TestResult::from_bool(true)
+				// Calculate expected discard metrics
+				let (disc_val, disc_bytes, disc_reads) =
+					discarded.map_or((0, 0, 0), |(op1, op_rest)| {
+						once(&op1)
+							.chain(op_rest.iter())
+							.fold((0, 0, 0), |mut acc, op| {
+								match op
+								{
+									OperandState::Ready(v) =>
+									{
+										acc.0 += 1;
+										acc.1 += v.size();
+									},
+									_ => acc.2 += 1,
+								}
+								acc
+							})
+					});
+
+				// Check metrics
+				let expected_mets: TrackReport = [
+					(Metric::DiscardedValues, disc_val),
+					(Metric::DiscardedValuesBytes, disc_bytes),
+					(Metric::DiscardedReads, disc_reads),
+					(Metric::InstructionReads, 1),
+				]
+				.into();
+
+				if metrics != expected_mets
+				{
+					TestResult::error(format!("{:?} != {:?}", metrics, expected_mets))
+				}
+				else
+				{
+					TestResult::from_bool(true)
+				}
 			}
 		},
 		err => TestResult::error(format!("Unexpected: {:?}", err)),

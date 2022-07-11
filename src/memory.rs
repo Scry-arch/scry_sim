@@ -1,39 +1,8 @@
-use crate::value::{Scalar, Value};
+use crate::{
+	value::{Scalar, Value},
+	Metric, MetricTracker,
+};
 use bitvec::vec::BitVec;
-
-/// The memory report data
-#[derive(Debug)]
-struct ReportData
-{
-	/// The number of instruction bytes that were requested
-	/// divided by 2.
-	instr_read: usize,
-
-	// The number of data bytes requested
-	data_read: usize,
-
-	// The number of data written
-	data_write: usize,
-
-	// The number of data requests that weren't aligned to the native word size
-	unaligned_read: usize,
-
-	// The number of writes that weren't aligned to the native word size
-	unaligned_write: usize,
-}
-impl ReportData
-{
-	fn new() -> Self
-	{
-		Self {
-			instr_read: 0,
-			data_read: 0,
-			data_write: 0,
-			unaligned_read: 0,
-			unaligned_write: 0,
-		}
-	}
-}
 
 #[derive(Debug)]
 pub enum MemError
@@ -99,6 +68,7 @@ impl From<Vec<u8>> for MemBlock
 impl MemBlock
 {
 	/// Appends the given blocks memory at the end of this block's.
+	#[allow(dead_code)]
 	fn append<T>(&mut self, other: T)
 	where
 		MemBlock: From<T>,
@@ -111,7 +81,7 @@ impl MemBlock
 	/// Size of memory block in bytes
 	fn size(&self) -> usize
 	{
-		assert!(self.data.len() == self.initialized.len());
+		assert_eq!(self.data.len(), self.initialized.len());
 		self.data.len()
 	}
 
@@ -173,7 +143,6 @@ pub struct Memory
 	/// Offsets + memory blocks
 	/// Sorted by offset, biggest to smallest
 	blocks: Vec<(usize, MemBlock)>,
-	mem_report: ReportData,
 }
 
 impl Memory
@@ -183,7 +152,6 @@ impl Memory
 	{
 		Self {
 			blocks: vec![(offset, mem.into())],
-			mem_report: ReportData::new(),
 		}
 	}
 
@@ -208,7 +176,8 @@ impl Memory
 		&mut self,
 		addr: usize,
 		into: &mut Value,
-		len: usize,
+		_len: usize,
+		tracker: &mut impl MetricTracker,
 	) -> Result<(), (MemError, usize)>
 	{
 		let mut found_uninit = None;
@@ -222,10 +191,10 @@ impl Memory
 					Ok(())
 				})
 				.and_then(|_| {
-					self.mem_report.data_read += size;
+					tracker.add_stat(Metric::DataBytesRead, size);
 					if addr % scale != 0
 					{
-						self.mem_report.unaligned_read += len;
+						tracker.add_stat(Metric::UnalignedReads, 1);
 					}
 					Ok(())
 				})
@@ -244,7 +213,11 @@ impl Memory
 	/// Read 2 bytes from the given address into the slice.
 	///
 	/// Updates the report as an instruction read.
-	pub fn read_instr(&mut self, addr: usize) -> Result<[u8; 2], MemError>
+	pub fn read_instr(
+		&mut self,
+		addr: usize,
+		tracker: &mut impl MetricTracker,
+	) -> Result<[u8; 2], MemError>
 	{
 		if addr % 2 != 0
 		{
@@ -255,14 +228,19 @@ impl Memory
 			self.read_no_report(addr, 2)
 				.and_then(|bytes| Ok([bytes[0], bytes[1]]))
 				.and_then(|bytes| {
-					self.mem_report.instr_read += 1;
+					tracker.add_stat(Metric::InstructionReads, 1);
 					Ok(bytes)
 				})
 				.or_else(|err| Err(err.0))
 		}
 	}
 
-	pub fn write(&mut self, addr: usize, from: &Value) -> Result<(), (MemError, usize)>
+	pub fn write(
+		&mut self,
+		addr: usize,
+		from: &Value,
+		tracker: &mut impl MetricTracker,
+	) -> Result<(), (MemError, usize)>
 	{
 		let (offset, mem) = self
 			.blocks
@@ -276,10 +254,10 @@ impl Memory
 			if let Scalar::Val(bytes) = val
 			{
 				mem.write(element_addr, bytes.as_ref())?;
-				self.mem_report.data_write += from.size();
+				tracker.add_stat(Metric::DataBytesWritten, from.size());
 				if addr % from.scale() != 0
 				{
-					self.mem_report.unaligned_write += from.len();
+					tracker.add_stat(Metric::DataBytesWritten, 1);
 				}
 			}
 			else if let Scalar::Nar(_) = val

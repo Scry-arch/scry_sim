@@ -1,5 +1,6 @@
 use crate::{
 	control_flow::ControlFlow, data::OperandQueue, memory::Memory, value::Value, ExecState,
+	MetricTracker,
 };
 use byteorder::ByteOrder;
 use scry_isa::{CallVariant, Instruction};
@@ -74,9 +75,17 @@ impl Executor
 	/// An execution step starts by executing an instruction and then checks
 	/// whether any control flow is triggered. If so, the control flow is then
 	/// executed before the step ends.
-	pub fn step(mut self) -> ExecResult<impl Iterator<Item = Value> + Debug>
+	///
+	/// Updated the given metric tracker accordingly.
+	pub fn step(
+		mut self,
+		tracker: &mut impl MetricTracker,
+	) -> ExecResult<impl Iterator<Item = Value> + Debug>
 	{
-		let raw_instr = self.memory.read_instr(self.control.next_addr).unwrap();
+		let raw_instr = self
+			.memory
+			.read_instr(self.control.next_addr, tracker)
+			.unwrap();
 		let instr = Instruction::decode(byteorder::LittleEndian::read_u16(&raw_instr));
 		{
 			use Instruction::*;
@@ -85,26 +94,29 @@ impl Executor
 				Call(CallVariant::Ret, offset) =>
 				{
 					assert_eq!(offset.value(), 0);
-					self.control
-						.ret(self.control.next_addr + ((offset.value() * 2) as usize));
+					self.control.ret(
+						self.control.next_addr + ((offset.value() * 2) as usize),
+						tracker,
+					);
 					// Discard everything in the ready queue
-					let _ = self.operands.ready_iter(&mut self.memory);
+					let _ = self.operands.ready_iter(&mut self.memory, tracker);
 				},
 				EchoLong(offset) =>
 				{
-					self.operands.reorder_ready(offset.value() as usize);
+					self.operands
+						.reorder_ready(offset.value() as usize, tracker);
 					// Discard (now empty) ready queue
-					let _ = self.operands.ready_iter(&mut self.memory);
+					let _ = self.operands.ready_iter(&mut self.memory, tracker);
 				},
 				Nop =>
 				{
 					// Discard ready queue
-					let _ = self.operands.ready_iter(&mut self.memory);
+					let _ = self.operands.ready_iter(&mut self.memory, tracker);
 				},
 				_ => todo!(),
 			}
 		}
-		if self.control.next_addr(&mut self.operands)
+		if self.control.next_addr(&mut self.operands, tracker)
 		{
 			ExecResult::Ok(self)
 		}
@@ -112,7 +124,7 @@ impl Executor
 		{
 			ExecResult::Done(
 				self.operands
-					.ready_iter(&mut self.memory)
+					.ready_iter(&mut self.memory, tracker)
 					.map(|(v, err)| {
 						assert!(err.is_none());
 						v

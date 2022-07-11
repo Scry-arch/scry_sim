@@ -1,7 +1,7 @@
 use crate::{
 	memory::{MemError, Memory},
 	value::Value,
-	CallFrameState, ExecState, OperandState, ValueType,
+	CallFrameState, ExecState, Metric, MetricTracker, OperandState, ValueType,
 };
 use num_traits::PrimInt;
 use std::{
@@ -12,54 +12,6 @@ use std::{
 	ops::Deref,
 	rc::Rc,
 };
-
-#[derive(Debug)]
-struct ReportData
-{
-	/// How many operands at the head of the queue were consumed.
-	ready_consumed: usize,
-
-	/// The number of bytes consumed at the head of the queue
-	ready_consumed_bytes: usize,
-
-	/// Number of operands added to queue anywhere
-	added: usize,
-
-	/// Amount of bytes added to the queue anywhere.
-	///
-	/// This counts only complete values added and not any read operands.
-	added_bytes: usize,
-
-	/// Amount of bytes read by read operands.
-	///
-	/// Read operands that are duplicated only count once.
-	/// Any read operands that are discarded before their first consumption
-	/// don't increase this count (the duplicates instead count in
-	/// 'ready_consumed_bytes').
-	added_read_bytes: usize,
-
-	/// How many pending reads that were discarded
-	discarded_non_ready_reads: usize,
-
-	/// How many times a value already on the queue has been moved to a
-	/// different position in the queue
-	reorders: usize,
-}
-impl ReportData
-{
-	fn new() -> Self
-	{
-		Self {
-			ready_consumed: 0,
-			ready_consumed_bytes: 0,
-			added: 0,
-			added_bytes: 0,
-			discarded_non_ready_reads: 0,
-			added_read_bytes: 0,
-			reorders: 0,
-		}
-	}
-}
 
 /// An instruction operand.
 ///
@@ -191,8 +143,6 @@ pub struct OperandQueue
 
 	/// The operands that should be used by the next instruction
 	ready: VecDeque<Operand>,
-
-	report: ReportData,
 }
 impl OperandQueue
 {
@@ -202,7 +152,6 @@ impl OperandQueue
 			stack: VecDeque::new(),
 			queue: VecDeque::new(),
 			ready: VecDeque::from_iter(ready_ops.map(|v| v.into())),
-			report: ReportData::new(),
 		}
 	}
 
@@ -215,17 +164,19 @@ impl OperandQueue
 	/// When the iterator is dropped, the queue discards the remaining operands
 	/// at the front of the queue, and moves the next set of operands to the
 	/// front.
-	pub fn ready_iter<'a>(
+	pub fn ready_iter<'a, T: MetricTracker>(
 		&'a mut self,
 		mem: &'a mut Memory,
+		tracker: &'a mut T,
 	) -> impl 'a + Iterator<Item = (Value, Option<(MemError, usize)>)>
 	{
-		struct RemoveIter<'b>
+		struct RemoveIter<'b, Ti: MetricTracker>
 		{
 			queue: &'b mut OperandQueue,
 			mem: &'b mut Memory,
+			tracker: &'b mut Ti,
 		}
-		impl<'b> Iterator for RemoveIter<'b>
+		impl<'b, Ti: MetricTracker> Iterator for RemoveIter<'b, Ti>
 		{
 			type Item = (Value, Option<(MemError, usize)>);
 
@@ -236,33 +187,47 @@ impl OperandQueue
 					let val = op
 						.get_value_or::<(), _>(|addr, len, typ| {
 							let mut v = Value::new_nar_typed(typ, 0);
-							err = self.mem.read_data(addr, &mut v, len).err();
+							err = self.mem.read_data(addr, &mut v, len, self.tracker).err();
 							Ok(v)
 						})
 						.unwrap()
 						.clone();
-					self.queue.report.ready_consumed += 1;
-					self.queue.report.ready_consumed_bytes += val.size();
+					self.tracker.add_stat(Metric::ConsumedOperands, 1);
+					self.tracker.add_stat(Metric::ConsumedBytes, val.size());
 					Some((val, err))
 				})
 			}
 		}
-		impl<'b> Drop for RemoveIter<'b>
+		impl<'b, Ti: MetricTracker> Drop for RemoveIter<'b, Ti>
 		{
 			fn drop(&mut self)
 			{
-				self.queue.report.discarded_non_ready_reads +=
-					self.queue.ready.iter().fold(0, |mut acc, op| {
+				let (disc_read, disc_val, disc_bytes) =
+					self.queue.ready.iter().fold((0, 0, 0), |mut acc, op| {
 						if op.must_read().is_some()
 						{
-							acc += 1;
+							acc.0 += 1;
+						}
+						else
+						{
+							let val = op.get_value().unwrap();
+							acc.1 += 1;
+							acc.2 += val.size();
 						}
 						acc
 					});
+				self.tracker.add_stat(Metric::DiscardedReads, disc_read);
+				self.tracker.add_stat(Metric::DiscardedValues, disc_val);
+				self.tracker
+					.add_stat(Metric::DiscardedValuesBytes, disc_bytes);
 				self.queue.ready = self.queue.queue.pop_front().unwrap_or(VecDeque::new());
 			}
 		}
-		RemoveIter { queue: self, mem }
+		RemoveIter {
+			queue: self,
+			mem,
+			tracker,
+		}
 	}
 
 	/// Pushes the given operand to the back of the queue at the given index.
@@ -279,26 +244,36 @@ impl OperandQueue
 	}
 
 	/// Pushes the given operand to the back of the queue at the given index.
-	pub fn push_operand(&mut self, idx: usize, op: Operand)
+	pub fn push_operand(&mut self, idx: usize, op: Operand, tracker: &mut impl MetricTracker)
 	{
-		self.report.added += 1;
 		if let Some(v) = op.get_value()
 		{
-			self.report.added_bytes += v.size()
+			tracker.add_stat(Metric::QueuedValues, 1);
+			tracker.add_stat(Metric::QueuedValueBytes, v.size());
+		}
+		else
+		{
+			tracker.add_stat(Metric::QueuedReads, 1);
 		}
 		self.push_op_unreported(idx, op);
 	}
 
 	/// Moves the operand found on the queue with index `src_q_idx`, position
 	/// `src_idx` in that queue, to the back of the queue with idx 'target_idx'
-	pub fn reorder(&mut self, src_q_idx: usize, src_idx: usize, target_idx: usize)
+	pub fn reorder(
+		&mut self,
+		src_q_idx: usize,
+		src_idx: usize,
+		target_idx: usize,
+		tracker: &mut impl MetricTracker,
+	)
 	{
 		let op = self
 			.queue
 			.get_mut(src_q_idx)
 			.and_then(|q| q.remove(src_idx))
 			.map(|op| {
-				self.report.reorders += 1;
+				tracker.add_stat(Metric::ReorderedOperands, 1);
 				op
 			})
 			.unwrap_or(Value::new_nar::<u8>(0).into());
@@ -307,10 +282,10 @@ impl OperandQueue
 
 	/// Moves all operands on `src_idx` queue to the back of the `dest_idx`
 	/// queue. If `src_idx`
-	pub fn reorder_ready(&mut self, dest_idx: usize)
+	pub fn reorder_ready(&mut self, dest_idx: usize, tracker: &mut impl MetricTracker)
 	{
 		while let Some(op) = self.ready.remove(0).map(|op| {
-			self.report.reorders += 1;
+			tracker.add_stat(Metric::ReorderedOperands, 1);
 			op
 		})
 		{
@@ -331,9 +306,10 @@ impl OperandQueue
 	/// queue.
 	///
 	/// If the stack is empty, the current queue becomes empty.
-	pub fn pop_queue(&mut self)
+	pub fn pop_queue(&mut self, tracker: &mut impl MetricTracker)
 	{
-		self.report.discarded_non_ready_reads +=
+		tracker.add_stat(
+			Metric::DiscardedReads,
 			self.queue
 				.iter()
 				.flat_map(|qs| qs.iter())
@@ -343,7 +319,8 @@ impl OperandQueue
 						acc += 1;
 					}
 					acc
-				});
+				}),
+		);
 		self.queue = self.stack.pop_back().unwrap_or(VecDeque::new());
 	}
 
@@ -462,7 +439,6 @@ impl<'a> From<&'a ExecState> for OperandQueue
 			),
 			queue: curr_frame_op_queues,
 			ready: first_queue,
-			report: ReportData::new(),
 		}
 	}
 }
