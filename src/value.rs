@@ -1,4 +1,5 @@
 use num_traits::PrimInt;
+use std::iter::once;
 
 /// The type of a value
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -35,6 +36,15 @@ impl ValueType
 		else
 		{
 			ValueType::Uint(pow2_size as u8)
+		}
+	}
+
+	/// Returns the number of bytes one scalar element if this type takes up.
+	pub fn scale(&self) -> usize
+	{
+		match self
+		{
+			ValueType::Uint(x) | ValueType::Int(x) => 2usize.pow(*x as u32),
 		}
 	}
 }
@@ -75,6 +85,15 @@ impl Scalar
 		else
 		{
 			*self = Scalar::Val(Vec::from(bytes).into_boxed_slice());
+		}
+	}
+
+	pub fn bytes(&self) -> Option<&[u8]>
+	{
+		match self
+		{
+			Scalar::Val(bytes) => Some(bytes),
+			_ => None,
 		}
 	}
 }
@@ -145,6 +164,28 @@ impl Value
 		Self::singleton_typed(typ, Scalar::Nar(payload))
 	}
 
+	pub fn new_typed(typ: ValueType, first: Scalar, rest: Vec<Scalar>) -> Result<Self, ()>
+	{
+		if once(&first).chain(rest.iter()).all(|s| {
+			match s
+			{
+				Scalar::Val(bytes) => bytes.len() == typ.scale(),
+				_ => true,
+			}
+		})
+		{
+			Ok(Self {
+				typ,
+				first,
+				rest: rest.into_boxed_slice(),
+			})
+		}
+		else
+		{
+			Err(())
+		}
+	}
+
 	/// Returns the type of the value.
 	pub fn value_type(&self) -> ValueType
 	{
@@ -155,10 +196,7 @@ impl Value
 	/// takes up.
 	pub fn scale(&self) -> usize
 	{
-		match self.typ
-		{
-			ValueType::Uint(x) | ValueType::Int(x) => 2usize.pow(x as u32),
-		}
+		self.typ.scale()
 	}
 
 	/// Returns the vector length of this value, i.e. the number of scalars in

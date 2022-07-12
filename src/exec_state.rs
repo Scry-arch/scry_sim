@@ -23,6 +23,18 @@ pub enum OperandState<R>
 	MustRead(R),
 }
 
+impl<R> OperandState<R>
+{
+	pub fn extract_value(self) -> Value
+	{
+		match self
+		{
+			Self::Ready(v) => v,
+			Self::MustRead(_) => panic!("OperandState is not ready"),
+		}
+	}
+}
+
 /// Control flow types
 #[derive(Debug, Eq, PartialEq, Clone, Copy)]
 pub enum ControlFlowType
@@ -97,6 +109,8 @@ impl CallFrameState
 	{
 		let unreferenced = (0..self.reads.len()).any(|idx| self.count_read_refs(idx) == 0);
 
+		let read_nothing = self.reads.iter().any(|(_, len, _)| *len == 0);
+
 		let wrong_ref = self.op_queues.iter().any(|(_, (op1, op_rest))| {
 			for op in once(op1).chain(op_rest.iter())
 			{
@@ -131,7 +145,12 @@ impl CallFrameState
 			.iter()
 			.any(|(_, (_, op_rest))| (op_rest.len()) > 3);
 
-		!unreferenced && !wrong_ref && ret_addr_aligned && !ctrl_unaligned && !too_many_operands
+		!unreferenced
+			&& !wrong_ref
+			&& ret_addr_aligned
+			&& !ctrl_unaligned
+			&& !too_many_operands
+			&& !read_nothing
 	}
 
 	/// Remove the read with the given index if there is no references to it

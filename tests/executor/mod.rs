@@ -2,13 +2,14 @@ use byteorder::{ByteOrder, LittleEndian};
 use quickcheck::TestResult;
 use scry_isa::Instruction;
 use scryer::{
-	arbitrary::NoCFExecState,
+	arbitrary::NoCF,
 	execution::{ExecResult, Executor},
 	memory::Memory,
 	ExecState, Metric, OperandState, TrackReport,
 };
 use std::iter::once;
 
+mod alu_instructions;
 mod control_flow;
 
 /// Tests can convert from state to executor back to state without the state
@@ -23,7 +24,7 @@ fn import_export_executor(state: ExecState, mem: Vec<u8>, base_addr: usize) -> b
 }
 
 #[quickcheck]
-fn instruction_nop(NoCFExecState(state): NoCFExecState) -> TestResult
+fn instruction_nop(NoCF(state): NoCF<ExecState>) -> TestResult
 {
 	let mut nop_encoded = [0; 2];
 	LittleEndian::write_u16(&mut nop_encoded, Instruction::Nop.encode());

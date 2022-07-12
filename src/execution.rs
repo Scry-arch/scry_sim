@@ -1,9 +1,9 @@
 use crate::{
 	control_flow::ControlFlow, data::OperandQueue, memory::Memory, value::Value, ExecState,
-	MetricTracker,
+	MetricTracker, Scalar, ValueType,
 };
 use byteorder::ByteOrder;
-use scry_isa::{CallVariant, Instruction};
+use scry_isa::{AluVariant, CallVariant, Instruction};
 use std::fmt::Debug;
 
 /// The result of performing one execution step
@@ -112,6 +112,84 @@ impl Executor
 				{
 					// Discard ready queue
 					let _ = self.operands.ready_iter(&mut self.memory, tracker);
+				},
+				Alu(AluVariant::Add, offset) =>
+				{
+					let (typ, mut result_scalars) = {
+						// Extract operands
+						let mut ins = self.operands.ready_iter(&mut self.memory, tracker);
+						let in1 = ins.next().unwrap();
+						let typ = in1.0.value_type();
+						let in1 = in1.0.iter();
+						let in2 = ins.next().unwrap();
+						let in2 = in2.0.iter();
+
+						let mut result_scalars = Vec::new();
+						for (sc1, sc2) in in1.zip(in2)
+						{
+							let mut result_bytes = Vec::new();
+							let mut carry = false;
+
+							for (b1, b2) in
+								sc1.bytes().unwrap().iter().zip(sc2.bytes().unwrap().iter())
+							{
+								fn carrying_add(v1: u8, v2: u8, c: bool) -> (u8, bool)
+								{
+									let r = (v1 as u16) + (v2 as u16) + (c as u16);
+									let carry = r > u8::MAX as u16;
+									(r as u8, carry)
+								}
+								let (r, c) = carrying_add(*b1, *b2, carry);
+								result_bytes.push(r);
+								carry = c;
+							}
+
+							// If overflow, saturate
+							match (typ, carry)
+							{
+								(ValueType::Uint(_), true) =>
+								{
+									result_bytes.iter_mut().for_each(|b| *b = u8::MAX)
+								},
+								(ValueType::Int(_), _) =>
+								{
+									// If the input both have the same sign (both positive or both
+									// negative), then overflow occurs if and only if the result has
+									// the opposite sign.
+									// Source: https://www.doc.ic.ac.uk/~eedwards/compsys/arithmetic/index.html (2022-07-14)
+									let signed_1 =
+										sc1.bytes().unwrap().last().unwrap() & 0b10000000 != 0;
+									let signed_2 =
+										sc2.bytes().unwrap().last().unwrap() & 0b10000000 != 0;
+									let signed_result =
+										result_bytes.last().unwrap() & 0b10000000 != 0;
+
+									if signed_1 && signed_2 && !signed_result
+									{
+										// underflow, set to lowest negative
+										result_bytes.iter_mut().for_each(|b| *b = 0);
+										*result_bytes.last_mut().unwrap() = 0b10000000u8;
+									}
+									else if !signed_1 && !signed_2 && signed_result
+									{
+										// overflow, set to highest value
+										result_bytes.iter_mut().for_each(|b| *b = u8::MAX);
+										*result_bytes.last_mut().unwrap() = 0b01111111u8;
+									}
+								},
+								_ => (),
+							}
+							result_scalars.push(Scalar::Val(result_bytes.into_boxed_slice()));
+						}
+						(typ, result_scalars)
+					};
+					self.operands.push_operand(
+						offset.value as usize,
+						Value::new_typed(typ, result_scalars.remove(0), result_scalars)
+							.unwrap()
+							.into(),
+						tracker,
+					);
 				},
 				_ => todo!(),
 			}

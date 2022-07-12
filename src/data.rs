@@ -233,14 +233,22 @@ impl OperandQueue
 	/// Pushes the given operand to the back of the queue at the given index.
 	///
 	/// Doesn't update any report data
-	fn push_op_unreported(&mut self, idx: usize, op: Operand)
+	fn push_op_unreported(&mut self, mut idx: usize, op: Operand)
 	{
-		// Ensures the operand queue is long enough to include the given index.
-		if self.queue.len() <= idx
+		if idx == 0
 		{
-			self.queue.resize_with(idx + 1, || VecDeque::new());
+			self.ready.push_back(op);
 		}
-		self.queue[idx].push_back(op);
+		else
+		{
+			idx -= 1;
+			// Ensures the operand queue is long enough to include the given index.
+			if self.queue.len() <= idx
+			{
+				self.queue.resize_with(idx + 1, || VecDeque::new());
+			}
+			self.queue[idx].push_back(op);
+		}
 	}
 
 	/// Pushes the given operand to the back of the queue at the given index.

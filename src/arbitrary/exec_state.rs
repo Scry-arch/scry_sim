@@ -1,11 +1,11 @@
-use crate::{CallFrameState, ControlFlowType, ExecState, OperandState, Value};
-use duplicate::*;
+use crate::{CallFrameState, ControlFlowType, ExecState, OperandState, Scalar, Value, ValueType};
+use duplicate::{duplicate_item, *};
 use num_traits::{PrimInt, Unsigned};
 use quickcheck::{Arbitrary, Gen};
 use std::{
 	collections::{HashMap, VecDeque},
 	fmt::Debug,
-	iter::once,
+	iter::{empty, once},
 	ops::{Add, AddAssign, Div, Sub},
 };
 
@@ -104,6 +104,38 @@ impl Arbitrary for ControlFlowType
 	}
 }
 
+impl OperandState<usize>
+{
+	/// Generates an arbitrary operand state.
+	///
+	/// Any generated MustRead operand will either refer to a read in the given
+	/// list, or add a new read to the list which is then referenced
+	pub fn arbitrary(g: &mut Gen, reads: &mut Vec<(usize, usize, ValueType)>) -> Self
+	{
+		match u8::arbitrary(g) % 100
+		{
+			0..=79 => OperandState::Ready(Arbitrary::arbitrary(g)),
+			_ =>
+			{
+				match u8::arbitrary(g) % 100
+				{
+					0..=79 | _ if reads.len() == 0 =>
+					{
+						// New int not dependent on others
+						reads.push((
+							Arbitrary::arbitrary(g),
+							SmallInt::<usize>::arbitrary(g).0 + 1,
+							Arbitrary::arbitrary(g),
+						));
+						OperandState::MustRead(reads.len() - 1)
+					},
+					_ => OperandState::MustRead(usize::arbitrary(g) % reads.len()),
+				}
+			},
+		}
+	}
+}
+
 impl Arbitrary for CallFrameState
 {
 	fn arbitrary(g: &mut Gen) -> Self
@@ -123,32 +155,7 @@ impl Arbitrary for CallFrameState
 				let mut ops = Vec::new();
 				for _ in 0..op_count
 				{
-					match u8::arbitrary(g) % 100
-					{
-						0..=79 => ops.push(OperandState::Ready(Arbitrary::arbitrary(g))),
-						_ =>
-						{
-							match u8::arbitrary(g) % 100
-							{
-								0..=79 | _ if reads.len() == 0 =>
-								{
-									// New int not dependent on others
-									reads.push((
-										Arbitrary::arbitrary(g),
-										SmallInt::arbitrary(g).0,
-										Arbitrary::arbitrary(g),
-									));
-									ops.push(OperandState::MustRead(reads.len() - 1));
-								},
-								_ =>
-								{
-									ops.push(OperandState::MustRead(
-										usize::arbitrary(g) % reads.len(),
-									));
-								},
-							}
-						},
-					}
+					ops.push(OperandState::arbitrary(g, &mut reads));
 				}
 				op_queues.insert(i, (ops.remove(0), ops));
 			}
@@ -354,20 +361,22 @@ impl Arbitrary for CallFrameState
 							}
 						}
 						duplicate!{[
-								variant		tuple_idx	update_to;
-								[ReadsAddr]	[0]			[ReadsLen(*read_idx)];
-								[ReadsLen]	[1]			[ReadsTyp(*read_idx)];
-								[ReadsTyp]	[2]			[ReadsAddr(*read_idx+1)];
+								variant		tuple_idx	shrunk_filter 	update_to;
+								[ReadsAddr]	[0]			[|_|true]		[ReadsLen(*read_idx)];
+								[ReadsLen]	[1]			[|s|*s>0]		[ReadsTyp(*read_idx)];
+								[ReadsTyp]	[2]			[|_|true]		[ReadsAddr(*read_idx+1)];
 							]
 							variant(read_idx) => {
 								if let Some(read_tup) = self.original.reads.get(*read_idx) {
 									let clone = self.original.clone();
 									let read_idx2 = *read_idx;
-									let shrunks = read_tup.tuple_idx.shrink().map(move |shrunk| {
-										let mut clone = clone.clone();
-										clone.reads.get_mut(read_idx2).unwrap().tuple_idx = shrunk;
-										clone
-									});
+									let shrunks = read_tup.tuple_idx.shrink()
+										.filter(shrunk_filter)
+										.map(move |shrunk| {
+											let mut clone = clone.clone();
+											clone.reads.get_mut(read_idx2).unwrap().tuple_idx = shrunk;
+											clone
+										});
 									self.other = Box::new(shrunks);
 									self.state = update_to;
 									self.next()
@@ -418,6 +427,13 @@ impl Arbitrary for ExecState
 	{
 		let mut result = Vec::new();
 
+		// Shrink address
+		result.extend(InstrAddr(self.address).shrink().map(|new_addr| {
+			let mut clone = self.clone();
+			clone.address = new_addr.0;
+			clone
+		}));
+
 		// Shrink first frame
 		result.extend(self.frame.shrink().map(|new_frame| {
 			let mut clone = self.clone();
@@ -452,34 +468,435 @@ impl Arbitrary for ExecState
 	}
 }
 
-/// Use to generate an ExecState that is guaranteed to not have control flow
-/// that will trigger right after the next instruction.
-#[derive(Clone, Debug)]
-pub struct NoCFExecState(pub ExecState);
-
-impl Arbitrary for NoCFExecState
+/// Helper trait for types that can be used to generate arbitrary execution
+/// states.
+pub trait Restriction: Clone + Debug + AsMut<ExecState> + AsRef<ExecState> + 'static
 {
-	fn arbitrary(g: &mut Gen) -> Self
+	/// Each restriction takes an inner execution state that it restricts.
+	/// A raw ExecState is the base restriction (with no restriction)
+	type Inner: Restriction;
+
+	/// Checks whether the inner state uphold the restriction this type defines
+	fn restriction_holds(inner: &Self::Inner) -> bool;
+
+	/// Updates the given state to uphold the restriction.
+	fn conform(state: &mut Self::Inner, g: &mut Gen);
+
+	/// When shrinking the state, this method may add custom shrinking based on
+	/// this restriction.
+	///
+	/// By default, no custom shrinking is done.
+	fn add_shrink(_state: &Self::Inner) -> Box<dyn Iterator<Item = Self>>
 	{
-		let mut state = ExecState::arbitrary(g);
+		Box::new(empty())
+	}
+}
+impl Restriction for ExecState
+{
+	type Inner = Self;
 
-		// Remove any control flow that would trigger after next instructions
-		let _ = state.frame.branches.remove(&state.address);
-
-		Self(state)
+	fn restriction_holds(_: &Self::Inner) -> bool
+	{
+		true
 	}
 
-	fn shrink(&self) -> Box<dyn Iterator<Item = Self>>
+	fn conform(_: &mut Self::Inner, _: &mut Gen) {}
+}
+impl AsRef<Self> for ExecState
+{
+	fn as_ref(&self) -> &Self
 	{
-		Box::new(self.0.shrink().filter_map(|state| {
-			if state.frame.branches.contains_key(&state.address)
+		self
+	}
+}
+impl AsMut<Self> for ExecState
+{
+	fn as_mut(&mut self) -> &mut Self
+	{
+		self
+	}
+}
+
+/// Define "restriction" types used to generate arbitrary execution state with
+/// some restrictions, e.g. can't have any MustRead operands or must have some
+/// number of operands.
+///
+/// The structs defined here automatically get implemented the arbitrary trait,
+/// assuming the "Restriction" trait is implemented for them somewhere else.
+#[duplicate_item(
+	[
+		mod_name [no_cf]
+		name [NoCF]
+		desc [
+			"Use to generate arbitrary states that don't have a control flow trigger
+			after the next instruction"
+		]
+		extra_generics []
+		extra_generics_pass []
+	]
+	[
+		mod_name [no_reads]
+		name [NoReads]
+		desc [
+			"Use to generate arbitrary states without any MustRead operands going to the next
+			instruction"
+		]
+		extra_generics []
+		extra_generics_pass []
+	]
+	[
+		mod_name [limited_ops]
+		name [LimitedOps]
+		desc [
+			"Use to generate arbitrary states with upper/lower limits on operands going to \
+			the next instruction. Both limits are inclusive."
+		]
+		extra_generics [ const NEXT_OP_MIN: usize, const NEXT_OP_MAX: usize ]
+		extra_generics_pass [NEXT_OP_MIN, NEXT_OP_MAX]
+	]
+	[
+		mod_name [simple_ops]
+		name [SimpleOps]
+		desc [
+			"Use to generate arbitrary states whose operands going to the next instruction are simple:\n \
+			 * Have the same type \n \
+			 * Have the same len \n \
+			 * Not have any Nar or Nan\n "
+		]
+		extra_generics []
+		extra_generics_pass []
+	]
+)]
+mod mod_name
+{
+	use super::*;
+
+	#[doc = desc]
+	#[derive(Clone, Debug)]
+	pub struct name<T: Restriction, extra_generics>(pub T);
+	impl<T: Restriction, extra_generics> name<T, extra_generics_pass>
+	{
+		pub fn restrict(inner: T) -> Option<Self>
+		{
+			if Self::restriction_holds(&inner)
 			{
-				None
+				Some(Self(inner))
 			}
 			else
 			{
-				Some(Self(state))
+				None
 			}
+		}
+	}
+	impl<T: Restriction + Arbitrary, extra_generics> Arbitrary for name<T, extra_generics_pass>
+	{
+		fn arbitrary(g: &mut Gen) -> Self
+		{
+			let mut state: T = Arbitrary::arbitrary(g);
+
+			Self::conform(&mut state, g);
+
+			Self(state)
+		}
+
+		fn shrink(&self) -> Box<dyn Iterator<Item = Self>>
+		{
+			let filtered = self.0.shrink().filter_map(|state| {
+				// Remove any read operand for the next instruction
+				Self::restrict(state)
+			});
+			let extra_shrinks = Self::add_shrink(&self.0);
+			Box::new(filtered.chain(extra_shrinks))
+		}
+	}
+	impl<T: Restriction, extra_generics> AsRef<ExecState> for name<T, extra_generics_pass>
+	{
+		fn as_ref(&self) -> &ExecState
+		{
+			self.0.as_ref()
+		}
+	}
+	impl<T: Restriction, extra_generics> AsMut<ExecState> for name<T, extra_generics_pass>
+	{
+		fn as_mut(&mut self) -> &mut ExecState
+		{
+			self.0.as_mut()
+		}
+	}
+}
+pub use self::{limited_ops::*, no_cf::*, no_reads::*, simple_ops::*};
+
+impl<T: Restriction> Restriction for NoCF<T>
+{
+	type Inner = T;
+
+	fn restriction_holds(inner: &Self::Inner) -> bool
+	{
+		!inner
+			.as_ref()
+			.frame
+			.branches
+			.contains_key(&inner.as_ref().address)
+	}
+
+	fn conform(state: &mut Self::Inner, _: &mut Gen)
+	{
+		// Remove any control flow that would trigger after next instructions
+		let addr = state.as_ref().address;
+		let _ = state.as_mut().frame.branches.remove(&addr);
+	}
+}
+impl<T: Restriction> Restriction for NoReads<T>
+{
+	type Inner = T;
+
+	fn restriction_holds(inner: &Self::Inner) -> bool
+	{
+		!inner
+			.as_ref()
+			.frame
+			.op_queues
+			.get(&0)
+			.map_or(false, |(op1, op_rest)| {
+				once(op1).chain(op_rest.iter()).any(|op| {
+					match op
+					{
+						OperandState::MustRead(_) => true,
+						_ => false,
+					}
+				})
+			})
+	}
+
+	fn conform(state: &mut Self::Inner, g: &mut Gen)
+	{
+		// Convert any MustRead operand to simple value
+		if let Some((op1, op_rest)) = state.as_mut().frame.op_queues.get_mut(&0)
+		{
+			once(op1).chain(op_rest.iter_mut()).for_each(|op| {
+				if let OperandState::MustRead(_) = op
+				{
+					*op = OperandState::Ready(Arbitrary::arbitrary(g));
+				}
+			});
+		}
+		state.as_mut().clean_reads();
+	}
+}
+impl<T: Restriction, const NEXT_OP_MIN: usize, const NEXT_OP_MAX: usize> Restriction
+	for LimitedOps<T, NEXT_OP_MIN, NEXT_OP_MAX>
+{
+	type Inner = T;
+
+	fn restriction_holds(inner: &Self::Inner) -> bool
+	{
+		// Ensure number of operands is between the limits
+		let next_op_count = inner
+			.as_ref()
+			.frame
+			.op_queues
+			.get(&0)
+			.map_or(0, |(_, op_rest)| 1 + op_rest.len());
+		next_op_count >= NEXT_OP_MIN && next_op_count <= NEXT_OP_MAX
+	}
+
+	fn conform(state: &mut Self::Inner, g: &mut Gen)
+	{
+		let next_op_count = state
+			.as_ref()
+			.frame
+			.op_queues
+			.get(&0)
+			.map_or(0, |(_, op_rest)| 1 + op_rest.len());
+		// Ensure minimum is upheld
+		if next_op_count < NEXT_OP_MIN
+		{
+			let mut ops_to_add = NEXT_OP_MIN - next_op_count;
+			if NEXT_OP_MIN < NEXT_OP_MAX
+			{
+				ops_to_add += usize::arbitrary(g) % (NEXT_OP_MAX - NEXT_OP_MIN);
+			}
+			if ops_to_add > 0
+			{
+				if state.as_ref().frame.op_queues.get(&0).is_none()
+				{
+					let op1 = OperandState::arbitrary(g, &mut state.as_mut().frame.reads);
+					state.as_mut().frame.op_queues.insert(0, (op1, Vec::new()));
+					ops_to_add -= 1;
+				}
+				if ops_to_add > 0
+				{
+					for _ in 0..ops_to_add
+					{
+						let op = OperandState::arbitrary(g, &mut state.as_mut().frame.reads);
+						state
+							.as_mut()
+							.frame
+							.op_queues
+							.get_mut(&0)
+							.unwrap()
+							.1
+							.push(op);
+					}
+				}
+			}
+		}
+		else if next_op_count > NEXT_OP_MAX
+		{
+			if NEXT_OP_MAX == 0
+			{
+				state.as_mut().frame.op_queues.remove(&0).unwrap();
+			}
+			else
+			{
+				state
+					.as_mut()
+					.frame
+					.op_queues
+					.get_mut(&0)
+					.unwrap()
+					.1
+					.resize_with(NEXT_OP_MAX - 1, || unreachable!());
+			}
+		}
+		state.as_mut().clean_reads()
+	}
+}
+impl<T: Restriction> Restriction for SimpleOps<T>
+{
+	type Inner = T;
+
+	fn restriction_holds(inner: &Self::Inner) -> bool
+	{
+		if inner.as_ref().frame.op_queues.contains_key(&0)
+		{
+			let (op1, op_rest) = inner.as_ref().frame.op_queues.get(&0).unwrap();
+			let (len, typ) = match op1
+			{
+				OperandState::MustRead(idx) =>
+				{
+					(
+						inner.as_ref().frame.reads[*idx].1,
+						inner.as_ref().frame.reads[*idx].2,
+					)
+				},
+				OperandState::Ready(v) => (v.len(), v.value_type()),
+			};
+			once(op1).chain(op_rest.iter()).all(|op| {
+				match op
+				{
+					OperandState::MustRead(idx) =>
+					{
+						inner.as_ref().frame.reads[*idx].1 == len
+							&& inner.as_ref().frame.reads[*idx].2 == typ
+					},
+					OperandState::Ready(v) =>
+					{
+						v.len() == len
+							&& v.value_type() == typ && v.iter().all(|sc| sc.bytes().is_some())
+					},
+				}
+			})
+		}
+		else
+		{
+			true
+		}
+	}
+
+	fn conform(state: &mut Self::Inner, g: &mut Gen)
+	{
+		if state.as_ref().frame.op_queues.contains_key(&0)
+		{
+			let (len, typ) = match &state.as_ref().frame.op_queues.get(&0).unwrap().0
+			{
+				OperandState::MustRead(idx) =>
+				{
+					(
+						state.as_ref().frame.reads[*idx].1,
+						state.as_ref().frame.reads[*idx].2,
+					)
+				},
+				OperandState::Ready(v) => (v.len(), v.value_type()),
+			};
+			let frame = &mut state.as_mut().frame;
+			let (op1, op_rest) = frame.op_queues.get_mut(&0).unwrap();
+			// Convert all operands to the same type/length of the first
+			for op in once(op1).chain(op_rest.iter_mut())
+			{
+				match op
+				{
+					OperandState::MustRead(idx) =>
+					{
+						frame.reads[*idx].1 = len;
+						frame.reads[*idx].2 = typ;
+					},
+					OperandState::Ready(v) =>
+					{
+						let mut scalars = Vec::new();
+						for _ in 0..len
+						{
+							let mut bytes = Vec::new();
+							for _ in 0..typ.scale()
+							{
+								bytes.push(Arbitrary::arbitrary(g));
+							}
+							scalars.push(Scalar::Val(bytes.into_boxed_slice()));
+						}
+						*v = Value::new_typed(typ, scalars.remove(0), scalars).unwrap();
+					},
+				}
+			}
+		}
+		state.as_mut().clean_reads();
+	}
+
+	fn add_shrink(_state: &Self::Inner) -> Box<dyn Iterator<Item = Self>>
+	{
+		let typ = _state.as_ref().frame.op_queues.get(&0).map(|(op1, _)| {
+			match op1
+			{
+				OperandState::MustRead(idx) => _state.as_ref().frame.reads[*idx].2,
+				OperandState::Ready(v) => v.value_type(),
+			}
+		});
+		let self_clone = _state.clone();
+		Box::new(typ.into_iter().flat_map(move |typ| {
+			let self_clone = self_clone.clone();
+			typ.shrink().map(move |new_typ| {
+				let mut clone = self_clone.clone();
+				let clone_frame = &mut clone.as_mut().frame;
+				let (op1, op_rest) = clone_frame.op_queues.get_mut(&0).unwrap();
+				for op in once(op1).chain(op_rest.iter_mut())
+				{
+					match op
+					{
+						OperandState::MustRead(idx) => clone_frame.reads[*idx].2 = new_typ,
+						OperandState::Ready(v) =>
+						{
+							let mut new_scalars = Vec::with_capacity(new_typ.scale());
+							if new_typ.scale() < typ.scale()
+							{
+								for sc in v.iter()
+								{
+									let new_bytes: Vec<_> = sc.bytes().unwrap()[0..new_typ.scale()]
+										.iter()
+										.cloned()
+										.collect();
+									new_scalars.push(Scalar::Val(new_bytes.into_boxed_slice()));
+								}
+							}
+							else
+							{
+								new_scalars.extend(v.iter().cloned());
+							}
+							*v = Value::new_typed(new_typ, new_scalars.remove(0), new_scalars)
+								.unwrap();
+						},
+					}
+				}
+				Self(clone)
+			})
 		}))
 	}
 }

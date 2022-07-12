@@ -1,26 +1,17 @@
-use quickcheck::{Arbitrary, TestResult};
-use scryer::{
-	arbitrary::InstrAddr, CallFrameState, ControlFlowType, ExecState, OperandState, ValueType,
-};
+use quickcheck::TestResult;
+use scryer::{arbitrary::InstrAddr, CallFrameState, ControlFlowType, OperandState, ValueType};
 
 /// Tests that all arbitrarily generated call frames are valid
 #[quickcheck]
-fn arb_frame_is_valid(frame: CallFrameState) -> bool
+fn arb_valid(frame: CallFrameState) -> bool
 {
 	frame.valid()
-}
-
-/// Tests that all shrinkage of call frames are valid
-#[quickcheck]
-fn frame_shrinks_valid(frame: CallFrameState) -> bool
-{
-	frame.shrink().all(|f| f.valid())
 }
 
 /// Tests that any frame with the return address not 2-byte aligned is not
 /// consistent
 #[quickcheck]
-fn frame_unaligned_return(mut frame: CallFrameState) -> bool
+fn unaligned_return_invalid(mut frame: CallFrameState) -> bool
 {
 	// Assume address is already aligned, unalign it.
 	frame.ret_addr += 1;
@@ -29,7 +20,7 @@ fn frame_unaligned_return(mut frame: CallFrameState) -> bool
 
 /// Tests that any frame with the return address not 2-byte aligned is invalid
 #[quickcheck]
-fn frame_unaligned_control_trigger(
+fn unaligned_control_trigger_invalid(
 	mut frame: CallFrameState,
 	InstrAddr(trigger): InstrAddr,
 	typ: ControlFlowType,
@@ -43,7 +34,7 @@ fn frame_unaligned_control_trigger(
 /// Tests that any frame with the control flow target address not 2-byte aligned
 /// is invalid
 #[quickcheck]
-fn frame_unaligned_control_target(
+fn unaligned_control_target_invalid(
 	mut frame: CallFrameState,
 	InstrAddr(trigger): InstrAddr,
 	typ: ControlFlowType,
@@ -66,7 +57,7 @@ fn frame_unaligned_control_target(
 /// Tests that any frame with an operand referencing a non-existent read is
 /// invalid
 #[quickcheck]
-fn frame_reference_non_read(
+fn reference_non_read_invalid(
 	mut frame: CallFrameState,
 	q_idx: usize,
 	op_idx: usize,
@@ -108,7 +99,7 @@ fn frame_reference_non_read(
 /// Tests that any frame with reads that aren't referenced by a MustRead operand
 /// is invalid
 #[quickcheck]
-fn frame_read_without_ref(
+fn read_without_ref_invalid(
 	mut frame: CallFrameState,
 	read: (usize, usize, ValueType),
 	extra_reads: Vec<(usize, usize, ValueType)>,
@@ -124,7 +115,7 @@ fn frame_read_without_ref(
 /// Tests that any frame with an operand queue of more than 4 operands is
 /// invalid
 #[quickcheck]
-fn frame_long_operand_queue(mut frame: CallFrameState, q_idx: usize) -> TestResult
+fn long_operand_queue_invalid(mut frame: CallFrameState, q_idx: usize) -> TestResult
 {
 	let op_qs_len = frame.op_queues.len();
 	if op_qs_len == 0
@@ -138,21 +129,4 @@ fn frame_long_operand_queue(mut frame: CallFrameState, q_idx: usize) -> TestResu
 		op_rest.push(op1.clone());
 	}
 	TestResult::from_bool(!frame.valid())
-}
-
-/// Tests that all arbitrarily generated states are valid
-#[quickcheck]
-fn arb_state_is_valid(state: ExecState) -> bool
-{
-	state.valid()
-}
-
-/// Tests that any frame with the return address not 2-byte aligned is not
-/// consistent
-#[quickcheck]
-fn state_unaligned_address(mut state: ExecState) -> bool
-{
-	// Assume address is already aligned, unalign it.
-	state.address += 1;
-	!state.valid()
 }
