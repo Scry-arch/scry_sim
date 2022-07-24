@@ -3,7 +3,9 @@ use crate::{
 	MetricTracker, Scalar, ValueType,
 };
 use byteorder::ByteOrder;
-use scry_isa::{AluVariant, Bits, CallVariant, Instruction};
+use scry_isa::{
+	Alu2OutputVariant, Alu2Variant, AluVariant, BitValue, Bits, CallVariant, Instruction,
+};
 use std::fmt::Debug;
 
 /// The result of performing one execution step
@@ -117,6 +119,10 @@ impl Executor
 				{
 					self.perform_alu(variant, offset, tracker);
 				},
+				Alu2(variant, out, offset) =>
+				{
+					self.perform_alu2(variant, out, offset, tracker);
+				},
 				_ => todo!(),
 			}
 		}
@@ -203,6 +209,80 @@ impl Executor
 		);
 	}
 
+	/// Executes an Alu2 instruction, consuming the needed inputs and putting
+	/// the results in the relevant queues.
+	///
+	/// The given variant is the Alu2 instruction to execute with the offset
+	/// being which queue a result should go to (0 means the first queue after
+	/// the queue of the inputs has been discarded) according to the output
+	/// variant.
+	fn perform_alu2(
+		&mut self,
+		_variant: Alu2Variant,
+		out_var: Alu2OutputVariant,
+		offset: Bits<5, false>,
+		tracker: &mut impl MetricTracker,
+	)
+	{
+		let (typ, mut result_scalars_low, mut result_scalars_high) = {
+			// Extract operands
+			let mut ins = self.operands.ready_iter(&mut self.memory, tracker);
+			let mut result_scalars_low = Vec::new();
+			let mut result_scalars_high = Vec::new();
+			let in1 = ins.next().unwrap();
+			let typ = in1.0.value_type();
+			let in1 = in1.0.iter();
+
+			let in2 = ins.next().unwrap();
+			let in2 = in2.0.iter();
+
+			for (sc1, sc2) in in1.zip(in2)
+			{
+				let mut raw_result = Self::alu_add_carry(sc1, sc2);
+				if let ValueType::Int(_) = typ
+				{
+					// Ensure overflow bit is set when needed
+					raw_result.1 = Self::signed_overflow(
+						*sc1.bytes().unwrap().last().unwrap(),
+						*sc2.bytes().unwrap().last().unwrap(),
+						*raw_result.0.last().unwrap(),
+					)
+					.is_some();
+				}
+				result_scalars_low.push(Scalar::Val(raw_result.0.into_boxed_slice()));
+				let mut high = vec![raw_result.1 as u8];
+				high.resize(typ.scale(), 0);
+				result_scalars_high.push(Scalar::Val(high.into_boxed_slice()));
+			}
+			(typ, result_scalars_low, result_scalars_high)
+		};
+
+		let low = Value::new_typed(typ, result_scalars_low.remove(0), result_scalars_low)
+			.unwrap()
+			.into();
+		let high = Value::new_typed(typ, result_scalars_high.remove(0), result_scalars_high)
+			.unwrap()
+			.into();
+		let offset = offset.value as usize;
+
+		// Propagate results according to output variant
+		use Alu2OutputVariant::*;
+		let (first_offset, first_op, second_op) = match out_var
+		{
+			High => (offset, high, None),
+			Low => (offset, low, None),
+			FirstLow => (offset, low, Some(high)),
+			FirstHigh => (offset, high, Some(low)),
+			NextHigh => (0, high, Some(low)),
+			NextLow => (0, low, Some(high)),
+		};
+		self.operands.push_operand(first_offset, first_op, tracker);
+		if let Some(op) = second_op
+		{
+			self.operands.push_operand(offset, op, tracker);
+		}
+	}
+
 	/// Performs a byte-wise addition with carry.
 	///
 	/// Returns the resulting bytes and whether the final carry was set.
@@ -247,25 +327,25 @@ impl Executor
 			(ValueType::Uint(_), true) => result_bytes.iter_mut().for_each(|b| *b = u8::MAX),
 			(ValueType::Int(_), _) =>
 			{
-				// If the input both have the same sign (both positive or both
-				// negative), then overflow occurs if and only if the result has
-				// the opposite sign.
-				// Source: https://www.doc.ic.ac.uk/~eedwards/compsys/arithmetic/index.html (2022-07-14)
-				let signed_1 = in1.bytes().unwrap().last().unwrap() & 0b10000000 != 0;
-				let signed_2 = in2.bytes().unwrap().last().unwrap() & 0b10000000 != 0;
-				let signed_result = result_bytes.last().unwrap() & 0b10000000 != 0;
-
-				if signed_1 && signed_2 && !signed_result
+				match Self::signed_overflow(
+					*in1.bytes().unwrap().last().unwrap(),
+					*in2.bytes().unwrap().last().unwrap(),
+					*result_bytes.last().unwrap(),
+				)
 				{
-					// underflow, set to lowest negative
-					result_bytes.iter_mut().for_each(|b| *b = 0);
-					*result_bytes.last_mut().unwrap() = 0b10000000u8;
-				}
-				else if !signed_1 && !signed_2 && signed_result
-				{
-					// overflow, set to highest value
-					result_bytes.iter_mut().for_each(|b| *b = u8::MAX);
-					*result_bytes.last_mut().unwrap() = 0b01111111u8;
+					Some(false) =>
+					{
+						// Underflow, set to lowest negative
+						result_bytes.iter_mut().for_each(|b| *b = 0);
+						*result_bytes.last_mut().unwrap() = 0b10000000u8;
+					},
+					Some(true) =>
+					{
+						// Overflow, set to highest value
+						result_bytes.iter_mut().for_each(|b| *b = u8::MAX);
+						*result_bytes.last_mut().unwrap() = 0b01111111u8;
+					},
+					_ => (),
 				}
 			},
 			_ => (),
@@ -287,5 +367,36 @@ impl Executor
 		let one_scalar = Scalar::Val(bytes.into_boxed_slice());
 
 		Self::alu_add_carry(in1, &one_scalar).0
+	}
+
+	/// Return whether and which type of signed integer overflow happened.
+	///
+	/// If no overflow, None is returned.
+	/// Otherwise, returns true if overflow, false if underflow
+	///
+	/// The bytes are assumed to be the highest order bytes of the two inputs to
+	/// a given operation and the result.
+	fn signed_overflow(in1: u8, in2: u8, result: u8) -> Option<bool>
+	{
+		// If the input both have the same sign (both positive or both
+		// negative), then overflow occurs if and only if the result has
+		// the opposite sign.
+		// Source: https://www.doc.ic.ac.uk/~eedwards/compsys/arithmetic/index.html (2022-07-14)
+		let signed_1 = in1 & 0b10000000 != 0;
+		let signed_2 = in2 & 0b10000000 != 0;
+		let signed_result = result & 0b10000000 != 0;
+
+		if signed_1 && signed_2 && !signed_result
+		{
+			Some(false)
+		}
+		else if !signed_1 && !signed_2 && signed_result
+		{
+			Some(true)
+		}
+		else
+		{
+			None
+		}
 	}
 }

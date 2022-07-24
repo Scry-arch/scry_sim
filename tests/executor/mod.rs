@@ -11,7 +11,6 @@ use std::iter::once;
 
 mod alu_instructions;
 mod control_flow;
-
 /// Tests can convert from state to executor back to state without the state
 /// changing
 #[quickcheck]

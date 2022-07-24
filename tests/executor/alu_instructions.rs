@@ -1,39 +1,42 @@
 use byteorder::{ByteOrder, LittleEndian};
+use duplicate::duplicate;
 use quickcheck::TestResult;
-use scry_isa::{AluVariant, Bits, Instruction};
+use scry_isa::{Alu2OutputVariant, Alu2Variant, AluVariant, Bits, Instruction};
 use scryer::{
 	arbitrary::{LimitedOps, NoCF, NoReads, SimpleOps},
 	execution::{ExecResult, Executor},
 	memory::Memory,
 	ExecState, Metric, OperandState, Scalar, TrackReport, Value,
 };
+use std::cmp::min;
 
 /// Manages the calculation of applying the given semantic function to the given
 /// inputs.
 ///
-/// Returns the result of the semantic function as a scalar.
+/// Returns the result of the semantic function as scalars.
 ///
 /// `read` must be able to convert a u8 slice into the type that will be used
 /// for the calculation. `write` must be able to write the result of the
 /// calculation into a u8 slice.
-fn calculate_result<T: Default + Copy, const OPS: usize>(
-	inputs: [&Scalar; OPS],
-	semantic_fn: impl Fn([T; OPS]) -> T,
+fn calculate_result<T: Default + Copy, const OPS_IN: usize, const OPS_OUT: usize>(
+	inputs: [&Scalar; OPS_IN],
+	semantic_fn: impl Fn([T; OPS_IN]) -> [T; OPS_OUT],
 	read: impl Fn(&[u8]) -> T,
 	write: impl Fn(&mut [u8], T),
-) -> Scalar
+) -> [Scalar; OPS_OUT]
 {
 	let len = inputs[0].bytes().unwrap().len();
-	let mut values = [T::default(); OPS];
+	let mut values = [T::default(); OPS_IN];
 	values
 		.iter_mut()
 		.zip(inputs.into_iter())
 		.for_each(|(v, sc)| *v = read(sc.bytes().unwrap()));
-	let r = semantic_fn(values);
-	let mut r_bytes = Vec::new();
-	r_bytes.resize(len, 0);
-	write(r_bytes.as_mut_slice(), r);
-	Scalar::Val(r_bytes.into_boxed_slice())
+	semantic_fn(values).map(|r| {
+		let mut r_bytes = Vec::new();
+		r_bytes.resize(len, 0);
+		write(r_bytes.as_mut_slice(), r);
+		Scalar::Val(r_bytes.into_boxed_slice())
+	})
 }
 
 /// The restricted execution state we will use for generating states for all Alu
@@ -43,50 +46,58 @@ fn calculate_result<T: Default + Copy, const OPS: usize>(
 /// consume and without any operands being Nan, Nar, nor needing to read from
 /// memory. Since all the other cases need to be handled in the same way, they
 /// will be tested in a way that is agnostic to the specific instruction variant
-type AluTestState<const OPS: usize> = NoCF<SimpleOps<NoReads<LimitedOps<ExecState, OPS, OPS>>>>;
+type AluTestState<const OPS_IN: usize> =
+	NoCF<SimpleOps<NoReads<LimitedOps<ExecState, OPS_IN, OPS_IN>>>>;
 
 /// Tests the given Alu instruction variant on the given state with the given
 /// offset in the instruction.
 ///
-/// `OPS` must match the exact number of inputs that given instruction variant
-/// consumes. `*_sem` is a semantic function for each type of integer that can
-/// be used to check whether the instruction has performed correctly.
+/// `OPS_IN` must match the exact number of inputs that given instruction
+/// variant consumes.
+/// `OPS_OUT` must match the exact number of outputs that given instruction
+/// variant produces. `*_sem` is a semantic function for each type of integer
+/// that can be used to check whether the instruction has performed correctly.
 /// So they are essentially the golden model.
+/// `out_idx` indicates which operand queue (by index) that the outputs are put
+/// on.
 ///
 /// Tests both the resulting state after taking 1 step and that the reported
 /// metrics are correct
-fn test_alu_instruction<const OPS: usize>(
-	state: AluTestState<OPS>,
-	offset: Bits<5, false>,
-	variant: AluVariant,
-	u8_sem: impl Fn([u8; OPS]) -> u8,
-	u16_sem: impl Fn([u16; OPS]) -> u16,
-	u32_sem: impl Fn([u32; OPS]) -> u32,
-	u64_sem: impl Fn([u64; OPS]) -> u64,
-	u128_sem: impl Fn([u128; OPS]) -> u128,
-	i8_sem: impl Fn([i8; OPS]) -> i8,
-	i16_sem: impl Fn([i16; OPS]) -> i16,
-	i32_sem: impl Fn([i32; OPS]) -> i32,
-	i64_sem: impl Fn([i64; OPS]) -> i64,
-	i128_sem: impl Fn([i128; OPS]) -> i128,
+fn test_arithmetic_instruction<const OPS_IN: usize, const OPS_OUT: usize>(
+	state: AluTestState<OPS_IN>,
+	instr: Instruction,
+	out_idx: [usize; OPS_OUT],
+	u8_sem: impl Fn([u8; OPS_IN]) -> [u8; OPS_OUT],
+	u16_sem: impl Fn([u16; OPS_IN]) -> [u16; OPS_OUT],
+	u32_sem: impl Fn([u32; OPS_IN]) -> [u32; OPS_OUT],
+	u64_sem: impl Fn([u64; OPS_IN]) -> [u64; OPS_OUT],
+	u128_sem: impl Fn([u128; OPS_IN]) -> [u128; OPS_OUT],
+	i8_sem: impl Fn([i8; OPS_IN]) -> [i8; OPS_OUT],
+	i16_sem: impl Fn([i16; OPS_IN]) -> [i16; OPS_OUT],
+	i32_sem: impl Fn([i32; OPS_IN]) -> [i32; OPS_OUT],
+	i64_sem: impl Fn([i64; OPS_IN]) -> [i64; OPS_OUT],
+	i128_sem: impl Fn([i128; OPS_IN]) -> [i128; OPS_OUT],
 ) -> TestResult
 {
 	let state = state.0 .0 .0 .0;
 
-	if state
+	if out_idx.iter().any(|idx| {
+		state
 		.frame
 		.op_queues
-		.get(&(offset.value as usize + 1))
-		.filter(|(_, op_rest)| op_rest.len() > 2)
+		.get(&(idx + 1))
+		// Ensure there is room on the queue for the needed number of operands
+		.filter(|(_, op_rest)| op_rest.len() > (3-min(3, out_idx.iter().filter(|i| *i == idx).count())))
 		.is_some()
+	})
 	{
-		// Target queue is full, so can't push result to it
+		// Target queue is full, so can't push results to it
 		return TestResult::discard();
 	}
 
 	// Encode instruction
 	let mut encoded = [0; 2];
-	LittleEndian::write_u16(&mut encoded, Instruction::Alu(variant, offset).encode());
+	LittleEndian::write_u16(&mut encoded, instr.encode());
 
 	// Create execution from state with only access to the instruction
 	let exec = Executor::from_state(&state, Memory::new(encoded.into(), state.address));
@@ -123,9 +134,9 @@ fn test_alu_instruction<const OPS: usize>(
 			for (scalar_idx, sc0) in first_value.iter().enumerate()
 			{
 				let nan = Scalar::Nan;
-				let mut scalars = [&nan; OPS];
+				let mut scalars = [&nan; OPS_IN];
 				scalars[0] = sc0;
-				for input_idx in 1..OPS
+				for input_idx in 1..OPS_IN
 				{
 					scalars[input_idx] = removed_rest_values[input_idx - 1]
 						.iter()
@@ -217,27 +228,33 @@ fn test_alu_instruction<const OPS: usize>(
 					Uint(_) | Int(_) => unreachable!(),
 				});
 			}
-			let result_value =
-				Value::new_typed(typ, result_scalars.remove(0), result_scalars).unwrap();
-
-			// Put expected result in correct expected state queue
-			if let Some((_, op_rest)) = expected_state
-				.frame
-				.op_queues
-				.get_mut(&(offset.value as usize))
+			let mut result_values = [(); OPS_OUT].map(|_| Value::new_nan_typed(typ));
+			for i in 0..OPS_OUT
 			{
-				// Push on end of queue
-				op_rest.push(OperandState::Ready(result_value));
-			}
-			else
-			{
-				// No existing queue, create it
-				expected_state.frame.op_queues.insert(
-					offset.value as usize,
-					(OperandState::Ready(result_value), vec![]),
-				);
+				let mut scalars = result_scalars
+					.iter()
+					.map(|sc| sc[i].clone())
+					.collect::<Vec<_>>();
+				result_values[i] = Value::new_typed(typ, scalars.remove(0), scalars).unwrap()
 			}
 
+			for (idx, result_value) in out_idx.iter().zip(result_values.into_iter())
+			{
+				// Put expected result in correct expected state queue
+				if let Some((_, op_rest)) = expected_state.frame.op_queues.get_mut(idx)
+				{
+					// Push on end of queue
+					op_rest.push(OperandState::Ready(result_value));
+				}
+				else
+				{
+					// No existing queue, create it
+					expected_state
+						.frame
+						.op_queues
+						.insert(*idx, (OperandState::Ready(result_value), vec![]));
+				}
+			}
 			if exec.state() != expected_state
 			{
 				TestResult::error(format!(
@@ -251,10 +268,10 @@ fn test_alu_instruction<const OPS: usize>(
 				// Check metrics
 				let expected_mets: TrackReport = [
 					(Metric::InstructionReads, 1),
-					(Metric::QueuedValues, 1),
-					(Metric::QueuedValueBytes, typ.scale()),
-					(Metric::ConsumedOperands, OPS),
-					(Metric::ConsumedBytes, typ.scale() * OPS),
+					(Metric::QueuedValues, OPS_OUT),
+					(Metric::QueuedValueBytes, typ.scale() * OPS_OUT),
+					(Metric::ConsumedOperands, OPS_IN),
+					(Metric::ConsumedBytes, typ.scale() * OPS_IN),
 				]
 				.into();
 
@@ -274,6 +291,39 @@ fn test_alu_instruction<const OPS: usize>(
 		err => TestResult::error(format!("Unexpected step result: {:?}", err)),
 	};
 	res
+}
+
+fn test_alu_instruction<const OPS: usize>(
+	state: AluTestState<OPS>,
+	offset: Bits<5, false>,
+	variant: AluVariant,
+	u8_sem: impl Fn([u8; OPS]) -> u8,
+	u16_sem: impl Fn([u16; OPS]) -> u16,
+	u32_sem: impl Fn([u32; OPS]) -> u32,
+	u64_sem: impl Fn([u64; OPS]) -> u64,
+	u128_sem: impl Fn([u128; OPS]) -> u128,
+	i8_sem: impl Fn([i8; OPS]) -> i8,
+	i16_sem: impl Fn([i16; OPS]) -> i16,
+	i32_sem: impl Fn([i32; OPS]) -> i32,
+	i64_sem: impl Fn([i64; OPS]) -> i64,
+	i128_sem: impl Fn([i128; OPS]) -> i128,
+) -> TestResult
+{
+	test_arithmetic_instruction(
+		state,
+		Instruction::Alu(variant, offset),
+		[offset.value as usize],
+		|x| [u8_sem(x)],
+		|x| [u16_sem(x)],
+		|x| [u32_sem(x)],
+		|x| [u64_sem(x)],
+		|x| [u128_sem(x)],
+		|x| [i8_sem(x)],
+		|x| [i16_sem(x)],
+		|x| [i32_sem(x)],
+		|x| [i64_sem(x)],
+		|x| [i128_sem(x)],
+	)
 }
 
 /// Test the Alu instruction variant `Add`
@@ -316,4 +366,50 @@ fn inc(state: AluTestState<1>, offset: Bits<5, false>) -> TestResult
 		|sc| i64::wrapping_add(sc[0], 1),
 		|sc| i128::wrapping_add(sc[0], 1),
 	)
+}
+
+/// Test the Alu2 instruction variant `Addc`
+#[quickcheck]
+fn addc(state: AluTestState<2>, offset: Bits<5, false>, out_var: Alu2OutputVariant) -> TestResult
+{
+	let instr = Instruction::Alu2(Alu2Variant::Add, out_var, offset);
+	let offset = offset.value as usize;
+	use scry_isa::Alu2OutputVariant::*;
+	duplicate! { [not_used []]
+		match out_var {
+			duplicate!{
+				[var idx; [High] [1] ; [Low] [0];]
+				var => test_arithmetic_instruction(
+					state,
+					instr,
+					[offset],
+					duplicate!{
+						[typ; [u8]; [u16]; [u32]; [u64]; [u128]; [i8]; [i16]; [i32]; [i64]; [i128];]
+						|x| [typ::overflowing_add(x[0],x[1]).idx as typ],
+					}
+				),
+			}
+			duplicate!{
+				[
+					var 		order(typ)				first_offset;
+					[FirstLow] 	[res.0, res.1 as typ] 	[offset];
+					[FirstHigh]	[res.1 as typ, res.0] 	[offset];
+					[NextLow] 	[res.0, res.1 as typ] 	[0];
+					[NextHigh]	[res.1 as typ, res.0] 	[0];
+				]
+				var => test_arithmetic_instruction(
+					state,
+					instr,
+					[first_offset, offset],
+					duplicate!{
+						[typ; [u8]; [u16]; [u32]; [u64]; [u128]; [i8]; [i16]; [i32]; [i64]; [i128];]
+						|x| {
+							let res = typ::overflowing_add(x[0],x[1]);
+							[order([typ])]
+						},
+					}
+				),
+			}
+		}
+	}
 }
