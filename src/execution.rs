@@ -159,12 +159,7 @@ impl Executor
 	)
 	{
 		let (typ, mut result_scalars) = {
-			let ins_count = match variant
-			{
-				AluVariant::Add => 2,
-				AluVariant::Inc => 1,
-				_ => todo!(),
-			};
+			use AluVariant::*;
 
 			// Extract operands
 			let mut ins = self.operands.ready_iter(&mut self.memory, tracker);
@@ -173,31 +168,39 @@ impl Executor
 			let typ = in1.0.value_type();
 			let in1 = in1.0.iter();
 
-			if ins_count == 2
+			match variant
 			{
-				let in2 = ins.next().unwrap();
-				let in2 = in2.0.iter();
+				Add | Sub =>
+				{
+					// Variants with 2 inputs
+					let in2 = ins.next().unwrap();
+					let in2 = in2.0.iter();
 
-				for (sc1, sc2) in in1.zip(in2)
+					let func = match variant
+					{
+						Add => Self::alu_add_saturated,
+						Sub => Self::alu_sub_saturated,
+						_ => unreachable!(),
+					};
+
+					for (sc1, sc2) in in1.zip(in2)
+					{
+						result_scalars.push(Scalar::Val(func(sc1, sc2, typ).into_boxed_slice()));
+					}
+				},
+				Inc =>
 				{
-					result_scalars.push(Scalar::Val(
-						Self::alu_add_saturated(sc1, sc2, typ).into_boxed_slice(),
-					));
-				}
+					// Variants with 1 input
+					for sc1 in in1
+					{
+						result_scalars.push(Scalar::Val(
+							Self::alu_increment_wrapping(sc1, typ).into_boxed_slice(),
+						));
+					}
+				},
+				_ => unreachable!(),
 			}
-			else if ins_count == 1
-			{
-				for sc1 in in1
-				{
-					result_scalars.push(Scalar::Val(
-						Self::alu_increment_wrapping(sc1, typ).into_boxed_slice(),
-					));
-				}
-			}
-			else
-			{
-				todo!()
-			}
+
 			(typ, result_scalars)
 		};
 		self.operands.push_operand(
@@ -242,7 +245,7 @@ impl Executor
 				if let ValueType::Int(_) = typ
 				{
 					// Ensure overflow bit is set when needed
-					raw_result.1 = Self::signed_overflow(
+					raw_result.1 = Self::signed_add_overflow(
 						*sc1.bytes().unwrap().last().unwrap(),
 						*sc2.bytes().unwrap().last().unwrap(),
 						*raw_result.0.last().unwrap(),
@@ -327,7 +330,7 @@ impl Executor
 			(ValueType::Uint(_), true) => result_bytes.iter_mut().for_each(|b| *b = u8::MAX),
 			(ValueType::Int(_), _) =>
 			{
-				match Self::signed_overflow(
+				match Self::signed_add_overflow(
 					*in1.bytes().unwrap().last().unwrap(),
 					*in2.bytes().unwrap().last().unwrap(),
 					*result_bytes.last().unwrap(),
@@ -352,6 +355,83 @@ impl Executor
 		}
 		result_bytes
 	}
+	
+	/// Performs a saturated subtraction on the given scalars.
+	///
+	/// The bytes of the inputs are assumed to have the given type.
+	///
+	/// Returns the resulting bytes. Assumes the two given scalars are valid
+	/// values (not Nan or Nar) and have the same length. The result then has
+	/// the same length.
+	fn alu_sub_saturated(in1: &Scalar, in2: &Scalar, typ: ValueType) -> Vec<u8>
+	{
+		let mut flipped = in2.clone();
+
+		// First flip all bits in the second input
+		flipped.set_val(
+			in2.bytes()
+				.unwrap()
+				.iter()
+				.map(|v| !*v)
+				.collect::<Vec<_>>()
+				.as_slice(),
+		);
+
+		// Now add 1 to get the negative version of the original value
+		flipped.set_val(Self::alu_increment_wrapping(&flipped, typ).as_slice());
+
+		// Now add the first to the negative
+		let mut added = Self::alu_add_carry(in1, &flipped).0;
+
+		// Check for overflow
+		match typ
+		{
+			ValueType::Uint(_) =>
+			{
+				// If the result is larger than the first input, underflow
+				for (in1_byte, result_byte) in in1.bytes().unwrap().iter().zip(added.iter()).rev()
+				{
+					if result_byte > in1_byte
+					{
+						// Underflow, set to 0
+						added.iter_mut().for_each(|b| *b = 0);
+						break;
+					}
+					else if result_byte < in1_byte
+					{
+						// No underflow
+						break;
+					}
+					// If equal, try next byte
+				}
+			},
+			ValueType::Int(_) =>
+			{
+				match Self::signed_sub_overflow(
+					*in1.bytes().unwrap().last().unwrap(),
+					*in2.bytes().unwrap().last().unwrap(),
+					*added.last().unwrap(),
+				)
+				{
+					Some(true) =>
+					{
+						// Overflow, set to max
+						added.iter_mut().for_each(|b| *b = u8::MAX);
+						*added.last_mut().unwrap() = 0b01111111;
+					},
+					Some(false) =>
+					{
+						// Underflow, set to min
+						added.iter_mut().for_each(|b| *b = 0);
+						*added.last_mut().unwrap() = 0b10000000;
+					},
+					_ => (),
+				}
+			},
+		}
+		
+		added
+	}
 
 	/// Performs a wrapping addition of the given scalar and 1.
 	///
@@ -369,28 +449,29 @@ impl Executor
 		Self::alu_add_carry(in1, &one_scalar).0
 	}
 
-	/// Return whether and which type of signed integer overflow happened.
+	/// Return whether and which type of signed integer overflow happened
+	/// following an addition.
 	///
 	/// If no overflow, None is returned.
 	/// Otherwise, returns true if overflow, false if underflow
 	///
 	/// The bytes are assumed to be the highest order bytes of the two inputs to
 	/// a given operation and the result.
-	fn signed_overflow(in1: u8, in2: u8, result: u8) -> Option<bool>
+	fn signed_add_overflow(in1: u8, in2: u8, result: u8) -> Option<bool>
 	{
 		// If the input both have the same sign (both positive or both
 		// negative), then overflow occurs if and only if the result has
 		// the opposite sign.
 		// Source: https://www.doc.ic.ac.uk/~eedwards/compsys/arithmetic/index.html (2022-07-14)
-		let signed_1 = in1 & 0b10000000 != 0;
-		let signed_2 = in2 & 0b10000000 != 0;
-		let signed_result = result & 0b10000000 != 0;
+		let in1_neg = Self::is_negative(in1);
+		let in2_neg = Self::is_negative(in2);
+		let result_neg = Self::is_negative(result);
 
-		if signed_1 && signed_2 && !signed_result
+		if in1_neg && in2_neg && !result_neg
 		{
 			Some(false)
 		}
-		else if !signed_1 && !signed_2 && signed_result
+		else if !in1_neg && !in2_neg && result_neg
 		{
 			Some(true)
 		}
@@ -398,5 +479,42 @@ impl Executor
 		{
 			None
 		}
+	}
+
+	/// Return whether and which type of signed integer overflow happened
+	/// following a subtract.
+	///
+	/// If no overflow, None is returned.
+	/// Otherwise, returns true if overflow, false if underflow
+	///
+	/// The bytes are assumed to be the highest order bytes of the two inputs to
+	/// a given operation and the result.
+	fn signed_sub_overflow(in1: u8, in2: u8, result: u8) -> Option<bool>
+	{
+		// If the inputs have different sign , then overflow occurs if and only if the
+		// result has the same sign as the second input.
+		// Source: https://www.doc.ic.ac.uk/~eedwards/compsys/arithmetic/index.html (2022-07-29)
+		let in1_neg = Self::is_negative(in1);
+		let in2_neg = Self::is_negative(in2);
+		let result_neg = Self::is_negative(result);
+
+		if in1_neg && !in2_neg && !result_neg
+		{
+			Some(false)
+		}
+		else if !in1_neg && in2_neg && result_neg
+		{
+			Some(true)
+		}
+		else
+		{
+			None
+		}
+	}
+
+	/// Returns whether this byte represents a negative two's complement value
+	fn is_negative(byte: u8) -> bool
+	{
+		byte & 0b10000000 != 0
 	}
 }

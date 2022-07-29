@@ -368,9 +368,13 @@ fn inc(state: AluTestState<1>, offset: Bits<5, false>) -> TestResult
 	)
 }
 
-/// Test the Alu2 instruction variant `Addc`
+/// Test the Alu2 instruction variant `Add`
 #[quickcheck]
-fn addc(state: AluTestState<2>, offset: Bits<5, false>, out_var: Alu2OutputVariant) -> TestResult
+fn add_carry(
+	state: AluTestState<2>,
+	offset: Bits<5, false>,
+	out_var: Alu2OutputVariant,
+) -> TestResult
 {
 	let instr = Instruction::Alu2(Alu2Variant::Add, out_var, offset);
 	let offset = offset.value as usize;
@@ -412,4 +416,25 @@ fn addc(state: AluTestState<2>, offset: Bits<5, false>, out_var: Alu2OutputVaria
 			}
 		}
 	}
+}
+
+/// Test the Alu instruction variant `Sub`
+#[quickcheck]
+fn sub(state: AluTestState<2>, offset: Bits<5, false>) -> TestResult
+{
+	test_alu_instruction(
+		state,
+		offset,
+		AluVariant::Sub,
+		|sc| u8::saturating_sub(sc[0], sc[1]),
+		|sc| u16::saturating_sub(sc[0], sc[1]),
+		|sc| u32::saturating_sub(sc[0], sc[1]),
+		|sc| u64::saturating_sub(sc[0], sc[1]),
+		|sc| u128::saturating_sub(sc[0], sc[1]),
+		|sc| i8::saturating_sub(sc[0], sc[1]),
+		|sc| i16::saturating_sub(sc[0], sc[1]),
+		|sc| i32::saturating_sub(sc[0], sc[1]),
+		|sc| i64::saturating_sub(sc[0], sc[1]),
+		|sc| i128::saturating_sub(sc[0], sc[1]),
+	)
 }
