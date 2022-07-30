@@ -188,14 +188,19 @@ impl Executor
 						result_scalars.push(Scalar::Val(func(sc1, sc2, typ).into_boxed_slice()));
 					}
 				},
-				Inc =>
+				Inc | Dec =>
 				{
 					// Variants with 1 input
+					let func = match variant
+					{
+						Inc => Self::alu_increment_wrapping,
+						Dec => Self::alu_decrement_wrapping,
+						_ => unreachable!(),
+					};
+
 					for sc1 in in1
 					{
-						result_scalars.push(Scalar::Val(
-							Self::alu_increment_wrapping(sc1, typ).into_boxed_slice(),
-						));
+						result_scalars.push(Scalar::Val(func(sc1, typ).into_boxed_slice()));
 					}
 				},
 				_ => unreachable!(),
@@ -221,7 +226,7 @@ impl Executor
 	/// variant.
 	fn perform_alu2(
 		&mut self,
-		_variant: Alu2Variant,
+		variant: Alu2Variant,
 		out_var: Alu2OutputVariant,
 		offset: Bits<5, false>,
 		tracker: &mut impl MetricTracker,
@@ -239,23 +244,19 @@ impl Executor
 			let in2 = ins.next().unwrap();
 			let in2 = in2.0.iter();
 
+			use Alu2Variant::*;
+			let func = match variant
+			{
+				Add => Self::alu_add_overflowing,
+				Sub => Self::alu_sub_overflowing,
+				_ => unreachable!(),
+			};
+
 			for (sc1, sc2) in in1.zip(in2)
 			{
-				let mut raw_result = Self::alu_add_carry(sc1, sc2);
-				if let ValueType::Int(_) = typ
-				{
-					// Ensure overflow bit is set when needed
-					raw_result.1 = Self::signed_add_overflow(
-						*sc1.bytes().unwrap().last().unwrap(),
-						*sc2.bytes().unwrap().last().unwrap(),
-						*raw_result.0.last().unwrap(),
-					)
-					.is_some();
-				}
-				result_scalars_low.push(Scalar::Val(raw_result.0.into_boxed_slice()));
-				let mut high = vec![raw_result.1 as u8];
-				high.resize(typ.scale(), 0);
-				result_scalars_high.push(Scalar::Val(high.into_boxed_slice()));
+				let (low, high) = func(sc1, sc2, typ);
+				result_scalars_low.push(low);
+				result_scalars_high.push(high);
 			}
 			(typ, result_scalars_low, result_scalars_high)
 		};
@@ -355,7 +356,7 @@ impl Executor
 		}
 		result_bytes
 	}
-	
+
 	/// Performs a saturated subtraction on the given scalars.
 	///
 	/// The bytes of the inputs are assumed to have the given type.
@@ -365,44 +366,20 @@ impl Executor
 	/// the same length.
 	fn alu_sub_saturated(in1: &Scalar, in2: &Scalar, typ: ValueType) -> Vec<u8>
 	{
-		let mut flipped = in2.clone();
-
-		// First flip all bits in the second input
-		flipped.set_val(
-			in2.bytes()
-				.unwrap()
-				.iter()
-				.map(|v| !*v)
-				.collect::<Vec<_>>()
-				.as_slice(),
-		);
-
-		// Now add 1 to get the negative version of the original value
-		flipped.set_val(Self::alu_increment_wrapping(&flipped, typ).as_slice());
+		let neg_in2 = Self::negate(in2.clone(), typ);
 
 		// Now add the first to the negative
-		let mut added = Self::alu_add_carry(in1, &flipped).0;
+		let mut added = Self::alu_add_carry(in1, &neg_in2).0;
 
 		// Check for overflow
 		match typ
 		{
 			ValueType::Uint(_) =>
 			{
-				// If the result is larger than the first input, underflow
-				for (in1_byte, result_byte) in in1.bytes().unwrap().iter().zip(added.iter()).rev()
+				if Self::unsigned_subtract_underflow(in1.bytes().unwrap(), added.as_slice())
 				{
-					if result_byte > in1_byte
-					{
-						// Underflow, set to 0
-						added.iter_mut().for_each(|b| *b = 0);
-						break;
-					}
-					else if result_byte < in1_byte
-					{
-						// No underflow
-						break;
-					}
-					// If equal, try next byte
+					// Set to 0
+					added.iter_mut().for_each(|b| *b = 0);
 				}
 			},
 			ValueType::Int(_) =>
@@ -429,7 +406,7 @@ impl Executor
 				}
 			},
 		}
-		
+
 		added
 	}
 
@@ -440,13 +417,71 @@ impl Executor
 	/// Returns the resulting bytes of the same length as the input.
 	fn alu_increment_wrapping(in1: &Scalar, typ: ValueType) -> Vec<u8>
 	{
-		// Create a scalar with value 1 to add to the given scalar
-		let mut bytes = Vec::with_capacity(typ.scale());
-		bytes.push(1);
-		bytes.resize(typ.scale(), 0);
-		let one_scalar = Scalar::Val(bytes.into_boxed_slice());
+		Self::alu_add_carry(in1, &Self::scalar_one(typ)).0
+	}
 
-		Self::alu_add_carry(in1, &one_scalar).0
+	/// Performs a wrapping subtraction of the given scalar and 1.
+	///
+	/// The bytes of the input are assumed to have the given type.
+	///
+	/// Returns the resulting bytes of the same length as the input.
+	fn alu_decrement_wrapping(in1: &Scalar, typ: ValueType) -> Vec<u8>
+	{
+		Self::alu_add_carry(in1, &Self::negate(Self::scalar_one(typ), typ)).0
+	}
+
+	/// Performs addition on the given scalars, returning the wrapping result
+	/// and whether it overflowed. Both results are of the given type
+	fn alu_add_overflowing(sc1: &Scalar, sc2: &Scalar, typ: ValueType) -> (Scalar, Scalar)
+	{
+		let mut raw_result = Self::alu_add_carry(sc1, sc2);
+		if let ValueType::Int(_) = typ
+		{
+			// Ensure overflow bit is set when needed
+			raw_result.1 = Self::signed_add_overflow(
+				*sc1.bytes().unwrap().last().unwrap(),
+				*sc2.bytes().unwrap().last().unwrap(),
+				*raw_result.0.last().unwrap(),
+			)
+			.is_some();
+		}
+		let mut high = vec![raw_result.1 as u8];
+		high.resize(typ.scale(), 0);
+		(
+			Scalar::Val(raw_result.0.into_boxed_slice()),
+			Scalar::Val(high.into_boxed_slice()),
+		)
+	}
+
+	/// Performs subtraction on the given scalars, returning the wrapping result
+	/// and whether it overflowed. Both results are of the given type
+	fn alu_sub_overflowing(sc1: &Scalar, sc2: &Scalar, typ: ValueType) -> (Scalar, Scalar)
+	{
+		let mut raw_result = Self::alu_add_carry(sc1, &Self::negate(sc2.clone(), typ));
+
+		raw_result.1 = match typ
+		{
+			ValueType::Uint(_) =>
+			{
+				Self::unsigned_subtract_underflow(sc1.bytes().unwrap(), raw_result.0.as_slice())
+			},
+			ValueType::Int(_) =>
+			{
+				Self::signed_sub_overflow(
+					*sc1.bytes().unwrap().last().unwrap(),
+					*sc2.bytes().unwrap().last().unwrap(),
+					*raw_result.0.last().unwrap(),
+				)
+				.is_some()
+			},
+		};
+		let mut high = vec![raw_result.1 as u8];
+		high.resize(typ.scale(), 0);
+
+		(
+			Scalar::Val(raw_result.0.into_boxed_slice()),
+			Scalar::Val(high.into_boxed_slice()),
+		)
 	}
 
 	/// Return whether and which type of signed integer overflow happened
@@ -512,9 +547,62 @@ impl Executor
 		}
 	}
 
+	/// Returns whether a unsigned integer subtraction underflow happened.
+	///
+	/// The slices are the bytes of the first operand of the subtract (i.e. 'a'
+	/// in 'a-b') and the bytes of the result.
+	/// They are assumed to be the same length.
+	fn unsigned_subtract_underflow(in1: &[u8], result: &[u8]) -> bool
+	{
+		// If the result is larger than the first input, underflow
+		for (in1_byte, result_byte) in in1.iter().zip(result.iter()).rev()
+		{
+			if result_byte > in1_byte
+			{
+				return true;
+			}
+			else if result_byte < in1_byte
+			{
+				// No underflow
+				return false;
+			}
+			// If equal, try next byte
+		}
+		false
+	}
+
 	/// Returns whether this byte represents a negative two's complement value
 	fn is_negative(byte: u8) -> bool
 	{
 		byte & 0b10000000 != 0
+	}
+
+	/// Creates a scalar with value "1" matching the given type
+	fn scalar_one(typ: ValueType) -> Scalar
+	{
+		let mut bytes = Vec::with_capacity(typ.scale());
+		bytes.push(1);
+		bytes.resize(typ.scale(), 0);
+		Scalar::Val(bytes.into_boxed_slice())
+	}
+
+	/// Returns the negated version of the given scalar value.
+	///
+	/// I.e. given 1, returns -1 (everything is treated as signed).
+	fn negate(mut v: Scalar, typ: ValueType) -> Scalar
+	{
+		// First flip all bits in the second input
+		v.set_val(
+			v.bytes()
+				.unwrap()
+				.iter()
+				.map(|v| !*v)
+				.collect::<Vec<_>>()
+				.as_slice(),
+		);
+
+		// Now add 1 to get the negative version of the original value
+		v.set_val(Self::alu_increment_wrapping(&v, typ).as_slice());
+		v
 	}
 }

@@ -326,6 +326,81 @@ fn test_alu_instruction<const OPS: usize>(
 	)
 }
 
+fn test_alu2_instruction<const OPS: usize>(
+	state: AluTestState<OPS>,
+	offset: Bits<5, false>,
+	variant: Alu2Variant,
+	out_var: Alu2OutputVariant,
+	u8_sem: impl Fn([u8; OPS]) -> (u8, bool),
+	u16_sem: impl Fn([u16; OPS]) -> (u16, bool),
+	u32_sem: impl Fn([u32; OPS]) -> (u32, bool),
+	u64_sem: impl Fn([u64; OPS]) -> (u64, bool),
+	u128_sem: impl Fn([u128; OPS]) -> (u128, bool),
+	i8_sem: impl Fn([i8; OPS]) -> (i8, bool),
+	i16_sem: impl Fn([i16; OPS]) -> (i16, bool),
+	i32_sem: impl Fn([i32; OPS]) -> (i32, bool),
+	i64_sem: impl Fn([i64; OPS]) -> (i64, bool),
+	i128_sem: impl Fn([i128; OPS]) -> (i128, bool),
+) -> TestResult
+{
+	let instr = Instruction::Alu2(variant, out_var, offset);
+	let offset = offset.value as usize;
+	use scry_isa::Alu2OutputVariant::*;
+
+	// Calculate expected outputs based on each Ali2OutputVariant
+	// Wrap the match in non-duplicating duplicate! so that we can
+	// call duplicate! in match arm positions
+	duplicate! { [not_used []]
+		match out_var {
+			duplicate!{
+				[var idx; [High] [1] ; [Low] [0];]
+				var => test_arithmetic_instruction(
+					state,
+					instr,
+					[offset],
+					|x| [u8_sem(x).idx as u8],
+					|x| [u16_sem(x).idx as u16],
+					|x| [u32_sem(x).idx as u32],
+					|x| [u64_sem(x).idx as u64],
+					|x| [u128_sem(x).idx as u128],
+					|x| [i8_sem(x).idx as i8],
+					|x| [i16_sem(x).idx as i16],
+					|x| [i32_sem(x).idx as i32],
+					|x| [i64_sem(x).idx as i64],
+					|x| [i128_sem(x).idx as i128],
+				),
+			}
+			duplicate!{
+				[
+					var 		order				first_offset;
+					[FirstLow] 	[res.0, res.1.into()] 	[offset];
+					[FirstHigh]	[res.1.into(), res.0] 	[offset];
+					[NextLow] 	[res.0, res.1.into()] 	[0];
+					[NextHigh]	[res.1.into(), res.0] 	[0];
+				]
+				var => {
+					test_arithmetic_instruction(
+						state,
+						instr,
+						[first_offset, offset],
+						duplicate!(
+							[
+								sem_fn;
+								[u8_sem]; [u16_sem]; [u32_sem]; [u64_sem]; [u128_sem];
+								[i8_sem]; [i16_sem]; [i32_sem]; [i64_sem]; [i128_sem];
+							]
+							|x| {
+								let res = sem_fn(x);
+								[order]
+							},
+						)
+					)
+				},
+			}
+		}
+	}
+}
+
 /// Test the Alu instruction variant `Add`
 #[quickcheck]
 fn add(state: AluTestState<2>, offset: Bits<5, false>) -> TestResult
@@ -376,46 +451,22 @@ fn add_carry(
 	out_var: Alu2OutputVariant,
 ) -> TestResult
 {
-	let instr = Instruction::Alu2(Alu2Variant::Add, out_var, offset);
-	let offset = offset.value as usize;
-	use scry_isa::Alu2OutputVariant::*;
-	duplicate! { [not_used []]
-		match out_var {
-			duplicate!{
-				[var idx; [High] [1] ; [Low] [0];]
-				var => test_arithmetic_instruction(
-					state,
-					instr,
-					[offset],
-					duplicate!{
-						[typ; [u8]; [u16]; [u32]; [u64]; [u128]; [i8]; [i16]; [i32]; [i64]; [i128];]
-						|x| [typ::overflowing_add(x[0],x[1]).idx as typ],
-					}
-				),
-			}
-			duplicate!{
-				[
-					var 		order(typ)				first_offset;
-					[FirstLow] 	[res.0, res.1 as typ] 	[offset];
-					[FirstHigh]	[res.1 as typ, res.0] 	[offset];
-					[NextLow] 	[res.0, res.1 as typ] 	[0];
-					[NextHigh]	[res.1 as typ, res.0] 	[0];
-				]
-				var => test_arithmetic_instruction(
-					state,
-					instr,
-					[first_offset, offset],
-					duplicate!{
-						[typ; [u8]; [u16]; [u32]; [u64]; [u128]; [i8]; [i16]; [i32]; [i64]; [i128];]
-						|x| {
-							let res = typ::overflowing_add(x[0],x[1]);
-							[order([typ])]
-						},
-					}
-				),
-			}
-		}
-	}
+	test_alu2_instruction(
+		state,
+		offset,
+		Alu2Variant::Add,
+		out_var,
+		|x| u8::overflowing_add(x[0], x[1]),
+		|x| u16::overflowing_add(x[0], x[1]),
+		|x| u32::overflowing_add(x[0], x[1]),
+		|x| u64::overflowing_add(x[0], x[1]),
+		|x| u128::overflowing_add(x[0], x[1]),
+		|x| i8::overflowing_add(x[0], x[1]),
+		|x| i16::overflowing_add(x[0], x[1]),
+		|x| i32::overflowing_add(x[0], x[1]),
+		|x| i64::overflowing_add(x[0], x[1]),
+		|x| i128::overflowing_add(x[0], x[1]),
+	)
 }
 
 /// Test the Alu instruction variant `Sub`
@@ -436,5 +487,52 @@ fn sub(state: AluTestState<2>, offset: Bits<5, false>) -> TestResult
 		|sc| i32::saturating_sub(sc[0], sc[1]),
 		|sc| i64::saturating_sub(sc[0], sc[1]),
 		|sc| i128::saturating_sub(sc[0], sc[1]),
+	)
+}
+
+/// Test the Alu instruction variant `Dec`
+#[quickcheck]
+fn dec(state: AluTestState<1>, offset: Bits<5, false>) -> TestResult
+{
+	test_alu_instruction(
+		state,
+		offset,
+		AluVariant::Dec,
+		|sc| u8::wrapping_sub(sc[0], 1),
+		|sc| u16::wrapping_sub(sc[0], 1),
+		|sc| u32::wrapping_sub(sc[0], 1),
+		|sc| u64::wrapping_sub(sc[0], 1),
+		|sc| u128::wrapping_sub(sc[0], 1),
+		|sc| i8::wrapping_sub(sc[0], 1),
+		|sc| i16::wrapping_sub(sc[0], 1),
+		|sc| i32::wrapping_sub(sc[0], 1),
+		|sc| i64::wrapping_sub(sc[0], 1),
+		|sc| i128::wrapping_sub(sc[0], 1),
+	)
+}
+
+/// Test the Alu2 instruction variant `Sub`
+#[quickcheck]
+fn sub_carry(
+	state: AluTestState<2>,
+	offset: Bits<5, false>,
+	out_var: Alu2OutputVariant,
+) -> TestResult
+{
+	test_alu2_instruction(
+		state,
+		offset,
+		Alu2Variant::Sub,
+		out_var,
+		|x| u8::overflowing_sub(x[0], x[1]),
+		|x| u16::overflowing_sub(x[0], x[1]),
+		|x| u32::overflowing_sub(x[0], x[1]),
+		|x| u64::overflowing_sub(x[0], x[1]),
+		|x| u128::overflowing_sub(x[0], x[1]),
+		|x| i8::overflowing_sub(x[0], x[1]),
+		|x| i16::overflowing_sub(x[0], x[1]),
+		|x| i32::overflowing_sub(x[0], x[1]),
+		|x| i64::overflowing_sub(x[0], x[1]),
+		|x| i128::overflowing_sub(x[0], x[1]),
 	)
 }
