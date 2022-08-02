@@ -164,6 +164,7 @@ impl Value
 		Self::singleton_typed(typ, Scalar::Nar(payload))
 	}
 
+	/// Constructs a value with the given scalars of the given type.
 	pub fn new_typed(typ: ValueType, first: Scalar, rest: Vec<Scalar>) -> Result<Self, ()>
 	{
 		if once(&first).chain(rest.iter()).all(|s| {
@@ -184,6 +185,14 @@ impl Value
 		{
 			Err(())
 		}
+	}
+
+	/// Constructs a value with the given scalars.
+	///
+	/// The type of value is equivalent to the given type parameter.
+	pub fn new<N: PrimInt>(first: Scalar, rest: Vec<Scalar>) -> Result<Self, ()>
+	{
+		Self::new_typed(ValueType::new::<N>(), first, rest)
 	}
 
 	/// Returns the type of the value.

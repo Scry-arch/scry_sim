@@ -264,7 +264,7 @@ impl Executor
 		let low = Value::new_typed(typ, result_scalars_low.remove(0), result_scalars_low)
 			.unwrap()
 			.into();
-		let high = Value::new_typed(typ, result_scalars_high.remove(0), result_scalars_high)
+		let high = Value::new::<u8>(result_scalars_high.remove(0), result_scalars_high)
 			.unwrap()
 			.into();
 		let offset = offset.value as usize;
@@ -445,8 +445,7 @@ impl Executor
 			)
 			.is_some();
 		}
-		let mut high = vec![raw_result.1 as u8];
-		high.resize(typ.scale(), 0);
+		let high = vec![raw_result.1 as u8];
 		(
 			Scalar::Val(raw_result.0.into_boxed_slice()),
 			Scalar::Val(high.into_boxed_slice()),
@@ -475,8 +474,7 @@ impl Executor
 				.is_some()
 			},
 		};
-		let mut high = vec![raw_result.1 as u8];
-		high.resize(typ.scale(), 0);
+		let high = vec![raw_result.1 as u8];
 
 		(
 			Scalar::Val(raw_result.0.into_boxed_slice()),

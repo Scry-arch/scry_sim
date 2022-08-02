@@ -13,30 +13,22 @@ use std::cmp::min;
 /// Manages the calculation of applying the given semantic function to the given
 /// inputs.
 ///
-/// Returns the result of the semantic function as scalars.
+/// Returns the result of the semantic function as singleton values.
 ///
 /// `read` must be able to convert a u8 slice into the type that will be used
-/// for the calculation. `write` must be able to write the result of the
-/// calculation into a u8 slice.
+/// for the calculation.
 fn calculate_result<T: Default + Copy, const OPS_IN: usize, const OPS_OUT: usize>(
 	inputs: [&Scalar; OPS_IN],
-	semantic_fn: impl Fn([T; OPS_IN]) -> [T; OPS_OUT],
+	semantic_fn: impl Fn([T; OPS_IN]) -> [Value; OPS_OUT],
 	read: impl Fn(&[u8]) -> T,
-	write: impl Fn(&mut [u8], T),
-) -> [Scalar; OPS_OUT]
+) -> [Value; OPS_OUT]
 {
-	let len = inputs[0].bytes().unwrap().len();
 	let mut values = [T::default(); OPS_IN];
 	values
 		.iter_mut()
 		.zip(inputs.into_iter())
 		.for_each(|(v, sc)| *v = read(sc.bytes().unwrap()));
-	semantic_fn(values).map(|r| {
-		let mut r_bytes = Vec::new();
-		r_bytes.resize(len, 0);
-		write(r_bytes.as_mut_slice(), r);
-		Scalar::Val(r_bytes.into_boxed_slice())
-	})
+	semantic_fn(values)
 }
 
 /// The restricted execution state we will use for generating states for all Alu
@@ -49,8 +41,7 @@ fn calculate_result<T: Default + Copy, const OPS_IN: usize, const OPS_OUT: usize
 type AluTestState<const OPS_IN: usize> =
 	NoCF<SimpleOps<NoReads<LimitedOps<ExecState, OPS_IN, OPS_IN>>>>;
 
-/// Tests the given Alu instruction variant on the given state with the given
-/// offset in the instruction.
+/// Tests the given arithmetic instruction on the given state.
 ///
 /// `OPS_IN` must match the exact number of inputs that given instruction
 /// variant consumes.
@@ -67,16 +58,16 @@ fn test_arithmetic_instruction<const OPS_IN: usize, const OPS_OUT: usize>(
 	state: AluTestState<OPS_IN>,
 	instr: Instruction,
 	out_idx: [usize; OPS_OUT],
-	u8_sem: impl Fn([u8; OPS_IN]) -> [u8; OPS_OUT],
-	u16_sem: impl Fn([u16; OPS_IN]) -> [u16; OPS_OUT],
-	u32_sem: impl Fn([u32; OPS_IN]) -> [u32; OPS_OUT],
-	u64_sem: impl Fn([u64; OPS_IN]) -> [u64; OPS_OUT],
-	u128_sem: impl Fn([u128; OPS_IN]) -> [u128; OPS_OUT],
-	i8_sem: impl Fn([i8; OPS_IN]) -> [i8; OPS_OUT],
-	i16_sem: impl Fn([i16; OPS_IN]) -> [i16; OPS_OUT],
-	i32_sem: impl Fn([i32; OPS_IN]) -> [i32; OPS_OUT],
-	i64_sem: impl Fn([i64; OPS_IN]) -> [i64; OPS_OUT],
-	i128_sem: impl Fn([i128; OPS_IN]) -> [i128; OPS_OUT],
+	u8_sem: impl Fn([u8; OPS_IN]) -> [Value; OPS_OUT],
+	u16_sem: impl Fn([u16; OPS_IN]) -> [Value; OPS_OUT],
+	u32_sem: impl Fn([u32; OPS_IN]) -> [Value; OPS_OUT],
+	u64_sem: impl Fn([u64; OPS_IN]) -> [Value; OPS_OUT],
+	u128_sem: impl Fn([u128; OPS_IN]) -> [Value; OPS_OUT],
+	i8_sem: impl Fn([i8; OPS_IN]) -> [Value; OPS_OUT],
+	i16_sem: impl Fn([i16; OPS_IN]) -> [Value; OPS_OUT],
+	i32_sem: impl Fn([i32; OPS_IN]) -> [Value; OPS_OUT],
+	i64_sem: impl Fn([i64; OPS_IN]) -> [Value; OPS_OUT],
+	i128_sem: impl Fn([i128; OPS_IN]) -> [Value; OPS_OUT],
 ) -> TestResult
 {
 	let state = state.0 .0 .0 .0;
@@ -130,7 +121,7 @@ fn test_arithmetic_instruction<const OPS_IN: usize, const OPS_OUT: usize>(
 			// Calculate expected result operand
 			let mut result_scalars = Vec::new();
 			let first_value = removed_first.extract_value();
-			let typ = first_value.value_type();
+			let input_typ = first_value.value_type();
 			for (scalar_idx, sc0) in first_value.iter().enumerate()
 			{
 				let nan = Scalar::Nan;
@@ -146,97 +137,43 @@ fn test_arithmetic_instruction<const OPS_IN: usize, const OPS_OUT: usize>(
 
 				// Calculate result based on type
 				use scryer::ValueType::*;
-				result_scalars.push(match typ
+				result_scalars.push(match input_typ
 				{
-					Uint(0) => calculate_result(scalars, &u8_sem, |b| b[0], |b, v| b[0] = v),
-					Uint(1) =>
-					{
-						calculate_result(
-							scalars,
-							&u16_sem,
-							LittleEndian::read_u16,
-							LittleEndian::write_u16,
-						)
-					},
-					Uint(2) =>
-					{
-						calculate_result(
-							scalars,
-							&u32_sem,
-							LittleEndian::read_u32,
-							LittleEndian::write_u32,
-						)
-					},
-					Uint(3) =>
-					{
-						calculate_result(
-							scalars,
-							&u64_sem,
-							LittleEndian::read_u64,
-							LittleEndian::write_u64,
-						)
-					},
-					Uint(4) =>
-					{
-						calculate_result(
-							scalars,
-							&u128_sem,
-							LittleEndian::read_u128,
-							LittleEndian::write_u128,
-						)
-					},
-					Int(0) =>
-					{
-						calculate_result(scalars, &i8_sem, |b| b[0] as i8, |b, v| b[0] = v as u8)
-					},
-					Int(1) =>
-					{
-						calculate_result(
-							scalars,
-							&i16_sem,
-							LittleEndian::read_i16,
-							LittleEndian::write_i16,
-						)
-					},
-					Int(2) =>
-					{
-						calculate_result(
-							scalars,
-							&i32_sem,
-							LittleEndian::read_i32,
-							LittleEndian::write_i32,
-						)
-					},
-					Int(3) =>
-					{
-						calculate_result(
-							scalars,
-							&i64_sem,
-							LittleEndian::read_i64,
-							LittleEndian::write_i64,
-						)
-					},
-					Int(4) =>
-					{
-						calculate_result(
-							scalars,
-							&i128_sem,
-							LittleEndian::read_i128,
-							LittleEndian::write_i128,
-						)
-					},
+					Uint(0) => calculate_result(scalars, &u8_sem, |b| b[0]),
+					Uint(1) => calculate_result(scalars, &u16_sem, LittleEndian::read_u16),
+					Uint(2) => calculate_result(scalars, &u32_sem, LittleEndian::read_u32),
+					Uint(3) => calculate_result(scalars, &u64_sem, LittleEndian::read_u64),
+					Uint(4) => calculate_result(scalars, &u128_sem, LittleEndian::read_u128),
+					Int(0) => calculate_result(scalars, &i8_sem, |b| b[0] as i8),
+					Int(1) => calculate_result(scalars, &i16_sem, LittleEndian::read_i16),
+					Int(2) => calculate_result(scalars, &i32_sem, LittleEndian::read_i32),
+					Int(3) => calculate_result(scalars, &i64_sem, LittleEndian::read_i64),
+					Int(4) => calculate_result(scalars, &i128_sem, LittleEndian::read_i128),
 					Uint(_) | Int(_) => unreachable!(),
 				});
 			}
-			let mut result_values = [(); OPS_OUT].map(|_| Value::new_nan_typed(typ));
+			let mut result_values = [(); OPS_OUT].map(|_| Value::new_nan_typed(input_typ));
+
 			for i in 0..OPS_OUT
 			{
 				let mut scalars = result_scalars
 					.iter()
 					.map(|sc| sc[i].clone())
 					.collect::<Vec<_>>();
-				result_values[i] = Value::new_typed(typ, scalars.remove(0), scalars).unwrap()
+				let first = scalars.remove(0);
+				let rest: Vec<Scalar> = scalars
+					.into_iter()
+					.map(|v| v.iter().next().unwrap().clone())
+					.collect();
+				result_values[i] = Value::new_typed(
+					first.value_type(),
+					first.iter().next().unwrap().clone(),
+					rest,
+				)
+				.unwrap();
 			}
+
+			let result_bytes = result_values.iter().fold(0, |acc, v| acc + v.scale());
 
 			for (idx, result_value) in out_idx.iter().zip(result_values.into_iter())
 			{
@@ -269,9 +206,9 @@ fn test_arithmetic_instruction<const OPS_IN: usize, const OPS_OUT: usize>(
 				let expected_mets: TrackReport = [
 					(Metric::InstructionReads, 1),
 					(Metric::QueuedValues, OPS_OUT),
-					(Metric::QueuedValueBytes, typ.scale() * OPS_OUT),
+					(Metric::QueuedValueBytes, result_bytes),
 					(Metric::ConsumedOperands, OPS_IN),
-					(Metric::ConsumedBytes, typ.scale() * OPS_IN),
+					(Metric::ConsumedBytes, input_typ.scale() * OPS_IN),
 				]
 				.into();
 
@@ -313,16 +250,16 @@ fn test_alu_instruction<const OPS: usize>(
 		state,
 		Instruction::Alu(variant, offset),
 		[offset.value as usize],
-		|x| [u8_sem(x)],
-		|x| [u16_sem(x)],
-		|x| [u32_sem(x)],
-		|x| [u64_sem(x)],
-		|x| [u128_sem(x)],
-		|x| [i8_sem(x)],
-		|x| [i16_sem(x)],
-		|x| [i32_sem(x)],
-		|x| [i64_sem(x)],
-		|x| [i128_sem(x)],
+		|x| [u8_sem(x).into()],
+		|x| [u16_sem(x).into()],
+		|x| [u32_sem(x).into()],
+		|x| [u64_sem(x).into()],
+		|x| [u128_sem(x).into()],
+		|x| [i8_sem(x).into()],
+		|x| [i16_sem(x).into()],
+		|x| [i32_sem(x).into()],
+		|x| [i64_sem(x).into()],
+		|x| [i128_sem(x).into()],
 	)
 }
 
@@ -331,16 +268,16 @@ fn test_alu2_instruction<const OPS: usize>(
 	offset: Bits<5, false>,
 	variant: Alu2Variant,
 	out_var: Alu2OutputVariant,
-	u8_sem: impl Fn([u8; OPS]) -> (u8, bool),
-	u16_sem: impl Fn([u16; OPS]) -> (u16, bool),
-	u32_sem: impl Fn([u32; OPS]) -> (u32, bool),
-	u64_sem: impl Fn([u64; OPS]) -> (u64, bool),
-	u128_sem: impl Fn([u128; OPS]) -> (u128, bool),
-	i8_sem: impl Fn([i8; OPS]) -> (i8, bool),
-	i16_sem: impl Fn([i16; OPS]) -> (i16, bool),
-	i32_sem: impl Fn([i32; OPS]) -> (i32, bool),
-	i64_sem: impl Fn([i64; OPS]) -> (i64, bool),
-	i128_sem: impl Fn([i128; OPS]) -> (i128, bool),
+	u8_sem: impl Fn([u8; OPS]) -> (u8, u8),
+	u16_sem: impl Fn([u16; OPS]) -> (u16, u8),
+	u32_sem: impl Fn([u32; OPS]) -> (u32, u8),
+	u64_sem: impl Fn([u64; OPS]) -> (u64, u8),
+	u128_sem: impl Fn([u128; OPS]) -> (u128, u8),
+	i8_sem: impl Fn([i8; OPS]) -> (i8, u8),
+	i16_sem: impl Fn([i16; OPS]) -> (i16, u8),
+	i32_sem: impl Fn([i32; OPS]) -> (i32, u8),
+	i64_sem: impl Fn([i64; OPS]) -> (i64, u8),
+	i128_sem: impl Fn([i128; OPS]) -> (i128, u8),
 ) -> TestResult
 {
 	let instr = Instruction::Alu2(variant, out_var, offset);
@@ -358,25 +295,25 @@ fn test_alu2_instruction<const OPS: usize>(
 					state,
 					instr,
 					[offset],
-					|x| [u8_sem(x).idx as u8],
-					|x| [u16_sem(x).idx as u16],
-					|x| [u32_sem(x).idx as u32],
-					|x| [u64_sem(x).idx as u64],
-					|x| [u128_sem(x).idx as u128],
-					|x| [i8_sem(x).idx as i8],
-					|x| [i16_sem(x).idx as i16],
-					|x| [i32_sem(x).idx as i32],
-					|x| [i64_sem(x).idx as i64],
-					|x| [i128_sem(x).idx as i128],
+					|x| [u8_sem(x).idx.into()],
+					|x| [u16_sem(x).idx.into()],
+					|x| [u32_sem(x).idx.into()],
+					|x| [u64_sem(x).idx.into()],
+					|x| [u128_sem(x).idx.into()],
+					|x| [i8_sem(x).idx.into()],
+					|x| [i16_sem(x).idx.into()],
+					|x| [i32_sem(x).idx.into()],
+					|x| [i64_sem(x).idx.into()],
+					|x| [i128_sem(x).idx.into()],
 				),
 			}
 			duplicate!{
 				[
 					var 		order				first_offset;
-					[FirstLow] 	[res.0, res.1.into()] 	[offset];
-					[FirstHigh]	[res.1.into(), res.0] 	[offset];
-					[NextLow] 	[res.0, res.1.into()] 	[0];
-					[NextHigh]	[res.1.into(), res.0] 	[0];
+					[FirstLow] 	[res.0.into(), res.1.into()] 	[offset];
+					[FirstHigh]	[res.1.into(), res.0.into()] 	[offset];
+					[NextLow] 	[res.0.into(), res.1.into()] 	[0];
+					[NextHigh]	[res.1.into(), res.0.into()] 	[0];
 				]
 				var => {
 					test_arithmetic_instruction(
@@ -451,21 +388,26 @@ fn add_carry(
 	out_var: Alu2OutputVariant,
 ) -> TestResult
 {
+	fn conv<I: Copy>(inputs: [I; 2], semantic_fn: impl Fn(I, I) -> (I, bool)) -> (I, u8)
+	{
+		let result = semantic_fn(inputs[0], inputs[1]);
+		(result.0, result.1 as u8)
+	}
 	test_alu2_instruction(
 		state,
 		offset,
 		Alu2Variant::Add,
 		out_var,
-		|x| u8::overflowing_add(x[0], x[1]),
-		|x| u16::overflowing_add(x[0], x[1]),
-		|x| u32::overflowing_add(x[0], x[1]),
-		|x| u64::overflowing_add(x[0], x[1]),
-		|x| u128::overflowing_add(x[0], x[1]),
-		|x| i8::overflowing_add(x[0], x[1]),
-		|x| i16::overflowing_add(x[0], x[1]),
-		|x| i32::overflowing_add(x[0], x[1]),
-		|x| i64::overflowing_add(x[0], x[1]),
-		|x| i128::overflowing_add(x[0], x[1]),
+		|x| conv(x, u8::overflowing_add),
+		|x| conv(x, u16::overflowing_add),
+		|x| conv(x, u32::overflowing_add),
+		|x| conv(x, u64::overflowing_add),
+		|x| conv(x, u128::overflowing_add),
+		|x| conv(x, i8::overflowing_add),
+		|x| conv(x, i16::overflowing_add),
+		|x| conv(x, i32::overflowing_add),
+		|x| conv(x, i64::overflowing_add),
+		|x| conv(x, i128::overflowing_add),
 	)
 }
 
@@ -519,20 +461,25 @@ fn sub_carry(
 	out_var: Alu2OutputVariant,
 ) -> TestResult
 {
+	fn conv<I: Copy>(inputs: [I; 2], semantic_fn: impl Fn(I, I) -> (I, bool)) -> (I, u8)
+	{
+		let result = semantic_fn(inputs[0], inputs[1]);
+		(result.0, result.1 as u8)
+	}
 	test_alu2_instruction(
 		state,
 		offset,
 		Alu2Variant::Sub,
 		out_var,
-		|x| u8::overflowing_sub(x[0], x[1]),
-		|x| u16::overflowing_sub(x[0], x[1]),
-		|x| u32::overflowing_sub(x[0], x[1]),
-		|x| u64::overflowing_sub(x[0], x[1]),
-		|x| u128::overflowing_sub(x[0], x[1]),
-		|x| i8::overflowing_sub(x[0], x[1]),
-		|x| i16::overflowing_sub(x[0], x[1]),
-		|x| i32::overflowing_sub(x[0], x[1]),
-		|x| i64::overflowing_sub(x[0], x[1]),
-		|x| i128::overflowing_sub(x[0], x[1]),
+		|x| conv(x, u8::overflowing_sub),
+		|x| conv(x, u16::overflowing_sub),
+		|x| conv(x, u32::overflowing_sub),
+		|x| conv(x, u64::overflowing_sub),
+		|x| conv(x, u128::overflowing_sub),
+		|x| conv(x, i8::overflowing_sub),
+		|x| conv(x, i16::overflowing_sub),
+		|x| conv(x, i32::overflowing_sub),
+		|x| conv(x, i64::overflowing_sub),
+		|x| conv(x, i128::overflowing_sub),
 	)
 }
