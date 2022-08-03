@@ -31,19 +31,14 @@ pub enum Metric
 	QueuedValueBytes,
 	/// Read operands queued on any operand queue
 	QueuedReads,
-	/// Value operands that are never consumed
-	DiscardedValues,
-	/// Value operand bytes that are never consumed
-	DiscardedValuesBytes,
-	/// Read operands that are never consumed and thus don't result in a read
-	/// from memory
-	DiscardedReads,
 	/// Operands reordered from one operand queue into another
 	ReorderedOperands,
 
 	// Memory
 	/// Instructions read from memory
 	InstructionReads,
+	/// Data reads from memory performed
+	DataReads,
 	/// Data bytes read from memory
 	DataBytesRead,
 	/// Data bytes written to memory

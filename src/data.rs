@@ -202,24 +202,6 @@ impl OperandQueue
 		{
 			fn drop(&mut self)
 			{
-				let (disc_read, disc_val, disc_bytes) =
-					self.queue.ready.iter().fold((0, 0, 0), |mut acc, op| {
-						if op.must_read().is_some()
-						{
-							acc.0 += 1;
-						}
-						else
-						{
-							let val = op.get_value().unwrap();
-							acc.1 += 1;
-							acc.2 += val.size();
-						}
-						acc
-					});
-				self.tracker.add_stat(Metric::DiscardedReads, disc_read);
-				self.tracker.add_stat(Metric::DiscardedValues, disc_val);
-				self.tracker
-					.add_stat(Metric::DiscardedValuesBytes, disc_bytes);
 				self.queue.ready = self.queue.queue.pop_front().unwrap_or(VecDeque::new());
 			}
 		}
@@ -228,6 +210,12 @@ impl OperandQueue
 			mem,
 			tracker,
 		}
+	}
+
+	/// An iterator peeking at the operands at the front of the operand queue.
+	pub fn ready_peek(&self) -> impl Iterator<Item = &Operand>
+	{
+		self.ready.iter()
 	}
 
 	/// Pushes the given operand to the back of the queue at the given index.
@@ -314,22 +302,19 @@ impl OperandQueue
 	/// queue.
 	///
 	/// If the stack is empty, the current queue becomes empty.
-	pub fn pop_queue(&mut self, tracker: &mut impl MetricTracker)
+	pub fn pop_queue(&mut self)
 	{
-		tracker.add_stat(
-			Metric::DiscardedReads,
-			self.queue
-				.iter()
-				.flat_map(|qs| qs.iter())
-				.fold(0, |mut acc, op| {
-					if op.must_read().is_some()
-					{
-						acc += 1;
-					}
-					acc
-				}),
-		);
-		self.queue = self.stack.pop_back().unwrap_or(VecDeque::new());
+		self.queue = self.stack.pop_front().unwrap_or(VecDeque::new());
+
+		// Pop front of queue into front of ready-queue.
+		// This ensures operands sent to the instruction after a call
+		// are at the front of the queue after the return
+		if let Some(ops) = self.queue.pop_front()
+		{
+			ops.into_iter()
+				.rev()
+				.for_each(|op| self.ready.push_front(op));
+		}
 	}
 
 	pub fn set_frame_state(&self, idx: usize, to_set: &mut CallFrameState)

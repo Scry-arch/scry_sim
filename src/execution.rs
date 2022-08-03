@@ -10,15 +10,12 @@ use std::fmt::Debug;
 
 /// The result of performing one execution step
 #[derive(Debug)]
-pub enum ExecResult<M: Memory, I: Iterator<Item = Value> + Debug>
+pub enum ExecError
 {
-	/// The executor performed the step successfully
-	Ok(Executor<M>),
+	/// The simulation triggered an exception
+	Exception,
 
-	/// The executor finished executing with the given result values and reports
-	Done(I),
-
-	/// The execution caused an error
+	/// The execution caused a simulation error
 	Err,
 }
 
@@ -79,15 +76,35 @@ impl<M: Memory> Executor<M>
 	/// executed before the step ends.
 	///
 	/// Updated the given metric tracker accordingly.
-	pub fn step(
-		mut self,
-		tracker: &mut impl MetricTracker,
-	) -> ExecResult<M, impl Iterator<Item = Value> + Debug>
+	pub fn step(mut self, tracker: &mut impl MetricTracker) -> Result<Self, ExecError>
 	{
 		let raw_instr = self
 			.memory
 			.read_instr(self.control.next_addr, tracker)
 			.unwrap();
+		let has_non_uniform_operands = |ops: &OperandQueue| {
+			ops.ready_peek().count() < 1
+				|| ops.ready_peek().count() > 2
+				|| ops.ready_peek().any(|op| op.must_read().is_some())
+				|| ops.ready_peek().any(|op| {
+					let first_op_type = ops
+						.ready_peek()
+						.next()
+						.unwrap()
+						.get_value()
+						.unwrap()
+						.value_type();
+					let val = op.get_value().unwrap();
+					val.value_type() != first_op_type
+						|| val.iter().any(|scalar| {
+							match scalar
+							{
+								Scalar::Nar(_) | Scalar::Nan => true,
+								_ => false,
+							}
+						})
+				})
+		};
 		let instr = Instruction::decode(byteorder::LittleEndian::read_u16(&raw_instr));
 		{
 			use Instruction::*;
@@ -117,10 +134,20 @@ impl<M: Memory> Executor<M>
 				},
 				Alu(variant, offset) =>
 				{
+					// TODO: support different types/lengths
+					if has_non_uniform_operands(&self.operands)
+					{
+						return Err(ExecError::Exception);
+					}
 					self.perform_alu(variant, offset, tracker);
 				},
 				Alu2(variant, out, offset) =>
 				{
+					// TODO: support different types/lengths
+					if has_non_uniform_operands(&self.operands)
+					{
+						return Err(ExecError::Exception);
+					}
 					self.perform_alu2(variant, out, offset, tracker);
 				},
 				_ => todo!(),
@@ -128,20 +155,11 @@ impl<M: Memory> Executor<M>
 		}
 		if self.control.next_addr(&mut self.operands, tracker)
 		{
-			ExecResult::Ok(self)
+			Ok(self)
 		}
 		else
 		{
-			ExecResult::Done(
-				self.operands
-					.ready_iter(&mut self.memory, tracker)
-					.map(|(v, err)| {
-						assert!(err.is_none());
-						v
-					})
-					.collect::<Vec<_>>()
-					.into_iter(),
-			)
+			Err(ExecError::Err)
 		}
 	}
 

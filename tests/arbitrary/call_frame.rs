@@ -130,3 +130,10 @@ fn long_operand_queue_invalid(mut frame: CallFrameState, q_idx: usize) -> TestRe
 	}
 	TestResult::from_bool(!frame.valid())
 }
+
+/// Tests that any frame is equals to itself
+#[quickcheck]
+fn equal_self(frame: CallFrameState) -> bool
+{
+	frame == frame
+}

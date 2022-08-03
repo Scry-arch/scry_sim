@@ -4,7 +4,7 @@ use quickcheck::TestResult;
 use scry_isa::{Alu2OutputVariant, Alu2Variant, AluVariant, Bits, Instruction};
 use scryer::{
 	arbitrary::{LimitedOps, NoCF, NoReads, SimpleOps},
-	execution::{ExecResult, Executor},
+	execution::Executor,
 	memory::BlockedMemory,
 	ExecState, Metric, OperandState, Scalar, TrackReport, Value,
 };
@@ -97,7 +97,7 @@ fn test_arithmetic_instruction<const OPS_IN: usize, const OPS_OUT: usize>(
 	// Perform one step
 	let res = match exec.step(&mut metrics)
 	{
-		ExecResult::Ok(exec) =>
+		Ok(exec) =>
 		{
 			// Calculate expected state after step
 			let mut expected_state = state.clone();

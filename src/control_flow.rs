@@ -92,7 +92,7 @@ impl ControlFlow
 							branches: HashMap::new(),
 						},
 					);
-					self.call_stack.push_back(old_frame);
+					self.call_stack.push_front(old_frame);
 					tracker.add_stat(Metric::TriggeredCalls, 1);
 				},
 				Return =>
@@ -100,8 +100,8 @@ impl ControlFlow
 					let ret_addr = self.call_frame.ret_addr;
 					self.next_addr = ret_addr;
 
-					queue.pop_queue(tracker);
-					self.call_frame = if let Some(s) = self.call_stack.pop_back()
+					queue.pop_queue();
+					self.call_frame = if let Some(s) = self.call_stack.pop_front()
 					{
 						s
 					}
