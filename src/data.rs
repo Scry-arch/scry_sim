@@ -164,19 +164,19 @@ impl OperandQueue
 	/// When the iterator is dropped, the queue discards the remaining operands
 	/// at the front of the queue, and moves the next set of operands to the
 	/// front.
-	pub fn ready_iter<'a, T: MetricTracker>(
+	pub fn ready_iter<'a, M: Memory, T: MetricTracker>(
 		&'a mut self,
-		mem: &'a mut Memory,
+		mem: &'a mut M,
 		tracker: &'a mut T,
 	) -> impl 'a + Iterator<Item = (Value, Option<(MemError, usize)>)>
 	{
-		struct RemoveIter<'b, Ti: MetricTracker>
+		struct RemoveIter<'b, M: Memory, Ti: MetricTracker>
 		{
 			queue: &'b mut OperandQueue,
-			mem: &'b mut Memory,
+			mem: &'b mut M,
 			tracker: &'b mut Ti,
 		}
-		impl<'b, Ti: MetricTracker> Iterator for RemoveIter<'b, Ti>
+		impl<'b, M: Memory, Ti: MetricTracker> Iterator for RemoveIter<'b, M, Ti>
 		{
 			type Item = (Value, Option<(MemError, usize)>);
 
@@ -198,7 +198,7 @@ impl OperandQueue
 				})
 			}
 		}
-		impl<'b, Ti: MetricTracker> Drop for RemoveIter<'b, Ti>
+		impl<'b, M: Memory, Ti: MetricTracker> Drop for RemoveIter<'b, M, Ti>
 		{
 			fn drop(&mut self)
 			{

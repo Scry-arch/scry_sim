@@ -1,10 +1,10 @@
 use byteorder::{ByteOrder, LittleEndian};
-use quickcheck::TestResult;
-use scry_isa::Instruction;
+use quickcheck::{Arbitrary, Gen, TestResult};
+use scry_isa::{Alu2Variant, AluVariant, CallVariant, Instruction};
 use scryer::{
 	arbitrary::NoCF,
 	execution::{ExecResult, Executor},
-	memory::Memory,
+	memory::BlockedMemory,
 	ExecState, Metric, OperandState, TrackReport,
 };
 use std::iter::once;
@@ -16,7 +16,7 @@ mod control_flow;
 #[quickcheck]
 fn import_export_executor(state: ExecState, mem: Vec<u8>, base_addr: usize) -> bool
 {
-	let executor = Executor::from_state(&state, Memory::new(mem, base_addr));
+	let executor = Executor::from_state(&state, BlockedMemory::new(mem, base_addr));
 	let new_state = executor.state();
 
 	new_state == state
@@ -27,7 +27,10 @@ fn instruction_nop(NoCF(state): NoCF<ExecState>) -> TestResult
 {
 	let mut nop_encoded = [0; 2];
 	LittleEndian::write_u16(&mut nop_encoded, Instruction::Nop.encode());
-	let exec = Executor::from_state(&state, Memory::new(nop_encoded.into(), state.address));
+	let exec = Executor::from_state(
+		&state,
+		BlockedMemory::new(nop_encoded.into(), state.address),
+	);
 	let mut metrics = TrackReport::new();
 	match exec.step(&mut metrics)
 	{

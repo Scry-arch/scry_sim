@@ -5,7 +5,7 @@ use scry_isa::{Alu2OutputVariant, Alu2Variant, AluVariant, Bits, Instruction};
 use scryer::{
 	arbitrary::{LimitedOps, NoCF, NoReads, SimpleOps},
 	execution::{ExecResult, Executor},
-	memory::Memory,
+	memory::BlockedMemory,
 	ExecState, Metric, OperandState, Scalar, TrackReport, Value,
 };
 use std::cmp::min;
@@ -91,7 +91,7 @@ fn test_arithmetic_instruction<const OPS_IN: usize, const OPS_OUT: usize>(
 	LittleEndian::write_u16(&mut encoded, instr.encode());
 
 	// Create execution from state with only access to the instruction
-	let exec = Executor::from_state(&state, Memory::new(encoded.into(), state.address));
+	let exec = Executor::from_state(&state, BlockedMemory::new(encoded.into(), state.address));
 	let mut metrics = TrackReport::new();
 
 	// Perform one step

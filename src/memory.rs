@@ -18,6 +18,45 @@ pub enum MemError
 	InvalidAddr,
 }
 
+/// Trait for operations on memory.
+pub trait Memory
+{
+	/// Read from the given address, into the given value, the given number of
+	/// elements.
+	///
+	/// The given value doesn't have to have correct or valid scalars compared
+	/// to the value type. The read value will be valid compared to the type and
+	/// the given length.
+	///
+	/// Updates the report as a data read.
+	fn read_data(
+		&mut self,
+		addr: usize,
+		into: &mut Value,
+		len: usize,
+		tracker: &mut impl MetricTracker,
+	) -> Result<(), (MemError, usize)>;
+
+	/// Read 2 bytes from the given address into the slice.
+	///
+	/// Updates the report as an instruction read.
+	fn read_instr(
+		&mut self,
+		addr: usize,
+		tracker: &mut impl MetricTracker,
+	) -> Result<[u8; 2], MemError>;
+
+	/// Write to the given address from the given value.
+	///
+	/// Updates the report as data is written
+	fn write(
+		&mut self,
+		addr: usize,
+		from: &Value,
+		tracker: &mut impl MetricTracker,
+	) -> Result<(), (MemError, usize)>;
+}
+
 #[derive(Debug)]
 struct MemBlock
 {
@@ -137,15 +176,16 @@ impl MemBlock
 	}
 }
 
+/// Represents blocks of memory
 #[derive(Debug)]
-pub struct Memory
+pub struct BlockedMemory
 {
 	/// Offsets + memory blocks
 	/// Sorted by offset, biggest to smallest
 	blocks: Vec<(usize, MemBlock)>,
 }
 
-impl Memory
+impl BlockedMemory
 {
 	/// Construct a new memory object with only the given block
 	pub fn new(mem: Vec<u8>, offset: usize) -> Self
@@ -167,12 +207,14 @@ impl Memory
 			.ok_or((MemError::InvalidAddr, addr))
 			.and_then(|(offset, mem)| mem.read(addr - offset, size))
 	}
-
+}
+impl Memory for BlockedMemory
+{
 	/// Read from the given address, into the given value, the given number of
 	/// elements
 	///
 	/// Updates the report as a data read.
-	pub fn read_data(
+	fn read_data(
 		&mut self,
 		addr: usize,
 		into: &mut Value,
@@ -213,7 +255,7 @@ impl Memory
 	/// Read 2 bytes from the given address into the slice.
 	///
 	/// Updates the report as an instruction read.
-	pub fn read_instr(
+	fn read_instr(
 		&mut self,
 		addr: usize,
 		tracker: &mut impl MetricTracker,
@@ -235,7 +277,7 @@ impl Memory
 		}
 	}
 
-	pub fn write(
+	fn write(
 		&mut self,
 		addr: usize,
 		from: &Value,

@@ -10,10 +10,10 @@ use std::fmt::Debug;
 
 /// The result of performing one execution step
 #[derive(Debug)]
-pub enum ExecResult<I: Iterator<Item = Value> + Debug>
+pub enum ExecResult<M: Memory, I: Iterator<Item = Value> + Debug>
 {
 	/// The executor performed the step successfully
-	Ok(Executor),
+	Ok(Executor<M>),
 
 	/// The executor finished executing with the given result values and reports
 	Done(I),
@@ -24,18 +24,18 @@ pub enum ExecResult<I: Iterator<Item = Value> + Debug>
 
 /// Used to execute instructions.
 #[derive(Debug)]
-pub struct Executor
+pub struct Executor<M: Memory>
 {
 	control: ControlFlow,
 	operands: OperandQueue,
-	memory: Memory,
+	memory: M,
 }
-impl Executor
+impl<M: Memory> Executor<M>
 {
 	/// Constructs an executor that starts executing from the given address from
 	/// the given memory. The given values are the inputs to the instruction at
 	/// start_addr
-	pub fn new(start_addr: usize, memory: Memory, ready_ops: impl Iterator<Item = Value>) -> Self
+	pub fn new(start_addr: usize, memory: M, ready_ops: impl Iterator<Item = Value>) -> Self
 	{
 		Self {
 			operands: OperandQueue::new(ready_ops),
@@ -46,7 +46,7 @@ impl Executor
 
 	/// Constructions a new executor that is equivalent to the given execution
 	/// state and uses the given memory.
-	pub fn from_state(state: &ExecState, memory: Memory) -> Self
+	pub fn from_state(state: &ExecState, memory: M) -> Self
 	{
 		Self {
 			operands: state.into(),
@@ -82,7 +82,7 @@ impl Executor
 	pub fn step(
 		mut self,
 		tracker: &mut impl MetricTracker,
-	) -> ExecResult<impl Iterator<Item = Value> + Debug>
+	) -> ExecResult<M, impl Iterator<Item = Value> + Debug>
 	{
 		let raw_instr = self
 			.memory
