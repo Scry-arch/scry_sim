@@ -1,6 +1,6 @@
 use duplicate::duplicate_item;
 use quickcheck::{Arbitrary, Gen};
-use scryer::{
+use scry_sim::{
 	arbitrary::{LimitedOps, NoCF, NoReads, Restriction, SimpleOps},
 	CallFrameState, ExecState,
 };

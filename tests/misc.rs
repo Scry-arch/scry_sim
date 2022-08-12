@@ -1,8 +1,5 @@
 use byteorder::{ByteOrder, LittleEndian};
-use scryer::{
-	memory::{MemError, Memory},
-	Metric, MetricTracker, Scalar, Value,
-};
+use scry_sim::{MemError, Memory, Metric, MetricTracker, Scalar, Value};
 
 /// A memory that always produces the same instruction and data.
 ///

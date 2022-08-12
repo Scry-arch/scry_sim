@@ -1,10 +1,10 @@
 use crate::{executor::SupportedInstruction, misc::RepeatingMem};
 use quickcheck::TestResult;
 use scry_isa::Instruction;
-use scryer::{
+use scry_sim::{
 	arbitrary::{InstrAddr, NoCF},
-	execution::{ExecError, Executor},
-	CallFrameState, ControlFlowType, ExecState, Metric, MetricTracker, OperandState, TrackReport,
+	CallFrameState, ControlFlowType, ExecError, ExecState, Executor, Metric, MetricTracker,
+	OperandState, TrackReport,
 };
 use std::{collections::HashMap, iter::once};
 

@@ -2,11 +2,9 @@ use byteorder::{ByteOrder, LittleEndian};
 use duplicate::duplicate;
 use quickcheck::TestResult;
 use scry_isa::{Alu2OutputVariant, Alu2Variant, AluVariant, Bits, Instruction};
-use scryer::{
+use scry_sim::{
 	arbitrary::{LimitedOps, NoCF, NoReads, SimpleOps},
-	execution::Executor,
-	memory::BlockedMemory,
-	ExecState, Metric, OperandState, Scalar, TrackReport, Value,
+	BlockedMemory, ExecState, Executor, Metric, OperandState, Scalar, TrackReport, Value,
 };
 use std::cmp::min;
 
@@ -136,7 +134,7 @@ fn test_arithmetic_instruction<const OPS_IN: usize, const OPS_OUT: usize>(
 				}
 
 				// Calculate result based on type
-				use scryer::ValueType::*;
+				use scry_sim::ValueType::*;
 				result_scalars.push(match input_typ
 				{
 					Uint(0) => calculate_result(scalars, &u8_sem, |b| b[0]),

@@ -1,12 +1,12 @@
 extern crate core;
 
 pub mod arbitrary;
-pub mod control_flow;
-pub mod data;
+mod control_flow;
+mod data;
 mod exec_state;
-pub mod execution;
-pub mod memory;
+mod execution;
+mod memory;
 mod metrics;
 mod value;
 
-pub use self::{exec_state::*, metrics::*, value::*};
+pub use self::{exec_state::*, execution::*, memory::*, metrics::*, value::*};

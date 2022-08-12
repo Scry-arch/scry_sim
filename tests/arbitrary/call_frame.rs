@@ -1,5 +1,5 @@
 use quickcheck::TestResult;
-use scryer::{arbitrary::InstrAddr, CallFrameState, ControlFlowType, OperandState, ValueType};
+use scry_sim::{arbitrary::InstrAddr, CallFrameState, ControlFlowType, OperandState, ValueType};
 
 /// Tests that all arbitrarily generated call frames are valid
 #[quickcheck]

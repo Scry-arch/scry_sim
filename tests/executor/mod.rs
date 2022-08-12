@@ -2,9 +2,7 @@ use crate::misc::RepeatingMem;
 use byteorder::{ByteOrder, LittleEndian};
 use quickcheck::{Arbitrary, Gen, TestResult};
 use scry_isa::{Alu2Variant, AluVariant, Instruction};
-use scryer::{
-	arbitrary::NoCF, execution::Executor, memory::BlockedMemory, ExecState, Metric, TrackReport,
-};
+use scry_sim::{arbitrary::NoCF, BlockedMemory, ExecState, Executor, Metric, TrackReport};
 
 mod alu_instructions;
 mod control_flow;

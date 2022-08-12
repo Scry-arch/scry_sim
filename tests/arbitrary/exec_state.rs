@@ -1,5 +1,5 @@
 use duplicate::duplicate_item;
-use scryer::{
+use scry_sim::{
 	arbitrary::{LimitedOps, NoCF, NoReads, Restriction, SimpleOps},
 	CallFrameState, ExecState, ValueType,
 };
