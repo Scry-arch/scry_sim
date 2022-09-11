@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 scry_isa = { path = "../scry_isa" }
-scryasm = { path = "../scryasm" }
+scry_asm = { path = "../scry_asm" }
 num-traits = "0.2.14"
 bitvec = "1.0.0"
 byteorder = "1.4.3"
