@@ -112,7 +112,6 @@ impl<M: Memory> Executor<M>
 			{
 				Call(CallVariant::Ret, offset) =>
 				{
-					assert_eq!(offset.value(), 0);
 					self.control.ret(
 						self.control.next_addr + ((offset.value() * 2) as usize),
 						tracker,

@@ -1,7 +1,7 @@
 use crate::misc::RepeatingMem;
 use byteorder::{ByteOrder, LittleEndian};
 use quickcheck::{Arbitrary, Gen, TestResult};
-use scry_isa::{Alu2Variant, AluVariant, Instruction};
+use scry_isa::{Alu2Variant, AluVariant, CallVariant, Instruction};
 use scry_sim::{arbitrary::NoCF, BlockedMemory, ExecState, Executor, Metric, TrackReport};
 
 mod alu_instructions;
@@ -89,8 +89,7 @@ impl Arbitrary for SupportedInstruction
 				| Alu2(Alu2Variant::Add, _, _)
 				| Alu2(Alu2Variant::Sub, _, _)
 				| Nop
-				// | Call(CallVariant::Ret, _)
-				=> break,
+				| Call(CallVariant::Ret, _) => break,
 				_ => instr = Instruction::arbitrary(g),
 			}
 		}

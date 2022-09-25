@@ -1,5 +1,6 @@
 use byteorder::{ByteOrder, LittleEndian};
-use scry_sim::{MemError, Memory, Metric, MetricTracker, Scalar, Value};
+use scry_sim::{MemError, Memory, Metric, MetricTracker, OperandState, Scalar, Value};
+use std::collections::HashMap;
 
 /// A memory that always produces the same instruction and data.
 ///
@@ -62,4 +63,15 @@ impl Memory for RepeatingMem
 		tracker.add_stat(Metric::DataBytesWritten, from.size());
 		Ok(())
 	}
+}
+
+/// Clones the given operand queues and advances all indices by 1
+pub fn clone_advance_queues(
+	from: &HashMap<usize, (OperandState<usize>, Vec<OperandState<usize>>)>,
+) -> HashMap<usize, (OperandState<usize>, Vec<OperandState<usize>>)>
+{
+	from.clone()
+		.into_iter()
+		.map(|(idx, ops)| (idx - 1, ops))
+		.collect()
 }

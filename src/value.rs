@@ -235,6 +235,18 @@ impl Value
 		let first = &mut self.first;
 		std::iter::once(first).chain(self.rest.iter_mut())
 	}
+
+	/// Returns a reference to the first scalar
+	pub fn get_first(&self) -> &Scalar
+	{
+		&self.first
+	}
+
+	/// Returns a shared reference to the first scalar
+	pub fn get_first_mut(&mut self) -> &mut Scalar
+	{
+		&mut self.first
+	}
 }
 impl<N: PrimInt> From<N> for Value
 {
