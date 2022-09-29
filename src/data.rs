@@ -276,8 +276,8 @@ impl OperandQueue
 		self.push_op_unreported(target_idx, op);
 	}
 
-	/// Moves all operands on `src_idx` queue to the back of the `dest_idx`
-	/// queue. If `src_idx`
+	/// Moves all operands on the ready queue to the back of the `dest_idx`
+	/// queue.
 	pub fn reorder_ready(&mut self, dest_idx: usize, tracker: &mut impl MetricTracker)
 	{
 		while let Some(op) = self.ready.remove(0).map(|op| {

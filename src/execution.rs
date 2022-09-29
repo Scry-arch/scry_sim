@@ -149,6 +149,25 @@ impl<M: Memory> Executor<M>
 					}
 					self.perform_alu2(variant, out, offset, tracker);
 				},
+				Constant(bits) =>
+				{
+					// Create operand from immediate and add to next queue
+					let new_val: Value = if bits.is_signed()
+					{
+						(Bits::<8, true>::try_from(bits).unwrap().value as i8).into()
+					}
+					else
+					{
+						(Bits::<8, false>::try_from(bits).unwrap().value as u8).into()
+					};
+					self.operands.push_operand(1, new_val.into(), tracker);
+
+					// Forward any ready operands to the next queue
+					self.operands.reorder_ready(1, tracker);
+
+					// Discard (now empty) ready queue
+					let _ = self.operands.ready_iter(&mut self.memory, tracker);
+				},
 				_ => todo!(),
 			}
 		}
