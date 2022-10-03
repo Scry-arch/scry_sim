@@ -1,6 +1,6 @@
 use crate::{
 	executor::SupportedInstruction,
-	misc::{clone_advance_queues, RepeatingMem},
+	misc::{advance_queues, RepeatingMem},
 };
 use quickcheck::TestResult;
 use scry_isa::{BitValue, Bits, CallVariant, Instruction};
@@ -254,7 +254,7 @@ fn return_non_trigger(NoCF(state): NoCF<ExecState>, offset: Bits<6, false>) -> T
 	// Return discards any operands its given
 	expected_state.frame.op_queues.remove(&0);
 	expected_state.frame.clean_reads();
-	expected_state.frame.op_queues = clone_advance_queues(&expected_state.frame.op_queues);
+	expected_state.frame.op_queues = advance_queues(expected_state.frame.op_queues);
 	expected_state.frame.branches.insert(
 		state.address + (offset.value() as usize * 2),
 		ControlFlowType::Return,

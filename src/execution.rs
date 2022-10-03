@@ -126,6 +126,26 @@ impl<M: Memory> Executor<M>
 					// Discard (now empty) ready queue
 					let _ = self.operands.ready_iter(&mut self.memory, tracker);
 				},
+				Duplicate(to_next, tar1, tar2) =>
+				{
+					let ops: Vec<_> = self.operands.ready_peek().cloned().collect();
+					if to_next
+					{
+						for op in ops.clone()
+						{
+							self.operands.push_operand(1, op, tracker);
+						}
+					}
+					for op in ops
+					{
+						self.operands
+							.push_operand(tar1.value as usize + 1, op, tracker);
+					}
+					self.operands
+						.reorder_ready(tar2.value() as usize + 1, tracker);
+					// Discard (now empty) ready queue
+					let _ = self.operands.ready_iter(&mut self.memory, tracker);
+				},
 				Nop =>
 				{
 					// Discard ready queue

@@ -66,12 +66,9 @@ impl Memory for RepeatingMem
 }
 
 /// Clones the given operand queues and advances all indices by 1
-pub fn clone_advance_queues(
-	from: &HashMap<usize, (OperandState<usize>, Vec<OperandState<usize>>)>,
+pub fn advance_queues(
+	from: HashMap<usize, (OperandState<usize>, Vec<OperandState<usize>>)>,
 ) -> HashMap<usize, (OperandState<usize>, Vec<OperandState<usize>>)>
 {
-	from.clone()
-		.into_iter()
-		.map(|(idx, ops)| (idx - 1, ops))
-		.collect()
+	from.into_iter().map(|(idx, ops)| (idx - 1, ops)).collect()
 }
