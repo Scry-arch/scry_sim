@@ -1,5 +1,5 @@
 use crate::{
-	data::OperandQueue, metrics::MetricTracker, CallFrameState, ControlFlowType, ExecState, Metric,
+	data::OperandStack, metrics::MetricTracker, CallFrameState, ControlFlowType, ExecState, Metric,
 };
 use std::collections::{HashMap, VecDeque};
 
@@ -63,12 +63,16 @@ impl ControlFlow
 
 	/// Computes the address of the next instruction to execute
 	///
-	/// The given queue is suitably updated if a call or return is triggered.
+	/// The given operand stack is suitably updated if a call or return is
+	/// triggered.
 	///
 	/// If the call stack is empty after a return is triggered, false is
 	/// returned. Otherwise true
-	pub fn next_addr(&mut self, queue: &mut OperandQueue, tracker: &mut impl MetricTracker)
-		-> bool
+	pub fn next_addr(
+		&mut self,
+		op_stack: &mut OperandStack,
+		tracker: &mut impl MetricTracker,
+	) -> bool
 	{
 		if let Some(cft) = self.call_frame.branches.remove(&self.next_addr)
 		{
@@ -84,7 +88,7 @@ impl ControlFlow
 				{
 					let old_next = self.next_addr;
 					self.next_addr = tar;
-					queue.push_queue();
+					op_stack.push_queue();
 					let old_frame = std::mem::replace(
 						&mut self.call_frame,
 						CallFrame {
@@ -100,7 +104,7 @@ impl ControlFlow
 					let ret_addr = self.call_frame.ret_addr;
 					self.next_addr = ret_addr;
 
-					queue.pop_queue();
+					op_stack.pop_queue();
 					self.call_frame = if let Some(s) = self.call_stack.pop_front()
 					{
 						s

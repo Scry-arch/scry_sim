@@ -1,5 +1,7 @@
 use quickcheck::TestResult;
-use scry_sim::{arbitrary::InstrAddr, CallFrameState, ControlFlowType, OperandState, ValueType};
+use scry_sim::{
+	arbitrary::InstrAddr, CallFrameState, ControlFlowType, OperandList, OperandState, ValueType,
+};
 
 /// Tests that all arbitrarily generated call frames are valid
 #[quickcheck]
@@ -59,36 +61,43 @@ fn unaligned_control_target_invalid(
 #[quickcheck]
 fn reference_non_read_invalid(
 	mut frame: CallFrameState,
-	q_idx: usize,
+	list_idx: usize,
 	op_idx: usize,
 	read_ref: usize,
 ) -> bool
 {
-	let op_q_len = frame.op_queues.len();
+	let op_q_len = frame.op_queue.len();
 	let new_op = OperandState::MustRead(frame.reads.len().saturating_add(read_ref));
 
 	if op_q_len == 0
 	{
-		frame.op_queues.insert(q_idx, (new_op, vec![]));
+		frame
+			.op_queue
+			.insert(list_idx, OperandList::new(new_op, vec![]));
 	}
 	else
 	{
-		let (op1, op_rest) = frame.op_queues.iter_mut().nth(q_idx % op_q_len).unwrap().1;
+		let op_list = frame
+			.op_queue
+			.iter_mut()
+			.nth(list_idx % op_q_len)
+			.unwrap()
+			.1;
 
 		// Insert operand in appropriate place
 		if op_idx % 4 == 0
 		{
-			let old_op1 = std::mem::replace(op1, new_op);
-			op_rest.insert(0, old_op1);
+			let old_op1 = std::mem::replace(&mut op_list.first, new_op);
+			op_list.rest.insert(0, old_op1);
 		}
 		else
 		{
-			op_rest.insert(op_idx % op_rest.len(), new_op);
+			op_list.rest.insert(op_idx % op_list.rest.len(), new_op);
 		}
 		// Ensure no reads are no longer referenced
-		if op_rest.len() > 3
+		if op_list.len() > 4
 		{
-			op_rest.pop().unwrap();
+			op_list.rest.pop().unwrap();
 			frame.clean_reads();
 		}
 	}
@@ -112,21 +121,21 @@ fn read_without_ref_invalid(
 	!frame.valid()
 }
 
-/// Tests that any frame with an operand queue of more than 4 operands is
+/// Tests that any frame with an operand list of more than 4 operands is
 /// invalid
 #[quickcheck]
-fn long_operand_queue_invalid(mut frame: CallFrameState, q_idx: usize) -> TestResult
+fn long_operand_list_invalid(mut frame: CallFrameState, list_idx: usize) -> TestResult
 {
-	let op_qs_len = frame.op_queues.len();
+	let op_qs_len = frame.op_queue.len();
 	if op_qs_len == 0
 	{
 		return TestResult::discard();
 	}
-	let (_, (op1, op_rest)) = frame.op_queues.iter_mut().nth(q_idx % op_qs_len).unwrap();
+	let (_, op_list) = frame.op_queue.iter_mut().nth(list_idx % op_qs_len).unwrap();
 	// Add 4 copies of the first operand, which results in at least 5 operands
 	for _ in 0..4
 	{
-		op_rest.push(op1.clone());
+		op_list.push(op_list.first.clone());
 	}
 	TestResult::from_bool(!frame.valid())
 }

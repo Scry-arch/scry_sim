@@ -1,14 +1,14 @@
 use crate::{
 	executor::SupportedInstruction,
-	misc::{advance_queues, RepeatingMem},
+	misc::{advance_queue, RepeatingMem},
 };
 use quickcheck::TestResult;
 use scry_isa::{BitValue, Bits, CallVariant, Instruction};
 use scry_sim::{
 	arbitrary::NoCF, CallFrameState, ControlFlowType, ExecError, ExecState, Executor, Metric,
-	MetricTracker, OperandState, TrackReport, ValueType,
+	MetricTracker, OperandList, OperandState, TrackReport, ValueType,
 };
-use std::{collections::HashMap, iter::once};
+use std::collections::HashMap;
 
 /// Used to test triggering of returns
 fn return_trigger_impl(
@@ -21,9 +21,9 @@ fn return_trigger_impl(
 	mut frame: CallFrameState,
 	// The next instruction to be executed
 	instr: Instruction,
-	// Operands expected to be at the end of the ready queue after the return trigger.
+	// Operands expected to be at the end of the ready list after the return trigger.
 	// They should be following any operands that were already there from before the call.
-	mut expected_ready_ops: Option<(OperandState<usize>, Vec<OperandState<usize>>)>,
+	mut expected_ready_ops: Option<OperandList>,
 	// The reads of the expected operands
 	expected_reads: Vec<(usize, usize, ValueType)>,
 	// The metrics expected after the execution step
@@ -37,31 +37,25 @@ fn return_trigger_impl(
 	expected_state.address = frame.ret_addr;
 
 	// First, offset the expected operand's MustReads by the existing reads
-	expected_ready_ops.iter_mut().for_each(
-		|(first, rest): &mut (OperandState<usize>, Vec<OperandState<usize>>)| {
-			once(first).chain(rest.iter_mut()).for_each(|op| {
-				if let OperandState::MustRead(idx) = op
-				{
-					*idx += expected_state.frame.reads.len();
-				}
-			});
-		},
-	);
+	expected_ready_ops.iter_mut().for_each(|ops| {
+		ops.iter_mut().for_each(|op| {
+			if let OperandState::MustRead(idx) = op
+			{
+				*idx += expected_state.frame.reads.len();
+			}
+		});
+	});
 
 	// Add operands and reads to expected state
-	if let Some((expected_first, expected_rest)) = expected_ready_ops
+	if let Some(expected_ops) = expected_ready_ops
 	{
-		if let Some((_, rest)) = expected_state.frame.op_queues.get_mut(&0)
+		if let Some(op_list) = expected_state.frame.op_queue.get_mut(&0)
 		{
-			rest.push(expected_first);
-			rest.extend(expected_rest);
+			expected_ops.into_iter().for_each(|op| op_list.push(op));
 		}
 		else
 		{
-			expected_state
-				.frame
-				.op_queues
-				.insert(0, (expected_first, expected_rest));
+			expected_state.frame.op_queue.insert(0, expected_ops);
 		}
 		expected_state
 			.frame
@@ -150,33 +144,26 @@ fn return_trigger(
 		Ok(exec) =>
 		{
 			let state = exec.state();
-			let ready_ops = state.frame.op_queues.get(&0).cloned();
+			let ready_ops = state.frame.op_queue.get(&0).cloned();
 			let mut reads = Vec::new();
-			let ready_ops = ready_ops.map(|(first, rest)| {
-				let mut read_map = HashMap::new();
-				let mut convert_read = |op: OperandState<usize>| {
+			let ready_ops = ready_ops.map(|mut op_list| {
+				let mut read_map = HashMap::<usize, _>::new();
+				op_list.iter_mut().for_each(|op| {
 					if let OperandState::MustRead(idx) = op
 					{
-						if let Some(idx_mapped) = read_map.get(&idx)
+						if let Some(idx_mapped) = read_map.get(idx)
 						{
-							OperandState::MustRead(*idx_mapped)
+							*idx = *idx_mapped;
 						}
 						else
 						{
-							reads.push(state.frame.reads[idx]);
-							read_map.insert(idx, reads.len() - 1);
-							OperandState::MustRead(reads.len() - 1)
+							reads.push(state.frame.reads[*idx]);
+							read_map.insert(*idx, reads.len() - 1);
+							*idx = reads.len() - 1;
 						}
 					}
-					else
-					{
-						op
-					}
-				};
-				(
-					convert_read(first),
-					rest.into_iter().map(|op| convert_read(op)).collect(),
-				)
+				});
+				op_list
 			});
 			(ready_ops, reads)
 		},
@@ -201,12 +188,12 @@ fn return_immediately(state: NoCF<ExecState>, frame: CallFrameState) -> TestResu
 {
 	// The operands given to the branch location must be moved into the caller
 	// frame.
-	let mut expected_ready_ops = frame.op_queues.get(&1).cloned();
+	let mut expected_ready_ops = frame.op_queue.get(&1).cloned();
 	let mut expected_reads = Vec::new();
-	if let Some((first, rest)) = &mut expected_ready_ops
+	if let Some(ops) = &mut expected_ready_ops
 	{
 		let mut read_map = Vec::new();
-		std::iter::once(first).chain(rest).for_each(|op| {
+		ops.iter_mut().for_each(|op| {
 			if let OperandState::MustRead(read_idx) = op
 			{
 				// Read operands must be renumbered
@@ -252,9 +239,9 @@ fn return_non_trigger(NoCF(state): NoCF<ExecState>, offset: Bits<6, false>) -> T
 
 	let mut expected_state = state.clone();
 	// Return discards any operands its given
-	expected_state.frame.op_queues.remove(&0);
+	expected_state.frame.op_queue.remove(&0);
 	expected_state.frame.clean_reads();
-	expected_state.frame.op_queues = advance_queues(expected_state.frame.op_queues);
+	expected_state.frame.op_queue = advance_queue(expected_state.frame.op_queue);
 	expected_state.frame.branches.insert(
 		state.address + (offset.value() as usize * 2),
 		ControlFlowType::Return,

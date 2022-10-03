@@ -1,10 +1,12 @@
+use crate::misc::advance_queue;
 use byteorder::{ByteOrder, LittleEndian};
 use duplicate::duplicate;
 use quickcheck::TestResult;
 use scry_isa::{Alu2OutputVariant, Alu2Variant, AluVariant, Bits, Instruction};
 use scry_sim::{
 	arbitrary::{LimitedOps, NoCF, NoReads, SimpleOps},
-	BlockedMemory, ExecState, Executor, Metric, OperandState, Scalar, TrackReport, Value,
+	BlockedMemory, ExecState, Executor, Metric, OperandList, OperandState, Scalar, TrackReport,
+	Value,
 };
 use std::cmp::min;
 
@@ -47,7 +49,7 @@ type AluTestState<const OPS_IN: usize> =
 /// variant produces. `*_sem` is a semantic function for each type of integer
 /// that can be used to check whether the instruction has performed correctly.
 /// So they are essentially the golden model.
-/// `out_idx` indicates which operand queue (by index) that the outputs are put
+/// `out_idx` indicates which operand list (by index) that the outputs are put
 /// on.
 ///
 /// Tests both the resulting state after taking 1 step and that the reported
@@ -73,14 +75,14 @@ fn test_arithmetic_instruction<const OPS_IN: usize, const OPS_OUT: usize>(
 	if out_idx.iter().any(|idx| {
 		state
 		.frame
-		.op_queues
+		.op_queue
 		.get(&(idx + 1))
-		// Ensure there is room on the queue for the needed number of operands
-		.filter(|(_, op_rest)| op_rest.len() > (3-min(3, out_idx.iter().filter(|i| *i == idx).count())))
+		// Ensure there is room on the list for the needed number of operands
+		.filter(|op_list| op_list.rest.len() > (3-min(3, out_idx.iter().filter(|i| *i == idx).count())))
 		.is_some()
 	})
 	{
-		// Target queue is full, so can't push results to it
+		// Target operand list is full, so can't push results to it
 		return TestResult::discard();
 	}
 
@@ -102,23 +104,20 @@ fn test_arithmetic_instruction<const OPS_IN: usize, const OPS_OUT: usize>(
 			// Advance to next instruction
 			expected_state.address += 2;
 
-			let mut new_op_q = state.frame.op_queues.clone();
-			// Remove ready-queue
-			let (removed_first, removed_rest) = new_op_q.remove(&0).unwrap();
-			let removed_rest_values: Vec<Value> = removed_rest
+			let mut new_op_q = state.frame.op_queue.clone();
+			// Remove ready list
+			let removed_list = new_op_q.remove(&0).unwrap();
+			let removed_rest_values: Vec<Value> = removed_list
+				.rest
 				.into_iter()
 				.map(|op| op.extract_value())
 				.collect();
 
-			// Reduce all operand queue indices by 1
-			expected_state.frame.op_queues = new_op_q
-				.into_iter()
-				.map(|(idx, ops)| (idx - 1, ops))
-				.collect();
+			expected_state.frame.op_queue = advance_queue(new_op_q);
 
 			// Calculate expected result operand
 			let mut result_scalars = Vec::new();
-			let first_value = removed_first.extract_value();
+			let first_value = removed_list.first.extract_value();
 			let input_typ = first_value.value_type();
 			for (scalar_idx, sc0) in first_value.iter().enumerate()
 			{
@@ -175,19 +174,19 @@ fn test_arithmetic_instruction<const OPS_IN: usize, const OPS_OUT: usize>(
 
 			for (idx, result_value) in out_idx.iter().zip(result_values.into_iter())
 			{
-				// Put expected result in correct expected state queue
-				if let Some((_, op_rest)) = expected_state.frame.op_queues.get_mut(idx)
+				// Put expected result in correct expected state list
+				if let Some(op_list) = expected_state.frame.op_queue.get_mut(idx)
 				{
-					// Push on end of queue
-					op_rest.push(OperandState::Ready(result_value));
+					// Push on end of list
+					op_list.push(OperandState::Ready(result_value));
 				}
 				else
 				{
-					// No existing queue, create it
-					expected_state
-						.frame
-						.op_queues
-						.insert(*idx, (OperandState::Ready(result_value), vec![]));
+					// No existing list, create it
+					expected_state.frame.op_queue.insert(
+						*idx,
+						OperandList::new(OperandState::Ready(result_value), vec![]),
+					);
 				}
 			}
 			if exec.state() != expected_state

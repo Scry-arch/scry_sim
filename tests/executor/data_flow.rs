@@ -2,7 +2,6 @@ use crate::executor::test_simple_instruction;
 use quickcheck::TestResult;
 use scry_isa::{Bits, Instruction};
 use scry_sim::{arbitrary::NoCF, ExecState, Metric, OperandState};
-use std::iter::once;
 
 /// Tests the "duplicate" instruction
 #[quickcheck]
@@ -16,20 +15,20 @@ fn duplicate(
 	test_simple_instruction(
 		state,
 		Instruction::Duplicate(dup_next, target1, target2),
-		|old_op_queues| {
-			let mut new_op_q = old_op_queues.clone();
+		|old_op_queue| {
+			let mut new_op_q = old_op_queue.clone();
 
-			if let Some((old_first, old_rest)) = new_op_q.remove(&0)
+			if let Some(old_ops) = new_op_q.remove(&0)
 			{
-				// Push a copy of old_ready_ops to the queue of the given index
+				// Push a copy of old_ready_ops to the list of the given index
 				let mut push_idx = |idx| {
-					if let Some((_, ops_rest)) = new_op_q.get_mut(&idx)
+					if let Some(ops) = new_op_q.get_mut(&idx)
 					{
-						ops_rest.extend(once(old_first.clone()).chain(old_rest.clone()));
+						ops.extend(old_ops.clone().into_iter());
 					}
 					else
 					{
-						new_op_q.insert(idx, (old_first.clone(), old_rest.clone()));
+						new_op_q.insert(idx, old_ops.clone());
 					}
 				};
 
@@ -42,11 +41,11 @@ fn duplicate(
 			}
 			new_op_q
 		},
-		|old_op_queues| {
+		|old_op_queue| {
 			let (old_op_ready, old_op_ready_bytes, old_op_reads) =
-				old_op_queues.get(&0).map_or((0, 0, 0), |(first, rest)| {
-					once(first)
-						.chain(rest)
+				old_op_queue.get(&0).map_or((0, 0, 0), |op_list| {
+					op_list
+						.iter()
 						.fold((0, 0, 0), |(ready, read_bytes, reads), op| {
 							match op
 							{

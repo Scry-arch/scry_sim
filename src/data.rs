@@ -1,14 +1,14 @@
 use crate::{
 	memory::{MemError, Memory},
 	value::Value,
-	CallFrameState, ExecState, Metric, MetricTracker, OperandState, ValueType,
+	CallFrameState, ExecState, Metric, MetricTracker, OperandList, OperandState, ValueType,
 };
 use num_traits::PrimInt;
 use std::{
 	cell::{Ref, RefCell},
 	collections::{HashMap, VecDeque},
 	fmt::Debug,
-	iter::{once, FromIterator},
+	iter::FromIterator,
 	ops::Deref,
 	rc::Rc,
 };
@@ -131,9 +131,9 @@ impl From<Value> for Operand
 	}
 }
 
-/// The instruction input operand queue
+/// The instruction input operand stack
 #[derive(Debug)]
-pub struct OperandQueue
+pub struct OperandStack
 {
 	/// Stack of operand queues for (nested) callers of the current function
 	stack: VecDeque<VecDeque<VecDeque<Operand>>>,
@@ -144,7 +144,7 @@ pub struct OperandQueue
 	/// The operands that should be used by the next instruction
 	ready: VecDeque<Operand>,
 }
-impl OperandQueue
+impl OperandStack
 {
 	pub fn new(ready_ops: impl Iterator<Item = Value>) -> Self
 	{
@@ -155,15 +155,14 @@ impl OperandQueue
 		}
 	}
 
-	/// An iterator providing the operands at the front of the operand queue.
-	/// The given memory is used to perform any pending read operations.
+	/// An iterator providing the operand list at the front of the operand
+	/// queue. The given memory is used to perform any pending read operations.
 	///
 	/// Only when `next` is called, will a returned operand be treated as
 	/// "consumed" by the report.
 	///
 	/// When the iterator is dropped, the queue discards the remaining operands
-	/// at the front of the queue, and moves the next set of operands to the
-	/// front.
+	/// at the front of the queue, and moves the next operand list to the front.
 	pub fn ready_iter<'a, M: Memory, T: MetricTracker>(
 		&'a mut self,
 		mem: &'a mut M,
@@ -172,7 +171,7 @@ impl OperandQueue
 	{
 		struct RemoveIter<'b, M: Memory, Ti: MetricTracker>
 		{
-			queue: &'b mut OperandQueue,
+			stack: &'b mut OperandStack,
 			mem: &'b mut M,
 			tracker: &'b mut Ti,
 		}
@@ -182,7 +181,7 @@ impl OperandQueue
 
 			fn next(&mut self) -> Option<Self::Item>
 			{
-				self.queue.ready.pop_front().and_then(|mut op| {
+				self.stack.ready.pop_front().and_then(|mut op| {
 					let mut err = None;
 					let val = op
 						.get_value_or::<(), _>(|addr, len, typ| {
@@ -202,11 +201,11 @@ impl OperandQueue
 		{
 			fn drop(&mut self)
 			{
-				self.queue.ready = self.queue.queue.pop_front().unwrap_or(VecDeque::new());
+				self.stack.ready = self.stack.queue.pop_front().unwrap_or(VecDeque::new());
 			}
 		}
 		RemoveIter {
-			queue: self,
+			stack: self,
 			mem,
 			tracker,
 		}
@@ -239,7 +238,7 @@ impl OperandQueue
 		}
 	}
 
-	/// Pushes the given operand to the back of the queue at the given index.
+	/// Pushes the given operand to the back of the list at the given index.
 	pub fn push_operand(&mut self, idx: usize, op: Operand, tracker: &mut impl MetricTracker)
 	{
 		if let Some(v) = op.get_value()
@@ -254,11 +253,12 @@ impl OperandQueue
 		self.push_op_unreported(idx, op);
 	}
 
-	/// Moves the operand found on the queue with index `src_q_idx`, position
-	/// `src_idx` in that queue, to the back of the queue with idx 'target_idx'
+	/// Moves the operand found on the operand list with index `src_list_idx`,
+	/// position `src_idx` in that list, to the back of the list with idx
+	/// 'target_idx'
 	pub fn reorder(
 		&mut self,
-		src_q_idx: usize,
+		src_list_idx: usize,
 		src_idx: usize,
 		target_idx: usize,
 		tracker: &mut impl MetricTracker,
@@ -266,7 +266,7 @@ impl OperandQueue
 	{
 		let op = self
 			.queue
-			.get_mut(src_q_idx)
+			.get_mut(src_list_idx)
 			.and_then(|q| q.remove(src_idx))
 			.map(|op| {
 				tracker.add_stat(Metric::ReorderedOperands, 1);
@@ -276,7 +276,7 @@ impl OperandQueue
 		self.push_op_unreported(target_idx, op);
 	}
 
-	/// Moves all operands on the ready queue to the back of the `dest_idx`
+	/// Moves all operands on the ready list to the back of the `dest_idx`
 	/// queue.
 	pub fn reorder_ready(&mut self, dest_idx: usize, tracker: &mut impl MetricTracker)
 	{
@@ -290,14 +290,14 @@ impl OperandQueue
 	}
 
 	/// Pushes the current operand queue onto the queue stack keeping the ready
-	/// queue in place.
+	/// list in place.
 	pub fn push_queue(&mut self)
 	{
 		self.stack
 			.push_back(std::mem::replace(&mut self.queue, VecDeque::new()));
 	}
 
-	/// Pops the top operand queue from the queue stack keeping the ready queue
+	/// Pops the top operand queue from the queue stack keeping the ready list
 	/// in place. The popped queue becomes the current queue, discarding the old
 	/// queue.
 	///
@@ -306,7 +306,7 @@ impl OperandQueue
 	{
 		self.queue = self.stack.pop_front().unwrap_or(VecDeque::new());
 
-		// Pop front of queue into front of ready-queue.
+		// Pop front of queue into front of ready list.
 		// This ensures operands sent to the instruction after a call
 		// are at the front of the queue after the return
 		if let Some(ops) = self.queue.pop_front()
@@ -328,7 +328,7 @@ impl OperandQueue
 			None.into_iter().chain(self.stack.get(idx - 1).unwrap())
 		};
 		let mut reads = Vec::new();
-		let mut op_queues = HashMap::new();
+		let mut op_queue = HashMap::new();
 
 		let mut convert_queue = |q: &VecDeque<Operand>| {
 			let mut all_ops = q
@@ -357,16 +357,16 @@ impl OperandQueue
 					}
 				})
 				.collect::<Vec<_>>();
-			(all_ops.remove(0), all_ops)
+			OperandList::new(all_ops.remove(0), all_ops)
 		};
 		from.enumerate().for_each(|(idx, q)| {
 			if q.len() > 0
 			{
-				op_queues.insert(idx, convert_queue(q));
+				op_queue.insert(idx, convert_queue(q));
 			}
 		});
 
-		to_set.op_queues = op_queues;
+		to_set.op_queue = op_queue;
 		to_set.reads = reads
 			.iter()
 			.map(|op| {
@@ -390,11 +390,11 @@ impl OperandQueue
 	}
 }
 /// Constructs an OperandQueue equivalent to an execution state
-impl<'a> From<&'a ExecState> for OperandQueue
+impl<'a> From<&'a ExecState> for OperandStack
 {
 	fn from(state: &'a ExecState) -> Self
 	{
-		let frame_op_queues = |frame: &CallFrameState| {
+		let frame_op_queue = |frame: &CallFrameState| {
 			let reads: Vec<_> = frame
 				.reads
 				.clone()
@@ -402,36 +402,36 @@ impl<'a> From<&'a ExecState> for OperandQueue
 				.map(|(addr, len, typ)| Operand::read_typed(addr, len, typ))
 				.collect();
 			frame
-				.op_queues
+				.op_queue
 				.iter()
-				.fold(VecDeque::new(), |mut queues, (q_idx, (f, q))| {
-					let ops = once(f).chain(q.iter()).cloned().map(|op| {
+				.fold(VecDeque::new(), |mut op_lists, (list_idx, op_list)| {
+					let ops = op_list.iter().cloned().map(|op| {
 						match op
 						{
 							OperandState::MustRead(idx) => reads[idx].clone(),
 							OperandState::Ready(v) => v.clone().into(),
 						}
 					});
-					if queues.len() <= *q_idx
+					if op_lists.len() <= *list_idx
 					{
-						queues.resize_with(*q_idx + 1, VecDeque::new);
+						op_lists.resize_with(*list_idx + 1, VecDeque::new);
 					}
-					queues.get_mut(*q_idx).unwrap().extend(ops);
-					queues
+					op_lists.get_mut(*list_idx).unwrap().extend(ops);
+					op_lists
 				})
 		};
-		let mut curr_frame_op_queues = frame_op_queues(&state.frame);
-		let first_queue = curr_frame_op_queues.pop_front().unwrap_or(VecDeque::new());
+		let mut curr_frame_op_queue = frame_op_queue(&state.frame);
+		let first_list = curr_frame_op_queue.pop_front().unwrap_or(VecDeque::new());
 		Self {
 			stack: state.frame_stack.clone().into_iter().fold(
 				VecDeque::new(),
 				|mut stack, frame| {
-					stack.push_back(frame_op_queues(&frame));
+					stack.push_back(frame_op_queue(&frame));
 					stack
 				},
 			),
-			queue: curr_frame_op_queues,
-			ready: first_queue,
+			queue: curr_frame_op_queue,
+			ready: first_list,
 		}
 	}
 }

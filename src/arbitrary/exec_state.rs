@@ -1,4 +1,6 @@
-use crate::{CallFrameState, ControlFlowType, ExecState, OperandState, Scalar, Value, ValueType};
+use crate::{
+	CallFrameState, ControlFlowType, ExecState, OperandList, OperandState, Scalar, Value, ValueType,
+};
 use duplicate::{duplicate_item, *};
 use num_traits::{PrimInt, Unsigned};
 use quickcheck::{Arbitrary, Gen};
@@ -143,10 +145,10 @@ impl Arbitrary for CallFrameState
 		let ret_addr: usize = InstrAddr::arbitrary(g).0;
 		let branches: Vec<(InstrAddr, ControlFlowType)> = Arbitrary::arbitrary(g);
 
-		let mut op_queues = HashMap::new();
+		let mut op_queue = HashMap::new();
 		let mut reads = Vec::new();
 
-		// How many operand queues
+		// How many operand lists
 		for i in 0..SmallInt::<usize>::arbitrary(g).0
 		{
 			let op_count = SmallInt::<u8>::arbitrary(g).0 % 5;
@@ -157,7 +159,7 @@ impl Arbitrary for CallFrameState
 				{
 					ops.push(OperandState::arbitrary(g, &mut reads));
 				}
-				op_queues.insert(i, (ops.remove(0), ops));
+				op_queue.insert(i, OperandList::new(ops.remove(0), ops));
 			}
 		}
 
@@ -167,7 +169,7 @@ impl Arbitrary for CallFrameState
 				.into_iter()
 				.map(|(trig, ctrl)| (trig.0, ctrl))
 				.collect(),
-			op_queues,
+			op_queue,
 			reads,
 		}
 	}
@@ -235,7 +237,7 @@ impl Arbitrary for CallFrameState
 								);
 								self.state = BranchTyp(*idx);
 							} else {
-								self.state = Operand(self.original.op_queues.keys().cloned().collect(),0);
+								self.state = Operand(self.original.op_queue.keys().cloned().collect(),0);
 							}
 							self.next()
 						}
@@ -268,32 +270,32 @@ impl Arbitrary for CallFrameState
 								self.next()
 							}
 						}
-						Operand(q_idxs,op_idx) => {
-							if let Some(q_idx) = q_idxs.front() {
-								// Reduce the index of queues where possible
-								let q_clone = if *q_idx>0 && !self.original.op_queues.contains_key(&(q_idx-1)) {
+						Operand(list_idxs,op_idx) => {
+							if let Some(list_idx) = list_idxs.front() {
+								// Reduce the index of operand lists where possible
+								let q_clone = if *list_idx>0 && !self.original.op_queue.contains_key(&(list_idx-1)) {
 									let mut q_clone = self.original.clone();
-									let q = q_clone.op_queues.remove(q_idx).unwrap();
-									q_clone.op_queues.insert(q_idx-1, q);
+									let q = q_clone.op_queue.remove(list_idx).unwrap();
+									q_clone.op_queue.insert(list_idx-1, q);
 									Some(q_clone)
 								} else {
 									None
 								};
 
-								let (q_first, q_rest) = self.original.op_queues.get(&q_idx).unwrap();
-								if let Some(op) = once(q_first).chain(q_rest.iter()).nth(*op_idx) {
+								let op_list = self.original.op_queue.get(&list_idx).unwrap();
+								if let Some(op) = op_list.iter().nth(*op_idx) {
 									// Remove operand
 									let mut rem_clone = self.original.clone();
-									let (op_first, op_rest) = rem_clone.op_queues.get_mut(q_idx).unwrap();
+									let rem_from = rem_clone.op_queue.get_mut(list_idx).unwrap();
 									if *op_idx == 0 {
-										if op_rest.len() > 0{
-											*op_first = op_rest.remove(0);
+										if rem_from.rest.len() > 0{
+											rem_from.first = rem_from.rest.remove(0);
 										} else {
-											// Only one operand in queue, remove whole queue
-											rem_clone.op_queues.remove(q_idx).unwrap().0;
+											// Only one operand in list, remove whole list
+											rem_clone.op_queue.remove(list_idx).unwrap();
 										}
 									} else {
-										op_rest.remove(*op_idx-1);
+										rem_from.rest.remove(*op_idx-1);
 									}
 									rem_clone.clean_reads();
 
@@ -301,15 +303,14 @@ impl Arbitrary for CallFrameState
 										OperandState::Ready(v) => {
 											// Shrink value operand
 											let clone = self.original.clone();
-											let q_idx = *q_idx;
+											let list_idx = *list_idx;
 											let op_idx2 = *op_idx;
 											self.other = Box::new(once(rem_clone).chain(v.shrink().map(move|v| {
 												let mut clone = clone.clone();
-												let (first, rest) = clone
-													.op_queues
-													.get_mut(&q_idx)
-													.unwrap();
-												*once(first).chain(rest.iter_mut())
+												*clone
+													.op_queue
+													.get_mut(&list_idx)
+													.unwrap().iter_mut()
 													.nth(op_idx2)
 													.unwrap() = OperandState::Ready(v);
 												clone
@@ -319,11 +320,11 @@ impl Arbitrary for CallFrameState
 											// Disconnect from other MustReads by cloning the read and referencing it instead
 											let clone1 = if self.original.count_read_refs(*read_idx) > 1 {
 												let mut clone = self.original.clone();
-												let (first, rest) = clone
-													.op_queues
-													.get_mut(q_idx)
-													.unwrap();
-												*once(first).chain(rest.iter_mut())
+												*clone
+													.op_queue
+													.get_mut(list_idx)
+													.unwrap()
+													.iter_mut()
 													.nth(*op_idx)
 													.unwrap() = OperandState::MustRead(read_idx+1);
 												clone.reads.push(self.original.reads.get(*read_idx).unwrap().clone());
@@ -334,11 +335,11 @@ impl Arbitrary for CallFrameState
 
 											// Convert to simple ready value
 											let mut clone2 = self.original.clone();
-											let (first, rest) = clone2
-												.op_queues
-												.get_mut(q_idx)
-												.unwrap();
-											*once(first).chain(rest.iter_mut())
+											*clone2
+												.op_queue
+												.get_mut(list_idx)
+												.unwrap()
+												.iter_mut()
 												.nth(*op_idx)
 												.unwrap() = OperandState::Ready(Value::new_nan::<u8>());
 											clone2.clean_reads();
@@ -348,13 +349,12 @@ impl Arbitrary for CallFrameState
 									}
 
 									*op_idx += 1;
-									self.next()
 								} else {
-									// No more operands, next queue
-									q_idxs.pop_front().unwrap();
+									// No more operands, next list
+									list_idxs.pop_front().unwrap();
 									*op_idx = 0;
-									self.next()
 								}
+								self.next()
 							} else {
 								self.state = ReadsAddr(0);
 								self.next()
@@ -655,10 +655,10 @@ impl<T: Restriction> Restriction for NoReads<T>
 		!inner
 			.as_ref()
 			.frame
-			.op_queues
+			.op_queue
 			.get(&0)
-			.map_or(false, |(op1, op_rest)| {
-				once(op1).chain(op_rest.iter()).any(|op| {
+			.map_or(false, |op_list| {
+				op_list.iter().any(|op| {
 					match op
 					{
 						OperandState::MustRead(_) => true,
@@ -671,9 +671,9 @@ impl<T: Restriction> Restriction for NoReads<T>
 	fn conform(state: &mut Self::Inner, g: &mut Gen)
 	{
 		// Convert any MustRead operand to simple value
-		if let Some((op1, op_rest)) = state.as_mut().frame.op_queues.get_mut(&0)
+		if let Some(op_list) = state.as_mut().frame.op_queue.get_mut(&0)
 		{
-			once(op1).chain(op_rest.iter_mut()).for_each(|op| {
+			op_list.iter_mut().for_each(|op| {
 				if let OperandState::MustRead(_) = op
 				{
 					*op = OperandState::Ready(Arbitrary::arbitrary(g));
@@ -694,9 +694,9 @@ impl<T: Restriction, const NEXT_OP_MIN: usize, const NEXT_OP_MAX: usize> Restric
 		let next_op_count = inner
 			.as_ref()
 			.frame
-			.op_queues
+			.op_queue
 			.get(&0)
-			.map_or(0, |(_, op_rest)| 1 + op_rest.len());
+			.map_or(0, OperandList::len);
 		next_op_count >= NEXT_OP_MIN && next_op_count <= NEXT_OP_MAX
 	}
 
@@ -705,9 +705,9 @@ impl<T: Restriction, const NEXT_OP_MIN: usize, const NEXT_OP_MAX: usize> Restric
 		let next_op_count = state
 			.as_ref()
 			.frame
-			.op_queues
+			.op_queue
 			.get(&0)
-			.map_or(0, |(_, op_rest)| 1 + op_rest.len());
+			.map_or(0, OperandList::len);
 		// Ensure minimum is upheld
 		if next_op_count < NEXT_OP_MIN
 		{
@@ -718,10 +718,14 @@ impl<T: Restriction, const NEXT_OP_MIN: usize, const NEXT_OP_MAX: usize> Restric
 			}
 			if ops_to_add > 0
 			{
-				if state.as_ref().frame.op_queues.get(&0).is_none()
+				if state.as_ref().frame.op_queue.get(&0).is_none()
 				{
 					let op1 = OperandState::arbitrary(g, &mut state.as_mut().frame.reads);
-					state.as_mut().frame.op_queues.insert(0, (op1, Vec::new()));
+					state
+						.as_mut()
+						.frame
+						.op_queue
+						.insert(0, OperandList::new(op1, Vec::new()));
 					ops_to_add -= 1;
 				}
 				if ops_to_add > 0
@@ -729,14 +733,7 @@ impl<T: Restriction, const NEXT_OP_MIN: usize, const NEXT_OP_MAX: usize> Restric
 					for _ in 0..ops_to_add
 					{
 						let op = OperandState::arbitrary(g, &mut state.as_mut().frame.reads);
-						state
-							.as_mut()
-							.frame
-							.op_queues
-							.get_mut(&0)
-							.unwrap()
-							.1
-							.push(op);
+						state.as_mut().frame.op_queue.get_mut(&0).unwrap().push(op);
 					}
 				}
 			}
@@ -745,17 +742,17 @@ impl<T: Restriction, const NEXT_OP_MIN: usize, const NEXT_OP_MAX: usize> Restric
 		{
 			if NEXT_OP_MAX == 0
 			{
-				state.as_mut().frame.op_queues.remove(&0).unwrap();
+				state.as_mut().frame.op_queue.remove(&0).unwrap();
 			}
 			else
 			{
 				state
 					.as_mut()
 					.frame
-					.op_queues
+					.op_queue
 					.get_mut(&0)
 					.unwrap()
-					.1
+					.rest
 					.resize_with(NEXT_OP_MAX - 1, || unreachable!());
 			}
 		}
@@ -768,10 +765,10 @@ impl<T: Restriction> Restriction for SimpleOps<T>
 
 	fn restriction_holds(inner: &Self::Inner) -> bool
 	{
-		if inner.as_ref().frame.op_queues.contains_key(&0)
+		if inner.as_ref().frame.op_queue.contains_key(&0)
 		{
-			let (op1, op_rest) = inner.as_ref().frame.op_queues.get(&0).unwrap();
-			let (len, typ) = match op1
+			let op_list = inner.as_ref().frame.op_queue.get(&0).unwrap();
+			let (len, typ) = match &op_list.first
 			{
 				OperandState::MustRead(idx) =>
 				{
@@ -782,7 +779,7 @@ impl<T: Restriction> Restriction for SimpleOps<T>
 				},
 				OperandState::Ready(v) => (v.len(), v.value_type()),
 			};
-			once(op1).chain(op_rest.iter()).all(|op| {
+			op_list.iter().all(|op| {
 				match op
 				{
 					OperandState::MustRead(idx) =>
@@ -806,9 +803,9 @@ impl<T: Restriction> Restriction for SimpleOps<T>
 
 	fn conform(state: &mut Self::Inner, g: &mut Gen)
 	{
-		if state.as_ref().frame.op_queues.contains_key(&0)
+		if state.as_ref().frame.op_queue.contains_key(&0)
 		{
-			let (len, typ) = match &state.as_ref().frame.op_queues.get(&0).unwrap().0
+			let (len, typ) = match &state.as_ref().frame.op_queue.get(&0).unwrap().first
 			{
 				OperandState::MustRead(idx) =>
 				{
@@ -820,9 +817,9 @@ impl<T: Restriction> Restriction for SimpleOps<T>
 				OperandState::Ready(v) => (v.len(), v.value_type()),
 			};
 			let frame = &mut state.as_mut().frame;
-			let (op1, op_rest) = frame.op_queues.get_mut(&0).unwrap();
+			let op_list = frame.op_queue.get_mut(&0).unwrap();
 			// Convert all operands to the same type/length of the first
-			for op in once(op1).chain(op_rest.iter_mut())
+			for op in op_list.iter_mut()
 			{
 				match op
 				{
@@ -853,8 +850,8 @@ impl<T: Restriction> Restriction for SimpleOps<T>
 
 	fn add_shrink(_state: &Self::Inner) -> Box<dyn Iterator<Item = Self>>
 	{
-		let typ = _state.as_ref().frame.op_queues.get(&0).map(|(op1, _)| {
-			match op1
+		let typ = _state.as_ref().frame.op_queue.get(&0).map(|op_list| {
+			match &op_list.first
 			{
 				OperandState::MustRead(idx) => _state.as_ref().frame.reads[*idx].2,
 				OperandState::Ready(v) => v.value_type(),
@@ -866,8 +863,7 @@ impl<T: Restriction> Restriction for SimpleOps<T>
 			typ.shrink().map(move |new_typ| {
 				let mut clone = self_clone.clone();
 				let clone_frame = &mut clone.as_mut().frame;
-				let (op1, op_rest) = clone_frame.op_queues.get_mut(&0).unwrap();
-				for op in once(op1).chain(op_rest.iter_mut())
+				for op in clone_frame.op_queue.get_mut(&0).unwrap().iter_mut()
 				{
 					match op
 					{

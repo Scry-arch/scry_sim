@@ -1,5 +1,5 @@
 use crate::{
-	control_flow::ControlFlow, data::OperandQueue, memory::Memory, value::Value, ExecState,
+	control_flow::ControlFlow, data::OperandStack, memory::Memory, value::Value, ExecState,
 	MetricTracker, Scalar, ValueType,
 };
 use byteorder::ByteOrder;
@@ -24,7 +24,7 @@ pub enum ExecError
 pub struct Executor<M: Memory>
 {
 	control: ControlFlow,
-	operands: OperandQueue,
+	operands: OperandStack,
 	memory: M,
 }
 impl<M: Memory> Executor<M>
@@ -35,7 +35,7 @@ impl<M: Memory> Executor<M>
 	pub fn new(start_addr: usize, memory: M, ready_ops: impl Iterator<Item = Value>) -> Self
 	{
 		Self {
-			operands: OperandQueue::new(ready_ops),
+			operands: OperandStack::new(ready_ops),
 			control: ControlFlow::new(start_addr),
 			memory,
 		}
@@ -82,7 +82,7 @@ impl<M: Memory> Executor<M>
 			.memory
 			.read_instr(self.control.next_addr, tracker)
 			.unwrap();
-		let has_non_uniform_operands = |ops: &OperandQueue| {
+		let has_non_uniform_operands = |ops: &OperandStack| {
 			ops.ready_peek().count() < 1
 				|| ops.ready_peek().count() > 2
 				|| ops.ready_peek().any(|op| op.must_read().is_some())
@@ -116,14 +116,14 @@ impl<M: Memory> Executor<M>
 						self.control.next_addr + ((offset.value() * 2) as usize),
 						tracker,
 					);
-					// Discard everything in the ready queue
+					// Discard everything in the ready list
 					let _ = self.operands.ready_iter(&mut self.memory, tracker);
 				},
 				EchoLong(offset) =>
 				{
 					self.operands
 						.reorder_ready(offset.value() as usize, tracker);
-					// Discard (now empty) ready queue
+					// Discard (now empty) ready list
 					let _ = self.operands.ready_iter(&mut self.memory, tracker);
 				},
 				Duplicate(to_next, tar1, tar2) =>
@@ -143,12 +143,12 @@ impl<M: Memory> Executor<M>
 					}
 					self.operands
 						.reorder_ready(tar2.value() as usize + 1, tracker);
-					// Discard (now empty) ready queue
+					// Discard (now empty) ready list
 					let _ = self.operands.ready_iter(&mut self.memory, tracker);
 				},
 				Nop =>
 				{
-					// Discard ready queue
+					// Discard ready list
 					let _ = self.operands.ready_iter(&mut self.memory, tracker);
 				},
 				Alu(variant, offset) =>
@@ -171,7 +171,7 @@ impl<M: Memory> Executor<M>
 				},
 				Constant(bits) =>
 				{
-					// Create operand from immediate and add to next queue
+					// Create operand from immediate and add to next list
 					let new_val: Value = if bits.is_signed()
 					{
 						(Bits::<8, true>::try_from(bits).unwrap().value as i8).into()
@@ -182,10 +182,10 @@ impl<M: Memory> Executor<M>
 					};
 					self.operands.push_operand(1, new_val.into(), tracker);
 
-					// Forward any ready operands to the next queue
+					// Forward any ready operands to the next list
 					self.operands.reorder_ready(1, tracker);
 
-					// Discard (now empty) ready queue
+					// Discard (now empty) ready list
 					let _ = self.operands.ready_iter(&mut self.memory, tracker);
 				},
 				_ => todo!(),
@@ -202,11 +202,11 @@ impl<M: Memory> Executor<M>
 	}
 
 	/// Executes an Alu instruction, consuming the needed inputs and putting the
-	/// result in the relevant queue.
+	/// result in the relevant list.
 	///
 	/// The given variant is the Alu instruction to execute with the offset
-	/// being which queue the result should go to (0 means the first queue after
-	/// the queue of the inputs has been discarded).
+	/// being which list the result should go to (0 means the first list after
+	/// the list of the inputs has been discarded).
 	fn perform_alu(
 		&mut self,
 		variant: AluVariant,
@@ -274,11 +274,11 @@ impl<M: Memory> Executor<M>
 	}
 
 	/// Executes an Alu2 instruction, consuming the needed inputs and putting
-	/// the results in the relevant queues.
+	/// the results in the relevant operand lists.
 	///
 	/// The given variant is the Alu2 instruction to execute with the offset
-	/// being which queue a result should go to (0 means the first queue after
-	/// the queue of the inputs has been discarded) according to the output
+	/// being which list a result should go to (0 means the first list after
+	/// the list of the inputs has been discarded) according to the output
 	/// variant.
 	fn perform_alu2(
 		&mut self,

@@ -25,13 +25,13 @@ pub enum Metric
 	ConsumedOperands,
 	/// Operand bytes consumed by instructions
 	ConsumedBytes,
-	/// Value operands queued on any operand queue
+	/// Value operands queued on any operand list
 	QueuedValues,
-	/// Value operand bytes queued on any operand queue
+	/// Value operand bytes queued on any operand list
 	QueuedValueBytes,
-	/// Read operands queued on any operand queue
+	/// Read operands queued on any operand list
 	QueuedReads,
-	/// Operands reordered from one operand queue into another
+	/// Operands reordered from one operand list into another
 	ReorderedOperands,
 
 	// Memory

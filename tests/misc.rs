@@ -1,6 +1,5 @@
 use byteorder::{ByteOrder, LittleEndian};
-use scry_sim::{MemError, Memory, Metric, MetricTracker, OperandState, Scalar, Value};
-use std::collections::HashMap;
+use scry_sim::{MemError, Memory, Metric, MetricTracker, OperandQueue, Scalar, Value};
 
 /// A memory that always produces the same instruction and data.
 ///
@@ -65,10 +64,8 @@ impl Memory for RepeatingMem
 	}
 }
 
-/// Clones the given operand queues and advances all indices by 1
-pub fn advance_queues(
-	from: HashMap<usize, (OperandState<usize>, Vec<OperandState<usize>>)>,
-) -> HashMap<usize, (OperandState<usize>, Vec<OperandState<usize>>)>
+/// Advances the given operand queue by 1, i.e. all indices reduced by 1
+pub fn advance_queue(from: OperandQueue) -> OperandQueue
 {
 	from.into_iter().map(|(idx, ops)| (idx - 1, ops)).collect()
 }

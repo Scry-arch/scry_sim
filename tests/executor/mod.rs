@@ -1,11 +1,10 @@
-use crate::misc::{advance_queues, RepeatingMem};
+use crate::misc::{advance_queue, RepeatingMem};
 use quickcheck::{Arbitrary, Gen, TestResult};
 use scry_isa::{Alu2Variant, AluVariant, Bits, BitsDyn, CallVariant, Instruction};
 use scry_sim::{
-	arbitrary::NoCF, ExecState, Executor, Metric, MetricReporter, MetricTracker, OperandState,
-	TrackReport,
+	arbitrary::NoCF, ExecState, Executor, Metric, MetricReporter, MetricTracker, OperandList,
+	OperandQueue, OperandState, TrackReport,
 };
-use std::collections::HashMap;
 
 mod alu_instructions;
 mod control_flow;
@@ -55,25 +54,21 @@ impl Arbitrary for SupportedInstruction
 /// * Only affects the current operand queue (not that of callers)
 ///
 /// function will then encode the given instruction and run 1 step.
-/// Then checks that the resulting state is has the operand queue returned
-/// by `expected_op_queues` (and that the program counter has incremented by 2).
-/// The returned operand queue should not be advanced before being returned.
-/// But, the ready queue (index 0) must be removed. The queue will then  be
+/// Then checks that the resulting state has the operand queue returned by
+/// `expected_op_queue` (and that the program counter has incremented by 2). The
+/// returned operand queue should not be advanced before being returned.
+/// But, the ready list (index 0) must be removed. The queue will then  be
 /// advanced before the check. If so, will then check that the reported metrics
 /// match those returned by `expected_metrics` (plus that 1 instruction has been
 /// read).
 ///
-/// Both `expected_op_queues` and `expected_metrics` are given the current
+/// Both `expected_op_queue` and `expected_metrics` are given the current
 /// function's operand queue before the step is performed.
 fn test_simple_instruction(
 	NoCF(state): NoCF<ExecState>,
 	instr: Instruction,
-	expected_op_queues: impl FnOnce(
-		&HashMap<usize, (OperandState<usize>, Vec<OperandState<usize>>)>,
-	) -> HashMap<usize, (OperandState<usize>, Vec<OperandState<usize>>)>,
-	expected_metrics: impl FnOnce(
-		&HashMap<usize, (OperandState<usize>, Vec<OperandState<usize>>)>,
-	) -> TrackReport,
+	expected_op_queue: impl FnOnce(&OperandQueue) -> OperandQueue,
+	expected_metrics: impl FnOnce(&OperandQueue) -> TrackReport,
 ) -> TestResult
 {
 	let exec = Executor::from_state(&state, RepeatingMem(instr.encode(), 0));
@@ -84,11 +79,11 @@ fn test_simple_instruction(
 		{
 			let mut expected_state = state.clone();
 			expected_state.address += 2;
-			expected_state.frame.op_queues = expected_op_queues(&state.frame.op_queues);
+			expected_state.frame.op_queue = expected_op_queue(&state.frame.op_queue);
 
 			// Advance expected operand queue by 1
-			assert!(expected_state.frame.op_queues.get(&0).is_none());
-			expected_state.frame.op_queues = advance_queues(expected_state.frame.op_queues);
+			assert!(expected_state.frame.op_queue.get(&0).is_none());
+			expected_state.frame.op_queue = advance_queue(expected_state.frame.op_queue);
 			// Ensure any superfluous reads are removed
 			expected_state.clean_reads();
 
@@ -102,7 +97,7 @@ fn test_simple_instruction(
 			}
 			else
 			{
-				let mut expected_mets = expected_metrics(&state.frame.op_queues);
+				let mut expected_mets = expected_metrics(&state.frame.op_queue);
 				assert_eq!(expected_mets.get_stat(Metric::InstructionReads), 0);
 				expected_mets.add_stat(Metric::InstructionReads, 1);
 
@@ -141,9 +136,9 @@ fn instruction_nop(state: NoCF<ExecState>) -> TestResult
 	test_simple_instruction(
 		state,
 		Instruction::Nop,
-		|old_op_queues| {
-			let mut new_op_q = old_op_queues.clone();
-			// Discard ready-queue if present
+		|old_op_queue| {
+			let mut new_op_q = old_op_queue.clone();
+			// Discard ready list if present
 			new_op_q.remove(&0);
 			new_op_q
 		},
@@ -158,10 +153,10 @@ fn instruction_constant(state: NoCF<ExecState>, immediate: BitsDyn<8>) -> TestRe
 	test_simple_instruction(
 		state,
 		Instruction::Constant(immediate.clone()),
-		|old_op_queues| {
-			let mut new_op_q = old_op_queues.clone();
+		|old_op_queue| {
+			let mut new_op_q = old_op_queue.clone();
 
-			// The produced operand should go first in the next operands queue
+			// The produced operand should go first in the next operand list
 			let old_operands = new_op_q.remove(&0);
 			let new_const = OperandState::Ready(
 				if immediate.is_signed()
@@ -174,25 +169,24 @@ fn instruction_constant(state: NoCF<ExecState>, immediate: BitsDyn<8>) -> TestRe
 				},
 			);
 
-			let ops_rest = if let Some((_, rest)) = new_op_q.get_mut(&1)
+			let ops_rest = if let Some(ops) = new_op_q.get_mut(&1)
 			{
-				rest.push(new_const);
-				rest
+				ops.push(new_const);
+				ops
 			}
 			else
 			{
-				new_op_q.insert(1, (new_const, Vec::new()));
-				&mut new_op_q.get_mut(&1).unwrap().1
+				new_op_q.insert(1, OperandList::new(new_const, Vec::new()));
+				new_op_q.get_mut(&1).unwrap()
 			};
-			if let Some((old_first, old_rest)) = old_operands
+			if let Some(old_ops) = old_operands
 			{
-				ops_rest.push(old_first);
-				ops_rest.extend(old_rest.into_iter());
+				ops_rest.extend(old_ops.into_iter());
 			}
 			new_op_q
 		},
-		|old_op_queues| {
-			let old_op_count = old_op_queues.get(&0).map_or(0, |(_, rest)| 1 + rest.len());
+		|old_op_queue| {
+			let old_op_count = old_op_queue.get(&0).map_or(0, |ops| ops.len());
 			[
 				(Metric::QueuedValues, 1),
 				(Metric::QueuedValueBytes, 1),

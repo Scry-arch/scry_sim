@@ -1,5 +1,10 @@
 use crate::{Value, ValueType};
-use std::{collections::HashMap, fmt::Debug, iter::once};
+use std::{
+	collections::HashMap,
+	fmt::Debug,
+	iter::{once, Chain, Once},
+	vec::IntoIter,
+};
 
 /// An instruction operand.
 ///
@@ -22,7 +27,6 @@ pub enum OperandState<R>
 	/// Operand must read from memory to get the value needed.
 	MustRead(R),
 }
-
 impl<R> OperandState<R>
 {
 	pub fn extract_value(self) -> Value
@@ -47,8 +51,76 @@ pub enum ControlFlowType
 	Return,
 }
 
+/// Non-empty, ordered list of operands that an instruction will operate on.
+#[derive(Debug, Eq, PartialEq, Clone)]
+pub struct OperandList
+{
+	/// First operand in the list
+	pub first: OperandState<usize>,
+
+	/// The rest of the operands in the list. In order.
+	pub rest: Vec<OperandState<usize>>,
+}
+impl IntoIterator for OperandList
+{
+	type IntoIter = Chain<Once<OperandState<usize>>, IntoIter<OperandState<usize>>>;
+	type Item = OperandState<usize>;
+
+	fn into_iter(self) -> Self::IntoIter
+	{
+		once(self.first).chain(self.rest)
+	}
+}
+impl OperandList
+{
+	/// Construct new operand list with the given first operand and the rest
+	pub fn new(first: OperandState<usize>, rest: Vec<OperandState<usize>>) -> Self
+	{
+		Self { first, rest }
+	}
+
+	/// Iterates over the operands in-order
+	pub fn iter(&self) -> impl Iterator<Item = &OperandState<usize>>
+	{
+		once(&self.first).chain(self.rest.iter())
+	}
+
+	/// Iterates over the operands in-order
+	pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut OperandState<usize>>
+	{
+		once(&mut self.first).chain(self.rest.iter_mut())
+	}
+
+	/// Adds an operands to the end of the list
+	pub fn push(&mut self, op: OperandState<usize>)
+	{
+		self.rest.push(op)
+	}
+
+	/// Gets the number of operands in the list
+	pub fn len(&self) -> usize
+	{
+		1 + self.rest.len()
+	}
+
+	/// Adds all the given operands to the end of the list
+	pub fn extend(&mut self, iter: impl Iterator<Item = OperandState<usize>>)
+	{
+		self.rest.extend(iter)
+	}
+}
+
+/// The queue of operand lists that track what lists future instructions will
+/// operate on.
+///
+/// Key 0 is the list the next instruction will receive. Key 1 is for the
+/// instruction after that etc. If a key is not present, it means that operand
+/// list has no operands. If that list is still empty when it reaches index 0,
+/// that instruction will get no operands.
+pub type OperandQueue = HashMap<usize, OperandList>;
+
 /// A functions information about return address, currently issued control flow,
-/// and operand queues.
+/// and operand queue.
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub struct CallFrameState
 {
@@ -60,14 +132,8 @@ pub struct CallFrameState
 	/// Value is the type of control flow to trigger.
 	pub branches: HashMap<usize, ControlFlowType>,
 
-	/// Operands queues, each with its index.
-	/// A missing index means that queue is empty.
-	/// In the value, the first element is the first operand. The vec is then
-	/// the rest of the operands, ordered.
-	///
-	/// Operands that are awaiting a read have the index of their read
-	/// in `reads`.
-	pub op_queues: HashMap<usize, (OperandState<usize>, Vec<OperandState<usize>>)>,
+	/// Operands queue
+	pub op_queue: OperandQueue,
 
 	/// Read instructions that have been issued but still waiting.
 	///
@@ -82,8 +148,8 @@ impl CallFrameState
 	/// operand in the given map
 	pub(crate) fn count_read_refs(&self, idx: usize) -> usize
 	{
-		self.op_queues.iter().fold(0, |c, (_, (f, q))| {
-			once(f).chain(q.iter()).fold(c, |mut c, op| {
+		self.op_queue.iter().fold(0, |c, (_, ops)| {
+			ops.iter().fold(c, |mut c, op| {
 				if let OperandState::MustRead(read_idx) = op
 				{
 					if *read_idx == idx
@@ -104,15 +170,15 @@ impl CallFrameState
 	/// * Return address is not 2-byte aligned
 	/// * Any control flow trigger address is not 2-byte aligned
 	/// * Any control flow target address is not 2-byte aligned
-	/// * Any operand queue has more than supported number of operands (4)
+	/// * Any operand list has more than supported number of operands (4)
 	pub fn valid(&self) -> bool
 	{
 		let unreferenced = (0..self.reads.len()).any(|idx| self.count_read_refs(idx) == 0);
 
 		let read_nothing = self.reads.iter().any(|(_, len, _)| *len == 0);
 
-		let wrong_ref = self.op_queues.iter().any(|(_, (op1, op_rest))| {
-			for op in once(op1).chain(op_rest.iter())
+		let wrong_ref = self.op_queue.iter().any(|(_, ops)| {
+			for op in ops.iter()
 			{
 				match op
 				{
@@ -140,10 +206,7 @@ impl CallFrameState
 				}
 		});
 
-		let too_many_operands = self
-			.op_queues
-			.iter()
-			.any(|(_, (_, op_rest))| (op_rest.len()) > 3);
+		let too_many_operands = self.op_queue.iter().any(|(_, ops)| ops.len() > 4);
 
 		!unreferenced
 			&& !wrong_ref
@@ -163,8 +226,8 @@ impl CallFrameState
 			// Remove read
 			self.reads.remove(idx);
 			// Correct any references to higher-indexed reads
-			self.op_queues.iter_mut().for_each(|(_, (f, q))| {
-				once(f).chain(q.iter_mut()).for_each(|op| {
+			self.op_queue.iter_mut().for_each(|(_, ops)| {
+				ops.iter_mut().for_each(|op| {
 					if let OperandState::MustRead(read_idx) = op
 					{
 						if *read_idx > idx
@@ -206,7 +269,7 @@ impl Default for CallFrameState
 		Self {
 			ret_addr: 0,
 			branches: Default::default(),
-			op_queues: Default::default(),
+			op_queue: Default::default(),
 			reads: Default::default(),
 		}
 	}
