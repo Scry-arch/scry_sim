@@ -122,7 +122,7 @@ impl<M: Memory> Executor<M>
 				EchoLong(offset) =>
 				{
 					self.operands
-						.reorder_ready(offset.value() as usize, tracker);
+						.reorder_ready(offset.value() as usize + 1, tracker);
 					// Discard (now empty) ready list
 					let _ = self.operands.ready_iter(&mut self.memory, tracker);
 				},
@@ -144,6 +144,19 @@ impl<M: Memory> Executor<M>
 					self.operands
 						.reorder_ready(tar2.value() as usize + 1, tracker);
 					// Discard (now empty) ready list
+					let _ = self.operands.ready_iter(&mut self.memory, tracker);
+				},
+				Echo(to_next, tar1, tar2) =>
+				{
+					self.operands
+						.reorder(0, 1, tar2.value as usize + 1, tracker);
+					self.operands
+						.reorder(0, 0, tar1.value as usize + 1, tracker);
+					if to_next
+					{
+						self.operands.reorder_ready(1, tracker);
+					}
+					// Discard (maybe empty) ready list
 					let _ = self.operands.ready_iter(&mut self.memory, tracker);
 				},
 				Nop =>

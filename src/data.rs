@@ -8,7 +8,7 @@ use std::{
 	cell::{Ref, RefCell},
 	collections::{HashMap, VecDeque},
 	fmt::Debug,
-	iter::FromIterator,
+	iter::{once, FromIterator},
 	ops::Deref,
 	rc::Rc,
 };
@@ -256,6 +256,8 @@ impl OperandStack
 	/// Moves the operand found on the operand list with index `src_list_idx`,
 	/// position `src_idx` in that list, to the back of the list with idx
 	/// 'target_idx'
+	///
+	/// If no operand is present at the location, nothing happens
 	pub fn reorder(
 		&mut self,
 		src_list_idx: usize,
@@ -264,16 +266,14 @@ impl OperandStack
 		tracker: &mut impl MetricTracker,
 	)
 	{
-		let op = self
-			.queue
-			.get_mut(src_list_idx)
-			.and_then(|q| q.remove(src_idx))
+		once(&mut self.ready)
+			.chain(self.queue.iter_mut())
+			.nth(src_list_idx)
+			.and_then(|list| list.remove(src_idx))
 			.map(|op| {
 				tracker.add_stat(Metric::ReorderedOperands, 1);
-				op
-			})
-			.unwrap_or(Value::new_nar::<u8>(0).into());
-		self.push_op_unreported(target_idx, op);
+				self.push_op_unreported(target_idx, op);
+			});
 	}
 
 	/// Moves all operands on the ready list to the back of the `dest_idx`

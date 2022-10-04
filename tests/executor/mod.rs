@@ -32,9 +32,11 @@ impl Arbitrary for SupportedInstruction
 				| Alu2(Alu2Variant::Add, _, _)
 				| Alu2(Alu2Variant::Sub, _, _)
 				| Nop
-				| Constant(_)
+				| Constant(..)
 				| Call(CallVariant::Ret, _)
-				| Duplicate(..) => break,
+				| Duplicate(..)
+				| Echo(..)
+				| EchoLong(..) => break,
 				_ => instr = Instruction::arbitrary(g),
 			}
 		}
