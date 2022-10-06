@@ -1,12 +1,14 @@
-use crate::misc::advance_queue;
+use crate::{
+	executor::test_execution_step,
+	misc::{advance_queue, RepeatingMem},
+};
 use byteorder::{ByteOrder, LittleEndian};
 use duplicate::duplicate;
 use quickcheck::TestResult;
 use scry_isa::{Alu2OutputVariant, Alu2Variant, AluVariant, Bits, Instruction};
 use scry_sim::{
 	arbitrary::{LimitedOps, NoCF, NoReads, SimpleOps},
-	BlockedMemory, ExecState, Executor, Metric, OperandList, OperandState, Scalar, TrackReport,
-	Value,
+	ExecState, Metric, OperandList, OperandState, Scalar, TrackReport, Value,
 };
 use std::cmp::min;
 
@@ -86,145 +88,113 @@ fn test_arithmetic_instruction<const OPS_IN: usize, const OPS_OUT: usize>(
 		return TestResult::discard();
 	}
 
-	// Encode instruction
-	let mut encoded = [0; 2];
-	LittleEndian::write_u16(&mut encoded, instr.encode());
+	// Calculate expected state after step
+	let mut expected_state = state.clone();
+	// Advance to next instruction
+	expected_state.address += 2;
 
-	// Create execution from state with only access to the instruction
-	let exec = Executor::from_state(&state, BlockedMemory::new(encoded.into(), state.address));
-	let mut metrics = TrackReport::new();
+	let mut new_op_q = state.frame.op_queue.clone();
+	// Remove ready list
+	let removed_list = new_op_q.remove(&0).unwrap();
+	let removed_rest_values: Vec<Value> = removed_list
+		.rest
+		.into_iter()
+		.map(|op| op.extract_value())
+		.collect();
 
-	// Perform one step
-	let res = match exec.step(&mut metrics)
+	expected_state.frame.op_queue = advance_queue(new_op_q);
+
+	// Calculate expected result operand
+	let mut result_scalars = Vec::new();
+	let first_value = removed_list.first.extract_value();
+	let input_typ = first_value.value_type();
+	for (scalar_idx, sc0) in first_value.iter().enumerate()
 	{
-		Ok(exec) =>
+		let nan = Scalar::Nan;
+		let mut scalars = [&nan; OPS_IN];
+		scalars[0] = sc0;
+		for input_idx in 1..OPS_IN
 		{
-			// Calculate expected state after step
-			let mut expected_state = state.clone();
-			// Advance to next instruction
-			expected_state.address += 2;
-
-			let mut new_op_q = state.frame.op_queue.clone();
-			// Remove ready list
-			let removed_list = new_op_q.remove(&0).unwrap();
-			let removed_rest_values: Vec<Value> = removed_list
-				.rest
-				.into_iter()
-				.map(|op| op.extract_value())
-				.collect();
-
-			expected_state.frame.op_queue = advance_queue(new_op_q);
-
-			// Calculate expected result operand
-			let mut result_scalars = Vec::new();
-			let first_value = removed_list.first.extract_value();
-			let input_typ = first_value.value_type();
-			for (scalar_idx, sc0) in first_value.iter().enumerate()
-			{
-				let nan = Scalar::Nan;
-				let mut scalars = [&nan; OPS_IN];
-				scalars[0] = sc0;
-				for input_idx in 1..OPS_IN
-				{
-					scalars[input_idx] = removed_rest_values[input_idx - 1]
-						.iter()
-						.nth(scalar_idx)
-						.unwrap();
-				}
-
-				// Calculate result based on type
-				use scry_sim::ValueType::*;
-				result_scalars.push(match input_typ
-				{
-					Uint(0) => calculate_result(scalars, &u8_sem, |b| b[0]),
-					Uint(1) => calculate_result(scalars, &u16_sem, LittleEndian::read_u16),
-					Uint(2) => calculate_result(scalars, &u32_sem, LittleEndian::read_u32),
-					Uint(3) => calculate_result(scalars, &u64_sem, LittleEndian::read_u64),
-					Uint(4) => calculate_result(scalars, &u128_sem, LittleEndian::read_u128),
-					Int(0) => calculate_result(scalars, &i8_sem, |b| b[0] as i8),
-					Int(1) => calculate_result(scalars, &i16_sem, LittleEndian::read_i16),
-					Int(2) => calculate_result(scalars, &i32_sem, LittleEndian::read_i32),
-					Int(3) => calculate_result(scalars, &i64_sem, LittleEndian::read_i64),
-					Int(4) => calculate_result(scalars, &i128_sem, LittleEndian::read_i128),
-					Uint(_) | Int(_) => unreachable!(),
-				});
-			}
-			let mut result_values = [(); OPS_OUT].map(|_| Value::new_nan_typed(input_typ));
-
-			for i in 0..OPS_OUT
-			{
-				let mut scalars = result_scalars
-					.iter()
-					.map(|sc| sc[i].clone())
-					.collect::<Vec<_>>();
-				let first = scalars.remove(0);
-				let rest: Vec<Scalar> = scalars
-					.into_iter()
-					.map(|v| v.iter().next().unwrap().clone())
-					.collect();
-				result_values[i] = Value::new_typed(
-					first.value_type(),
-					first.iter().next().unwrap().clone(),
-					rest,
-				)
+			scalars[input_idx] = removed_rest_values[input_idx - 1]
+				.iter()
+				.nth(scalar_idx)
 				.unwrap();
-			}
+		}
 
-			let result_bytes = result_values.iter().fold(0, |acc, v| acc + v.scale());
+		// Calculate result based on type
+		use scry_sim::ValueType::*;
+		result_scalars.push(match input_typ
+		{
+			Uint(0) => calculate_result(scalars, &u8_sem, |b| b[0]),
+			Uint(1) => calculate_result(scalars, &u16_sem, LittleEndian::read_u16),
+			Uint(2) => calculate_result(scalars, &u32_sem, LittleEndian::read_u32),
+			Uint(3) => calculate_result(scalars, &u64_sem, LittleEndian::read_u64),
+			Uint(4) => calculate_result(scalars, &u128_sem, LittleEndian::read_u128),
+			Int(0) => calculate_result(scalars, &i8_sem, |b| b[0] as i8),
+			Int(1) => calculate_result(scalars, &i16_sem, LittleEndian::read_i16),
+			Int(2) => calculate_result(scalars, &i32_sem, LittleEndian::read_i32),
+			Int(3) => calculate_result(scalars, &i64_sem, LittleEndian::read_i64),
+			Int(4) => calculate_result(scalars, &i128_sem, LittleEndian::read_i128),
+			Uint(_) | Int(_) => unreachable!(),
+		});
+	}
+	let mut result_values = [(); OPS_OUT].map(|_| Value::new_nan_typed(input_typ));
 
-			for (idx, result_value) in out_idx.iter().zip(result_values.into_iter())
-			{
-				// Put expected result in correct expected state list
-				if let Some(op_list) = expected_state.frame.op_queue.get_mut(idx)
-				{
-					// Push on end of list
-					op_list.push(OperandState::Ready(result_value));
-				}
-				else
-				{
-					// No existing list, create it
-					expected_state.frame.op_queue.insert(
-						*idx,
-						OperandList::new(OperandState::Ready(result_value), vec![]),
-					);
-				}
-			}
-			if exec.state() != expected_state
-			{
-				TestResult::error(format!(
-					"Unexpected end state (actual != expected):\n{:?} != {:?}",
-					exec.state(),
-					expected_state
-				))
-			}
-			else
-			{
-				// Check metrics
-				let expected_mets: TrackReport = [
-					(Metric::InstructionReads, 1),
-					(Metric::QueuedValues, OPS_OUT),
-					(Metric::QueuedValueBytes, result_bytes),
-					(Metric::ConsumedOperands, OPS_IN),
-					(Metric::ConsumedBytes, input_typ.scale() * OPS_IN),
-				]
-				.into();
+	for i in 0..OPS_OUT
+	{
+		let mut scalars = result_scalars
+			.iter()
+			.map(|sc| sc[i].clone())
+			.collect::<Vec<_>>();
+		let first = scalars.remove(0);
+		let rest: Vec<Scalar> = scalars
+			.into_iter()
+			.map(|v| v.iter().next().unwrap().clone())
+			.collect();
+		result_values[i] = Value::new_typed(
+			first.value_type(),
+			first.iter().next().unwrap().clone(),
+			rest,
+		)
+		.unwrap();
+	}
 
-				if metrics != expected_mets
-				{
-					TestResult::error(format!(
-						"Unexpected step metrics (actual != expected):\n{:?} != {:?}",
-						metrics, expected_mets
-					))
-				}
-				else
-				{
-					TestResult::from_bool(true)
-				}
-			}
-		},
-		err => TestResult::error(format!("Unexpected step result: {:?}", err)),
-	};
-	res
+	let result_bytes = result_values.iter().fold(0, |acc, v| acc + v.scale());
+
+	for (idx, result_value) in out_idx.iter().zip(result_values.into_iter())
+	{
+		// Put expected result in correct expected state list
+		if let Some(op_list) = expected_state.frame.op_queue.get_mut(idx)
+		{
+			// Push on end of list
+			op_list.push(OperandState::Ready(result_value));
+		}
+		else
+		{
+			// No existing list, create it
+			expected_state.frame.op_queue.insert(
+				*idx,
+				OperandList::new(OperandState::Ready(result_value), vec![]),
+			);
+		}
+	}
+
+	// Expected metrics
+	let expected_mets: TrackReport = [
+		(Metric::InstructionReads, 1),
+		(Metric::QueuedValues, OPS_OUT),
+		(Metric::QueuedValueBytes, result_bytes),
+		(Metric::ConsumedOperands, OPS_IN),
+		(Metric::ConsumedBytes, input_typ.scale() * OPS_IN),
+	]
+	.into();
+
+	test_execution_step(
+		&state,
+		RepeatingMem(instr.encode(), 0),
+		&expected_state,
+		&expected_mets,
+	)
 }
 
 fn test_alu_instruction<const OPS: usize>(

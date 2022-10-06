@@ -12,7 +12,6 @@ use scry_sim::{MemError, Memory, Metric, MetricTracker, OperandQueue, Scalar, Va
 /// Read/write metrics will be reported correctly, except alignment which will
 /// be ignored.
 ///
-///
 /// Meant for testing.
 #[derive(Debug, Clone, Copy)]
 pub struct RepeatingMem(pub u16, pub u8);
@@ -68,4 +67,10 @@ impl Memory for RepeatingMem
 pub fn advance_queue(from: OperandQueue) -> OperandQueue
 {
 	from.into_iter().map(|(idx, ops)| (idx - 1, ops)).collect()
+}
+
+/// Regress the given operand queue by 1, i.e. all indices increased by 1
+pub fn regress_queue(from: OperandQueue) -> OperandQueue
+{
+	from.into_iter().map(|(idx, ops)| (idx + 1, ops)).collect()
 }

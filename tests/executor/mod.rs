@@ -2,9 +2,10 @@ use crate::misc::{advance_queue, RepeatingMem};
 use quickcheck::{Arbitrary, Gen, TestResult};
 use scry_isa::{Alu2Variant, AluVariant, Bits, BitsDyn, CallVariant, Instruction};
 use scry_sim::{
-	arbitrary::NoCF, ExecState, Executor, Metric, MetricReporter, MetricTracker, OperandList,
-	OperandQueue, OperandState, TrackReport,
+	arbitrary::NoCF, ExecState, Executor, Memory, Metric, MetricReporter, MetricTracker,
+	OperandList, OperandQueue, OperandState, TrackReport,
 };
+use std::fmt::Debug;
 
 mod alu_instructions;
 mod control_flow;
@@ -49,6 +50,48 @@ impl Arbitrary for SupportedInstruction
 	}
 }
 
+/// Performs 1 execution step with the given start state and memory.
+/// Then checks that the given expected state is achieved with the expected
+/// metrics reported.
+pub fn test_execution_step(
+	start_state: &ExecState,
+	start_memory: impl Memory + Debug,
+	expected_state: &ExecState,
+	expected_metrics: &TrackReport,
+) -> TestResult
+{
+	let mut actual_metrics = TrackReport::new();
+	match Executor::from_state(start_state, start_memory).step(&mut actual_metrics)
+	{
+		Ok(exec) =>
+		{
+			if exec.state() != *expected_state
+			{
+				TestResult::error(format!(
+					"Unexpected end state (actual != expected):\n{:?}\n !=\n {:?}",
+					exec.state(),
+					expected_state
+				))
+			}
+			else
+			{
+				if actual_metrics != *expected_metrics
+				{
+					TestResult::error(format!(
+						"Unexpected step metrics (actual != expected):\n{:?}\n !=\n {:?}",
+						actual_metrics, expected_metrics
+					))
+				}
+				else
+				{
+					TestResult::passed()
+				}
+			}
+		},
+		err => TestResult::error(format!("Test step failed: {:?}", err)),
+	}
+}
+
 /// Tests a "simple" instruction, which must not:
 ///
 /// * Issue control flow
@@ -73,51 +116,28 @@ fn test_simple_instruction(
 	expected_metrics: impl FnOnce(&OperandQueue) -> TrackReport,
 ) -> TestResult
 {
-	let exec = Executor::from_state(&state, RepeatingMem(instr.encode(), 0));
-	let mut metrics = TrackReport::new();
-	match exec.step(&mut metrics)
-	{
-		Ok(exec) =>
-		{
-			let mut expected_state = state.clone();
-			expected_state.address += 2;
-			expected_state.frame.op_queue = expected_op_queue(&state.frame.op_queue);
+	// Build expected state
+	let mut expected_state = state.clone();
+	expected_state.address += 2;
+	expected_state.frame.op_queue = expected_op_queue(&state.frame.op_queue);
 
-			// Advance expected operand queue by 1
-			assert!(expected_state.frame.op_queue.get(&0).is_none());
-			expected_state.frame.op_queue = advance_queue(expected_state.frame.op_queue);
-			// Ensure any superfluous reads are removed
-			expected_state.clean_reads();
+	// Advance expected operand queue by 1
+	assert!(expected_state.frame.op_queue.get(&0).is_none());
+	expected_state.frame.op_queue = advance_queue(expected_state.frame.op_queue);
+	// Ensure any superfluous reads are removed
+	expected_state.clean_reads();
 
-			if exec.state() != expected_state
-			{
-				TestResult::error(format!(
-					"Unexpected end state (actual != expected):\n{:?} != {:?}",
-					exec.state(),
-					expected_state
-				))
-			}
-			else
-			{
-				let mut expected_mets = expected_metrics(&state.frame.op_queue);
-				assert_eq!(expected_mets.get_stat(Metric::InstructionReads), 0);
-				expected_mets.add_stat(Metric::InstructionReads, 1);
+	// Build expected metrics
+	let mut expected_mets = expected_metrics(&state.frame.op_queue);
+	assert_eq!(expected_mets.get_stat(Metric::InstructionReads), 0);
+	expected_mets.add_stat(Metric::InstructionReads, 1);
 
-				if metrics != expected_mets
-				{
-					TestResult::error(format!(
-						"Unexpected step metrics (actual != expected):\n{:?} != {:?}",
-						metrics, expected_mets
-					))
-				}
-				else
-				{
-					TestResult::from_bool(true)
-				}
-			}
-		},
-		err => TestResult::error(format!("Test step failed: {:?}", err)),
-	}
+	test_execution_step(
+		&state,
+		RepeatingMem(instr.encode(), 0),
+		&expected_state,
+		&expected_mets,
+	)
 }
 
 /// Tests can convert from state to executor back to state without the state

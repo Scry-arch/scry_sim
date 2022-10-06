@@ -201,6 +201,10 @@ impl<M: Memory> Executor<M>
 					// Discard (now empty) ready list
 					let _ = self.operands.ready_iter(&mut self.memory, tracker);
 				},
+				Jump(target, location) =>
+				{
+					self.handle_jump(target, location, tracker);
+				},
 				_ => todo!(),
 			}
 		}
@@ -212,6 +216,49 @@ impl<M: Memory> Executor<M>
 		{
 			Err(ExecError::Err)
 		}
+	}
+
+	/// Executes the jump instruction.
+	fn handle_jump(
+		&mut self,
+		target: Bits<7, true>,
+		location: Bits<6, false>,
+		tracker: &mut impl MetricTracker,
+	)
+	{
+		let (op1, op2) = {
+			let mut ready_iter = self.operands.ready_iter(&mut self.memory, tracker);
+			(ready_iter.next(), ready_iter.next())
+		};
+		assert!(op2.is_none()); // TODO: implement 2-operand jumps
+
+		// If no operands are given, its an unconditional jump
+		let unconditional = op1.is_none();
+		let is_zero = op1.map_or(false, |(val1, errs)| {
+			assert!(errs.is_none());
+			val1.get_first().bytes().unwrap().iter().all(|b| *b == 0)
+		});
+
+		if target.value <= 0 && (!is_zero || unconditional)
+		{
+			self.control.branch(
+				self.control.next_addr + (location.value * 2) as usize,
+				self.control.next_addr - (target.value * -1 * 2) as usize,
+				tracker,
+			);
+		}
+		else if target.value > 0 && (is_zero || unconditional)
+		{
+			self.control.branch(
+				self.control.next_addr + (location.value * 2) as usize,
+				self.control.next_addr + ((target.value + location.value + 1) * 2) as usize,
+				tracker,
+			);
+		}
+		else
+		{
+			// Branch not taken
+		};
 	}
 
 	/// Executes an Alu instruction, consuming the needed inputs and putting the

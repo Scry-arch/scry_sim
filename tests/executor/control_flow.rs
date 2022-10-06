@@ -1,12 +1,13 @@
 use crate::{
-	executor::SupportedInstruction,
-	misc::{advance_queue, RepeatingMem},
+	executor::{test_execution_step, SupportedInstruction},
+	misc::{advance_queue, regress_queue, RepeatingMem},
 };
 use quickcheck::TestResult;
 use scry_isa::{BitValue, Bits, CallVariant, Instruction};
 use scry_sim::{
-	arbitrary::NoCF, CallFrameState, ControlFlowType, ExecError, ExecState, Executor, Metric,
-	MetricTracker, OperandList, OperandState, TrackReport, ValueType,
+	arbitrary::{InstrAddr, NoCF},
+	CallFrameState, ControlFlowType, ExecState, Executor, Metric, MetricTracker, OperandList,
+	OperandState, Scalar, TrackReport, Value, ValueType,
 };
 use std::collections::HashMap;
 
@@ -77,38 +78,12 @@ fn return_trigger_impl(
 	let old_first_frame = std::mem::replace(&mut test_state.frame, frame);
 	test_state.frame_stack.insert(0, old_first_frame);
 
-	// Run test
-	let mut actual_metrics = TrackReport::new();
-	match Executor::from_state(&test_state, RepeatingMem(instr_encoded, 0))
-		.step(&mut actual_metrics)
-	{
-		Ok(exec) =>
-		{
-			if exec.state() != expected_state
-			{
-				TestResult::error(format!(
-					"Unexpected end state (actual != expected):\n{:?} != {:?}",
-					exec.state(),
-					expected_state
-				))
-			}
-			else
-			{
-				if expected_metrics != actual_metrics
-				{
-					TestResult::error(format!(
-						"Unexpected step metrics (actual != expected):\n{:?} != {:?}",
-						actual_metrics, expected_metrics
-					))
-				}
-				else
-				{
-					TestResult::passed()
-				}
-			}
-		},
-		_ => TestResult::error("Test step failed"),
-	}
+	test_execution_step(
+		&test_state,
+		RepeatingMem(instr_encoded, 0),
+		&expected_state,
+		&expected_metrics,
+	)
 }
 
 /// Test the triggering of a return that was previously issued.
@@ -119,6 +94,7 @@ fn return_trigger(
 	instr: SupportedInstruction,
 ) -> TestResult
 {
+	// Don't test the actually return instruction itself
 	if let Instruction::Call(CallVariant::Ret, _) = instr.0
 	{
 		return TestResult::discard();
@@ -167,7 +143,6 @@ fn return_trigger(
 			});
 			(ready_ops, reads)
 		},
-		Err(ExecError::Exception) => return TestResult::discard(),
 		_ => return TestResult::discard(),
 	};
 	expected_metrics.add_stat(Metric::TriggeredReturns, 1);
@@ -248,38 +223,279 @@ fn return_non_trigger(NoCF(state): NoCF<ExecState>, offset: Bits<6, false>) -> T
 	);
 	expected_state.address += 2;
 
-	// Run test
-	let mut actual_metrics = TrackReport::new();
-	match Executor::from_state(&state, RepeatingMem(instr_encoded, 0)).step(&mut actual_metrics)
+	use Metric::*;
+	let expected_metrics = TrackReport::from([(IssuedReturns, 1), (InstructionReads, 1)]);
+
+	test_execution_step(
+		&state,
+		RepeatingMem(instr_encoded, 0),
+		&expected_state,
+		&expected_metrics,
+	)
+}
+
+/// Test the triggering of a jump that was previously issued.
+#[quickcheck]
+fn jmp_trigger(
+	NoCF(state): NoCF<ExecState>,
+	instr: SupportedInstruction,
+	branch_target: InstrAddr,
+) -> TestResult
+{
+	// Skip any test with immediate control flow triggering
+	// or where the instruction is a branch
+	match instr.0
 	{
-		Ok(exec) =>
-		{
-			if exec.state() != expected_state
-			{
-				TestResult::error(format!(
-					"Unexpected end state (actual != expected):\n{:?} != {:?}",
-					exec.state(),
-					expected_state
-				))
-			}
-			else
-			{
-				use Metric::*;
-				let expected_metrics =
-					TrackReport::from([(IssuedReturns, 1), (InstructionReads, 1)]);
-				if expected_metrics != actual_metrics
-				{
-					TestResult::error(format!(
-						"Unexpected step metrics (actual != expected):\n{:?} != {:?}",
-						actual_metrics, expected_metrics
-					))
-				}
-				else
-				{
-					TestResult::passed()
-				}
-			}
-		},
-		_ => TestResult::error("Test step failed"),
+		Instruction::Call(_, offset) if offset.value == 0 => return TestResult::discard(),
+		Instruction::Jump(..) => return TestResult::discard(),
+		_ => (),
 	}
+	let instr_encoded = Instruction::encode(&instr.0);
+
+	// Execute one step on the frame to get the expected result of the next
+	// instruction
+	let mut expected_metrics = TrackReport::new();
+	let mut expected_state = match Executor::from_state(&state, RepeatingMem(instr_encoded, 0))
+		.step(&mut expected_metrics)
+	{
+		Ok(exec) => exec.state(),
+		_ => return TestResult::discard(),
+	};
+	expected_metrics.add_stat(Metric::TriggeredBranches, 1);
+
+	// Move the current address to the branch target
+	expected_state.address = branch_target.0;
+
+	// Construct test state
+	let mut test_state = state.clone();
+	test_state
+		.frame
+		.branches
+		.insert(state.address, ControlFlowType::Branch(branch_target.0));
+
+	test_execution_step(
+		&test_state,
+		RepeatingMem(instr_encoded, 0),
+		&expected_state,
+		&expected_metrics,
+	)
+}
+
+/// Test the jump instruction when taking 1 operand (i.e. immediate target and
+/// location offsets).
+///
+/// Takes the given start state and jump target, location, and condition.
+/// If no condition is given, will test the unconditional variant of the jump
+/// (no operands). Tests that the state almost doesn't change expect the
+/// following:
+///
+/// * If the jump is taken, `expect_jump` should alter the expected state given
+///   to it
+/// using the target and location addresses given.
+/// * If `may_trigger` is true, the expected state's address is only incremented
+///   by 2
+/// if the jump is not taken, otherwise it is always incremented.
+fn test_jump_immediate(
+	NoCF(state): NoCF<ExecState>,
+	target: Bits<7, true>,
+	location: Bits<6, false>,
+	condition: Option<Value>,
+	expect_jump: impl FnOnce(&mut ExecState, usize, usize),
+	may_trigger: bool,
+) -> TestResult
+{
+	// Construct test state
+	let mut test_state: ExecState = state.clone();
+	// Regress operand queue so that we can put our input as the
+	// the ready list.
+	test_state.frame.op_queue = regress_queue(test_state.frame.op_queue);
+	if let Some(condition) = &condition
+	{
+		test_state.frame.op_queue.insert(
+			0,
+			OperandList::new(OperandState::Ready(condition.clone()), vec![]),
+		);
+	}
+
+	// Expected state should be the same as the given one (since we first regressed
+	// it for our test.), except the address
+	let mut expected_state: ExecState = state.clone();
+	if !may_trigger
+	{
+		expected_state.address += 2;
+	}
+
+	let (unconditional, is_zero) = if let Some(condition) = &condition
+	{
+		if let Scalar::Val(s) = condition.get_first()
+		{
+			(false, s.iter().all(|b| *b == 0))
+		}
+		else
+		{
+			return TestResult::discard();
+		}
+	}
+	else
+	{
+		(true, false)
+	};
+	let location_addr = if let Some(addr) = state.address.checked_add((location.value * 2) as usize)
+	{
+		addr
+	}
+	else
+	{
+		// Undefined behavior
+		return TestResult::discard();
+	};
+	let jump_taken = if target.value <= 0 && (!is_zero || unconditional)
+	{
+		if let Some(target_addr) = state.address.checked_sub((target.value * -2) as usize)
+		{
+			expect_jump(&mut expected_state, target_addr, location_addr);
+			true
+		}
+		else
+		{
+			// Undefined behavior
+			return TestResult::discard();
+		}
+	}
+	else if target.value > 0 && (is_zero || unconditional)
+	{
+		// location offset is 0, so no need to add
+		if let Some(target_addr) = state
+			.address
+			.checked_add(((target.value + location.value + 1) * 2) as usize)
+		{
+			expect_jump(&mut expected_state, target_addr, location_addr);
+			true
+		}
+		else
+		{
+			// Undefined behavior
+			return TestResult::discard();
+		}
+	}
+	else
+	{
+		if may_trigger
+		{
+			// Branch not taken, should just advance
+			expected_state.address += 2;
+		}
+		false
+	};
+
+	let mut expected_metrics: TrackReport = [
+		(Metric::InstructionReads, 1),
+		(Metric::IssuedBranches, jump_taken as usize),
+	]
+	.into();
+	if !unconditional
+	{
+		expected_metrics.add_stat(Metric::ConsumedOperands, 1);
+		expected_metrics.add_stat(
+			Metric::ConsumedBytes,
+			condition.map_or(0, |c| c.get_first().bytes().unwrap().len()),
+		);
+	}
+	if may_trigger
+	{
+		expected_metrics.add_stat(Metric::TriggeredBranches, jump_taken as usize);
+	}
+	test_execution_step(
+		&test_state,
+		RepeatingMem(Instruction::encode(&Instruction::Jump(target, location)), 0),
+		&expected_state,
+		&expected_metrics,
+	)
+}
+
+/// Test the immediate-jump instruction that triggers immediately
+#[quickcheck]
+fn jmp_imm_immediately(
+	state: NoCF<ExecState>,
+	target: Bits<7, true>,
+	condition: Value,
+) -> TestResult
+{
+	test_jump_immediate(
+		state,
+		target,
+		0.try_into().unwrap(),
+		Some(condition),
+		|expected_state, target_addr, _| expected_state.address = target_addr,
+		true,
+	)
+}
+
+/// Test the immediate-jump instruction that doesn't trigger immediately
+#[quickcheck]
+fn jmp_imm_non_trigger(
+	state: NoCF<ExecState>,
+	target: Bits<7, true>,
+	location: Bits<6, false>,
+	condition: Value,
+) -> TestResult
+{
+	if location.value == 0
+	{
+		return TestResult::discard();
+	}
+	test_jump_immediate(
+		state,
+		target,
+		location,
+		Some(condition),
+		|expected_state, target_addr, location_addr| {
+			expected_state
+				.frame
+				.branches
+				.insert(location_addr, ControlFlowType::Branch(target_addr));
+		},
+		false,
+	)
+}
+
+/// Test the unconditional jump instruction that triggers immediately
+#[quickcheck]
+fn jmp_unconditional_immediately(state: NoCF<ExecState>, target: Bits<7, true>) -> TestResult
+{
+	test_jump_immediate(
+		state,
+		target,
+		0.try_into().unwrap(),
+		None,
+		|expected_state, target_addr, _| expected_state.address = target_addr,
+		true,
+	)
+}
+
+/// Test the unconditional jump instruction that doesn't trigger immediately
+#[quickcheck]
+fn jmp_unconditional_non_trigger(
+	state: NoCF<ExecState>,
+	target: Bits<7, true>,
+	location: Bits<6, false>,
+) -> TestResult
+{
+	if location.value == 0
+	{
+		return TestResult::discard();
+	}
+	test_jump_immediate(
+		state,
+		target,
+		location,
+		None,
+		|expected_state, target_addr, location_addr| {
+			expected_state
+				.frame
+				.branches
+				.insert(location_addr, ControlFlowType::Branch(target_addr));
+		},
+		false,
+	)
 }
