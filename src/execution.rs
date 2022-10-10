@@ -2,11 +2,11 @@ use crate::{
 	control_flow::ControlFlow, data::OperandStack, memory::Memory, value::Value, ExecState,
 	MetricTracker, Scalar, ValueType,
 };
-use byteorder::ByteOrder;
+use byteorder::{ByteOrder, LittleEndian};
 use scry_isa::{
 	Alu2OutputVariant, Alu2Variant, AluVariant, BitValue, Bits, CallVariant, Instruction,
 };
-use std::fmt::Debug;
+use std::{borrow::BorrowMut, fmt::Debug, marker::PhantomData, mem::size_of};
 
 /// The result of performing one execution step
 #[derive(Debug)]
@@ -21,34 +21,37 @@ pub enum ExecError
 
 /// Used to execute instructions.
 #[derive(Debug)]
-pub struct Executor<M: Memory>
+pub struct Executor<M: Memory, B: BorrowMut<M>>
 {
 	control: ControlFlow,
 	operands: OperandStack,
-	memory: M,
+	memory: B,
+	phantom: PhantomData<M>,
 }
-impl<M: Memory> Executor<M>
+impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 {
 	/// Constructs an executor that starts executing from the given address from
 	/// the given memory. The given values are the inputs to the instruction at
 	/// start_addr
-	pub fn new(start_addr: usize, memory: M, ready_ops: impl Iterator<Item = Value>) -> Self
+	pub fn new(start_addr: usize, memory: B, ready_ops: impl Iterator<Item = Value>) -> Self
 	{
 		Self {
 			operands: OperandStack::new(ready_ops),
 			control: ControlFlow::new(start_addr),
 			memory,
+			phantom: PhantomData,
 		}
 	}
 
 	/// Constructions a new executor that is equivalent to the given execution
 	/// state and uses the given memory.
-	pub fn from_state(state: &ExecState, memory: M) -> Self
+	pub fn from_state(state: &ExecState, memory: B) -> Self
 	{
 		Self {
 			operands: state.into(),
 			control: state.into(),
 			memory,
+			phantom: PhantomData,
 		}
 	}
 
@@ -80,6 +83,7 @@ impl<M: Memory> Executor<M>
 	{
 		let raw_instr = self
 			.memory
+			.borrow_mut()
 			.read_instr(self.control.next_addr, tracker)
 			.unwrap();
 		let has_non_uniform_operands = |ops: &OperandStack| {
@@ -117,14 +121,14 @@ impl<M: Memory> Executor<M>
 						tracker,
 					);
 					// Discard everything in the ready list
-					let _ = self.operands.ready_iter(&mut self.memory, tracker);
+					let _ = self.operands.ready_iter(self.memory.borrow_mut(), tracker);
 				},
 				EchoLong(offset) =>
 				{
 					self.operands
 						.reorder_ready(offset.value() as usize + 1, tracker);
 					// Discard (now empty) ready list
-					let _ = self.operands.ready_iter(&mut self.memory, tracker);
+					let _ = self.operands.ready_iter(self.memory.borrow_mut(), tracker);
 				},
 				Duplicate(to_next, tar1, tar2) =>
 				{
@@ -144,7 +148,7 @@ impl<M: Memory> Executor<M>
 					self.operands
 						.reorder_ready(tar2.value() as usize + 1, tracker);
 					// Discard (now empty) ready list
-					let _ = self.operands.ready_iter(&mut self.memory, tracker);
+					let _ = self.operands.ready_iter(self.memory.borrow_mut(), tracker);
 				},
 				Echo(to_next, tar1, tar2) =>
 				{
@@ -157,12 +161,12 @@ impl<M: Memory> Executor<M>
 						self.operands.reorder_ready(1, tracker);
 					}
 					// Discard (maybe empty) ready list
-					let _ = self.operands.ready_iter(&mut self.memory, tracker);
+					let _ = self.operands.ready_iter(self.memory.borrow_mut(), tracker);
 				},
 				Nop =>
 				{
 					// Discard ready list
-					let _ = self.operands.ready_iter(&mut self.memory, tracker);
+					let _ = self.operands.ready_iter(self.memory.borrow_mut(), tracker);
 				},
 				Alu(variant, offset) =>
 				{
@@ -199,11 +203,60 @@ impl<M: Memory> Executor<M>
 					self.operands.reorder_ready(1, tracker);
 
 					// Discard (now empty) ready list
-					let _ = self.operands.ready_iter(&mut self.memory, tracker);
+					let _ = self.operands.ready_iter(self.memory.borrow_mut(), tracker);
 				},
 				Jump(target, location) =>
 				{
 					self.handle_jump(target, location, tracker);
+				},
+				Store =>
+				{
+					match {
+						let mut ready_iter =
+							self.operands.ready_iter(self.memory.borrow_mut(), tracker);
+						(ready_iter.next(), ready_iter.next())
+					}
+					{
+						(Some((to_store, to_store_err)), Some((address, address_err))) =>
+						{
+							assert!(to_store_err.is_none());
+							assert!(address_err.is_none());
+							match (to_store.get_first(), address.get_first())
+							{
+								(Scalar::Nan, _) | (_, Scalar::Nan) =>
+								{
+									// Do nothing
+								},
+								(Scalar::Val(_), Scalar::Val(addr_bytes)) =>
+								{
+									// Get address
+									let mut address_bytes = [0u8; size_of::<u128>()];
+									for (idx, byte) in addr_bytes.iter().enumerate()
+									{
+										address_bytes[idx] = *byte;
+									}
+									let address = if let ValueType::Uint(_) = address.value_type()
+									{
+										// LittleEndian lacks a read_usize, so improvise
+										LittleEndian::read_u128(&address_bytes) as usize
+									}
+									else
+									{
+										// LittleEndian lacks a read_isize, so improvise
+										((self.control.next_addr as i128)
+											+ LittleEndian::read_i128(&address_bytes)) as usize
+									};
+
+									self.memory
+										.borrow_mut()
+										.write(address, &to_store, tracker)
+										.unwrap();
+								},
+								_ => return Err(ExecError::Exception),
+							}
+						},
+						_ => return Err(ExecError::Exception),
+					}
 				},
 				_ => todo!(),
 			}
@@ -227,7 +280,7 @@ impl<M: Memory> Executor<M>
 	)
 	{
 		let (op1, op2) = {
-			let mut ready_iter = self.operands.ready_iter(&mut self.memory, tracker);
+			let mut ready_iter = self.operands.ready_iter(self.memory.borrow_mut(), tracker);
 			(ready_iter.next(), ready_iter.next())
 		};
 		assert!(op2.is_none()); // TODO: implement 2-operand jumps
@@ -278,7 +331,7 @@ impl<M: Memory> Executor<M>
 			use AluVariant::*;
 
 			// Extract operands
-			let mut ins = self.operands.ready_iter(&mut self.memory, tracker);
+			let mut ins = self.operands.ready_iter(self.memory.borrow_mut(), tracker);
 			let mut result_scalars = Vec::new();
 			let in1 = ins.next().unwrap();
 			let typ = in1.0.value_type();
@@ -350,7 +403,7 @@ impl<M: Memory> Executor<M>
 	{
 		let (typ, mut result_scalars_low, mut result_scalars_high) = {
 			// Extract operands
-			let mut ins = self.operands.ready_iter(&mut self.memory, tracker);
+			let mut ins = self.operands.ready_iter(self.memory.borrow_mut(), tracker);
 			let mut result_scalars_low = Vec::new();
 			let mut result_scalars_high = Vec::new();
 			let in1 = ins.next().unwrap();

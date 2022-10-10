@@ -29,12 +29,12 @@ pub enum OperandState<R>
 }
 impl<R> OperandState<R>
 {
-	pub fn extract_value(self) -> Value
+	pub fn extract_value(self) -> Option<Value>
 	{
 		match self
 		{
-			Self::Ready(v) => v,
-			Self::MustRead(_) => panic!("OperandState is not ready"),
+			Self::Ready(v) => Some(v),
+			Self::MustRead(_) => None,
 		}
 	}
 }

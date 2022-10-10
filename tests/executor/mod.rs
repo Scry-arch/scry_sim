@@ -2,14 +2,15 @@ use crate::misc::{advance_queue, RepeatingMem};
 use quickcheck::{Arbitrary, Gen, TestResult};
 use scry_isa::{Alu2Variant, AluVariant, Bits, BitsDyn, CallVariant, Instruction};
 use scry_sim::{
-	arbitrary::NoCF, ExecState, Executor, Memory, Metric, MetricReporter, MetricTracker,
+	arbitrary::NoCF, ExecError, ExecState, Executor, Memory, Metric, MetricReporter, MetricTracker,
 	OperandList, OperandQueue, OperandState, TrackReport,
 };
-use std::fmt::Debug;
+use std::{borrow::BorrowMut, fmt::Debug};
 
 mod alu_instructions;
 mod control_flow;
 mod data_flow;
+mod load_store;
 
 /// Used to generate arbitrary instruction that are supported by the
 /// executor
@@ -37,7 +38,8 @@ impl Arbitrary for SupportedInstruction
 				| Call(CallVariant::Ret, _)
 				| Duplicate(..)
 				| Echo(..)
-				| EchoLong(..) => break,
+				| EchoLong(..)
+				| Store => break,
 				_ => instr = Instruction::arbitrary(g),
 			}
 		}
@@ -50,12 +52,29 @@ impl Arbitrary for SupportedInstruction
 	}
 }
 
+/// Checks that the expected metrics are equal to the actual ones.
+/// If not, prints relevant error
+pub fn test_metrics(expected: &TrackReport, actual: &TrackReport) -> TestResult
+{
+	if actual != expected
+	{
+		TestResult::error(format!(
+			"Unexpected step metrics (actual != expected):\n{:?}\n !=\n {:?}",
+			actual, expected
+		))
+	}
+	else
+	{
+		TestResult::passed()
+	}
+}
+
 /// Performs 1 execution step with the given start state and memory.
 /// Then checks that the given expected state is achieved with the expected
 /// metrics reported.
-pub fn test_execution_step(
+pub fn test_execution_step<M: Memory + Debug>(
 	start_state: &ExecState,
-	start_memory: impl Memory + Debug,
+	start_memory: impl BorrowMut<M> + Debug,
 	expected_state: &ExecState,
 	expected_metrics: &TrackReport,
 ) -> TestResult
@@ -75,20 +94,32 @@ pub fn test_execution_step(
 			}
 			else
 			{
-				if actual_metrics != *expected_metrics
-				{
-					TestResult::error(format!(
-						"Unexpected step metrics (actual != expected):\n{:?}\n !=\n {:?}",
-						actual_metrics, expected_metrics
-					))
-				}
-				else
-				{
-					TestResult::passed()
-				}
+				test_metrics(expected_metrics, &actual_metrics)
 			}
 		},
 		err => TestResult::error(format!("Test step failed: {:?}", err)),
+	}
+}
+
+/// Tests that an execution step from the given state/memory results in an
+/// exception with the given expected metrics.
+pub fn test_execution_step_exceptions<M: Memory + Debug>(
+	start_state: &ExecState,
+	start_memory: impl BorrowMut<M> + Debug,
+	expected_metrics: &TrackReport,
+) -> TestResult
+{
+	let mut actual_metrics = TrackReport::new();
+	match Executor::from_state(start_state, start_memory).step(&mut actual_metrics)
+	{
+		Err(ExecError::Exception) => test_metrics(expected_metrics, &actual_metrics),
+		result =>
+		{
+			TestResult::error(format!(
+				"Execution expected to end in an exception. Was: {:?}",
+				result
+			))
+		},
 	}
 }
 
@@ -134,7 +165,7 @@ fn test_simple_instruction(
 
 	test_execution_step(
 		&state,
-		RepeatingMem(instr.encode(), 0),
+		RepeatingMem::<true>(instr.encode(), 0),
 		&expected_state,
 		&expected_mets,
 	)
@@ -145,7 +176,7 @@ fn test_simple_instruction(
 #[quickcheck]
 fn import_export_executor(state: ExecState) -> bool
 {
-	let executor = Executor::from_state(&state, RepeatingMem(0, 0));
+	let executor = Executor::from_state(&state, RepeatingMem::<true>(0, 0));
 	let new_state = executor.state();
 
 	new_state == state

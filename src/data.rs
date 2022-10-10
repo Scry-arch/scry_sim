@@ -75,15 +75,20 @@ impl Operand
 		f: F,
 	) -> Result<impl '_ + Deref<Target = Value>, E>
 	{
-		match *(*self.op).borrow()
+		if self.get_value().is_none()
 		{
-			OperandState::MustRead((addr, len, typ)) =>
+			let mut ref_mut = (*self.op).borrow_mut();
+			match *ref_mut
 			{
-				let new_value = f(addr, len, typ)?;
-				*(*self.op).borrow_mut() = OperandState::Ready(new_value)
-			},
-			_ => (),
+				OperandState::MustRead((addr, len, typ)) =>
+				{
+					let new_value = f(addr, len, typ)?;
+					*ref_mut = OperandState::Ready(new_value)
+				},
+				_ => (),
+			}
 		}
+
 		if let Some(v) = self.get_value()
 		{
 			Ok(v)

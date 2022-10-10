@@ -99,14 +99,14 @@ fn test_arithmetic_instruction<const OPS_IN: usize, const OPS_OUT: usize>(
 	let removed_rest_values: Vec<Value> = removed_list
 		.rest
 		.into_iter()
-		.map(|op| op.extract_value())
+		.map(|op| op.extract_value().unwrap())
 		.collect();
 
 	expected_state.frame.op_queue = advance_queue(new_op_q);
 
 	// Calculate expected result operand
 	let mut result_scalars = Vec::new();
-	let first_value = removed_list.first.extract_value();
+	let first_value = removed_list.first.extract_value().unwrap();
 	let input_typ = first_value.value_type();
 	for (scalar_idx, sc0) in first_value.iter().enumerate()
 	{
@@ -191,7 +191,7 @@ fn test_arithmetic_instruction<const OPS_IN: usize, const OPS_OUT: usize>(
 
 	test_execution_step(
 		&state,
-		RepeatingMem(instr.encode(), 0),
+		RepeatingMem::<false>(instr.encode(), 0),
 		&expected_state,
 		&expected_mets,
 	)

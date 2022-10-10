@@ -68,7 +68,7 @@ fn return_trigger_impl(
 	// want to dictate the order, we insert the expected state into an Executor
 	// and extract it immediately, ensuring the order of reads will follow the
 	// implementation
-	expected_state = Executor::from_state(&expected_state, RepeatingMem(0, 0)).state();
+	expected_state = Executor::from_state(&expected_state, RepeatingMem::<true>(0, 0)).state();
 
 	// Construct test state
 	let mut test_state = state.clone();
@@ -80,7 +80,7 @@ fn return_trigger_impl(
 
 	test_execution_step(
 		&test_state,
-		RepeatingMem(instr_encoded, 0),
+		RepeatingMem::<true>(instr_encoded, 0),
 		&expected_state,
 		&expected_metrics,
 	)
@@ -113,7 +113,7 @@ fn return_trigger(
 			frame: frame.clone(),
 			frame_stack: Vec::new(),
 		},
-		RepeatingMem(instr_encoded, 0),
+		RepeatingMem::<true>(instr_encoded, 0),
 	)
 	.step(&mut expected_metrics)
 	{
@@ -228,7 +228,7 @@ fn return_non_trigger(NoCF(state): NoCF<ExecState>, offset: Bits<6, false>) -> T
 
 	test_execution_step(
 		&state,
-		RepeatingMem(instr_encoded, 0),
+		RepeatingMem::<true>(instr_encoded, 0),
 		&expected_state,
 		&expected_metrics,
 	)
@@ -255,12 +255,13 @@ fn jmp_trigger(
 	// Execute one step on the frame to get the expected result of the next
 	// instruction
 	let mut expected_metrics = TrackReport::new();
-	let mut expected_state = match Executor::from_state(&state, RepeatingMem(instr_encoded, 0))
-		.step(&mut expected_metrics)
-	{
-		Ok(exec) => exec.state(),
-		_ => return TestResult::discard(),
-	};
+	let mut expected_state =
+		match Executor::from_state(&state, RepeatingMem::<true>(instr_encoded, 0))
+			.step(&mut expected_metrics)
+		{
+			Ok(exec) => exec.state(),
+			_ => return TestResult::discard(),
+		};
 	expected_metrics.add_stat(Metric::TriggeredBranches, 1);
 
 	// Move the current address to the branch target
@@ -275,7 +276,7 @@ fn jmp_trigger(
 
 	test_execution_step(
 		&test_state,
-		RepeatingMem(instr_encoded, 0),
+		RepeatingMem::<true>(instr_encoded, 0),
 		&expected_state,
 		&expected_metrics,
 	)
@@ -407,7 +408,7 @@ fn test_jump_immediate(
 	}
 	test_execution_step(
 		&test_state,
-		RepeatingMem(Instruction::encode(&Instruction::Jump(target, location)), 0),
+		RepeatingMem::<true>(Instruction::encode(&Instruction::Jump(target, location)), 0),
 		&expected_state,
 		&expected_metrics,
 	)

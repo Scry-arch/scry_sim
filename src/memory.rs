@@ -21,6 +21,9 @@ pub enum MemError
 /// Trait for operations on memory.
 pub trait Memory
 {
+	/// Gets the byte value at the given address (if a valid address).
+	fn read_raw(&mut self, addr: usize) -> Option<u8>;
+
 	/// Read from the given address, into the given value, the given number of
 	/// elements.
 	///
@@ -130,7 +133,7 @@ impl MemBlock
 		let range = addr..(addr + size);
 		self.data
 			.get(range.clone())
-			.map_or(Err((MemError::InvalidAddr, self.size())), |slice| {
+			.map_or(Err((MemError::InvalidAddr, addr)), |slice| {
 				if let Some((uninit, _)) = self
 					.initialized
 					.get(range)
@@ -203,13 +206,34 @@ impl BlockedMemory
 	{
 		self.blocks
 			.iter()
+			.rev()
 			.find(|(offset, _)| *offset <= addr)
 			.ok_or((MemError::InvalidAddr, addr))
 			.and_then(|(offset, mem)| mem.read(addr - offset, size))
 	}
+
+	pub fn add_block(&mut self, mem: Vec<u8>, offset: usize)
+	{
+		let end_addr = offset + mem.len();
+		// Non-overlapping. TODO: handle overlapping
+		assert!(self.blocks.iter().all(|(other_offset, other_block)| {
+			let other_end_addr = other_offset + other_block.data.len();
+			end_addr <= *other_offset || offset >= other_end_addr
+		}));
+
+		self.blocks.push((offset, mem.into()));
+		self.blocks
+			.sort_by(|(offset1, _), (offset2, _)| offset1.partial_cmp(offset2).unwrap())
+	}
 }
 impl Memory for BlockedMemory
 {
+	fn read_raw(&mut self, addr: usize) -> Option<u8>
+	{
+		self.read_no_report(addr, 1)
+			.map_or(None, |byte| Some(byte[0]))
+	}
+
 	/// Read from the given address, into the given value, the given number of
 	/// elements
 	///
@@ -287,7 +311,8 @@ impl Memory for BlockedMemory
 		let (offset, mem) = self
 			.blocks
 			.iter_mut()
-			.find(|(offset, _)| *offset < addr)
+			.rev()
+			.find(|(offset, _)| *offset <= addr)
 			.ok_or((MemError::InvalidAddr, addr))?;
 
 		for (idx, val) in from.iter().enumerate()
@@ -296,10 +321,10 @@ impl Memory for BlockedMemory
 			if let Scalar::Val(bytes) = val
 			{
 				mem.write(element_addr, bytes.as_ref())?;
-				tracker.add_stat(Metric::DataBytesWritten, from.size());
+				tracker.add_stat(Metric::DataBytesWritten, bytes.len());
 				if addr % from.scale() != 0
 				{
-					tracker.add_stat(Metric::DataBytesWritten, 1);
+					tracker.add_stat(Metric::UnalignedWrites, 1);
 				}
 			}
 			else if let Scalar::Nar(_) = val
