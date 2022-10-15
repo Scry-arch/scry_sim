@@ -1,6 +1,6 @@
 use byteorder::{ByteOrder, LittleEndian};
 use scry_sim::{MemError, Memory, Metric, MetricTracker, OperandQueue, Scalar, Value};
-use std::mem::size_of;
+
 
 /// A memory that always produces the same instruction and data.
 ///
@@ -17,7 +17,7 @@ use std::mem::size_of;
 /// writes will fail.
 ///
 /// Meant for testing.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub struct RepeatingMem<const MAY_STORE: bool>(pub u16, pub u8);
 impl<const MAY_STORE: bool> Memory for RepeatingMem<MAY_STORE>
 {
@@ -42,7 +42,7 @@ impl<const MAY_STORE: bool> Memory for RepeatingMem<MAY_STORE>
 		scalars.resize_with(len, || scalar.clone());
 		let result = Value::new_typed(into.value_type(), scalars.remove(0), scalars).unwrap();
 
-		tracker.add_stat(Metric::DataBytesRead, result.size());
+		tracker.add_stat(Metric::DataReadBytes, result.size());
 
 		*into = result;
 		Ok(())
@@ -69,13 +69,48 @@ impl<const MAY_STORE: bool> Memory for RepeatingMem<MAY_STORE>
 	{
 		if MAY_STORE
 		{
-			tracker.add_stat(Metric::DataBytesWritten, from.size());
-			Ok(())
+			AllowWrite(self).write(addr, from, tracker)
 		}
 		else
 		{
 			Err((MemError::InvalidAddr, addr))
 		}
+	}
+}
+
+/// Wrapper around a memory that accept all writes and allows them to succeed
+/// regardless og address.
+#[derive(Debug)]
+pub struct AllowWrite<'a, M: Memory>(pub &'a mut M);
+impl<'a, M: Memory> Memory for AllowWrite<'a, M>
+{
+	delegate::delegate! {
+		to self.0{
+			fn read_raw(&mut self, addr: usize) -> Option<u8>;
+			fn read_data(
+				&mut self,
+				addr: usize,
+				into: &mut Value,
+				len: usize,
+				tracker: &mut impl MetricTracker,
+			) -> Result<(), (MemError, usize)>;
+			fn read_instr(
+				&mut self,
+				addr: usize,
+				tracker: &mut impl MetricTracker,
+			) -> Result<[u8; 2], MemError>;
+		}
+	}
+
+	fn write(
+		&mut self,
+		_: usize,
+		from: &Value,
+		tracker: &mut impl MetricTracker,
+	) -> Result<(), (MemError, usize)>
+	{
+		tracker.add_stat(Metric::DataBytesWritten, from.size());
+		Ok(())
 	}
 }
 
@@ -96,7 +131,7 @@ pub fn as_addr(operand: &Scalar) -> usize
 {
 	let mut result = 0usize;
 
-	assert!(size_of::<usize>() >= operand.bytes().unwrap().len());
+	// assert!(size_of::<usize>() >= operand.bytes().unwrap().len());
 
 	for (idx, byte) in operand.bytes().unwrap().iter().enumerate()
 	{

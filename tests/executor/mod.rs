@@ -10,10 +10,15 @@ use std::{borrow::BorrowMut, fmt::Debug};
 mod alu_instructions;
 mod control_flow;
 mod data_flow;
-mod load_store;
+mod load;
+mod store;
 
 /// Used to generate arbitrary instruction that are supported by the
-/// executor
+/// executor.
+///
+/// Supported means that for any input combinations the instruction will
+/// execute without panicking.
+/// The result is allowed to be a simulation exception.
 #[derive(Debug, Clone)]
 struct SupportedInstruction(Instruction);
 impl Arbitrary for SupportedInstruction
@@ -39,6 +44,61 @@ impl Arbitrary for SupportedInstruction
 				| Duplicate(..)
 				| Echo(..)
 				| EchoLong(..)
+				| Store => break,
+				_ => instr = Instruction::arbitrary(g),
+			}
+		}
+		Self(instr)
+	}
+
+	fn shrink(&self) -> Box<dyn Iterator<Item = Self>>
+	{
+		Box::new(self.0.shrink().map(|shrunk| Self(shrunk)))
+	}
+}
+
+/// Used to generate arbitrary instruction that are supported by the
+/// executor and consume or discard all their inputs
+#[derive(Debug, Clone)]
+struct ConsumingDiscarding(Instruction);
+impl ConsumingDiscarding
+{
+	// Returns whether an operand with the given index in the ready list
+	// is discarded by this instruction.
+	fn discards(&self, idx: usize) -> bool
+	{
+		use Instruction::*;
+		idx >= match self.0
+		{
+			Nop => 0,
+			Alu(AluVariant::Inc, _) | Alu(AluVariant::Dec, _) => 1,
+			Alu(AluVariant::Add, _)
+			| Alu(AluVariant::Sub, _)
+			| Alu2(Alu2Variant::Add, _, _)
+			| Alu2(Alu2Variant::Sub, _, _)
+			| Store => 2,
+			_ => panic!("Other instructions aren't guaranteed to consume or discard their inputs."),
+		}
+	}
+}
+impl Arbitrary for ConsumingDiscarding
+{
+	fn arbitrary(g: &mut Gen) -> Self
+	{
+		let mut instr: Instruction = Instruction::arbitrary(g);
+
+		loop
+		{
+			use Instruction::*;
+			match instr
+			{
+				Alu(AluVariant::Add, _)
+				| Alu(AluVariant::Inc, _)
+				| Alu(AluVariant::Sub, _)
+				| Alu(AluVariant::Dec, _)
+				| Alu2(Alu2Variant::Add, _, _)
+				| Alu2(Alu2Variant::Sub, _, _)
+				| Nop
 				| Store => break,
 				_ => instr = Instruction::arbitrary(g),
 			}

@@ -14,5 +14,6 @@ duplicate = "0.4.0"
 
 [dev-dependencies]
 quickcheck_macros = "1.0.0"
+delegate = "0.8.0"
 
 

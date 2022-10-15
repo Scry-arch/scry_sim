@@ -3,7 +3,6 @@ use crate::{
 	value::Value,
 	CallFrameState, ExecState, Metric, MetricTracker, OperandList, OperandState, ValueType,
 };
-use num_traits::PrimInt;
 use std::{
 	cell::{Ref, RefCell},
 	collections::{HashMap, VecDeque},
@@ -36,31 +35,6 @@ impl Operand
 	{
 		Self {
 			op: Rc::new(OperandState::MustRead((address, len, typ)).into()),
-		}
-	}
-
-	/// Constructs an operand that needs to read from the given address the
-	/// given amount of scalars.
-	///
-	/// The type of the scalars is equivalent to the given type parameter.
-	pub fn read<N: PrimInt>(address: usize, len: usize) -> Self
-	{
-		Self::read_typed(address, len, ValueType::new::<N>())
-	}
-
-	/// If this operand must still read its value from memory returns
-	/// the address, number of scalars to read, and their type.
-	///
-	/// Otherwise return `None`.
-	pub fn must_read(&self) -> Option<(usize, usize, ValueType)>
-	{
-		if let OperandState::MustRead((addr, len, typ)) = *(*self.op).borrow()
-		{
-			Some((addr, len, typ))
-		}
-		else
-		{
-			None
 		}
 	}
 
@@ -116,14 +90,6 @@ impl Operand
 		{
 			None
 		}
-	}
-
-	/// Sets the operand's value.
-	///
-	/// Any operand connected to this one will also see the set value.
-	pub fn set_value(&mut self, v: Value)
-	{
-		*(*self.op).borrow_mut() = OperandState::Ready(v);
 	}
 }
 impl From<Value> for Operand
@@ -186,7 +152,7 @@ impl OperandStack
 
 			fn next(&mut self) -> Option<Self::Item>
 			{
-				self.stack.ready.pop_front().and_then(|mut op| {
+				self.stack.ready.pop_front().and_then(|mut op: Operand| {
 					let mut err = None;
 					let val = op
 						.get_value_or::<(), _>(|addr, len, typ| {

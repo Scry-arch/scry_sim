@@ -51,12 +51,12 @@ fn test_store_instruction(
 	// Initialize data memory
 	let mut store_mem_vec = Vec::new();
 	store_mem_vec.resize(to_store.scale(), init_mem_bytes);
-	let mut mem = BlockedMemory::new(store_mem_vec, store_address);
+	let mut mem = BlockedMemory::new(store_mem_vec.into_iter(), store_address);
 
 	// Initialize instruction memory
 	let mut encoded_bytes = [0u8; 2];
 	LittleEndian::write_u16(&mut encoded_bytes, Instruction::Store.encode());
-	mem.add_block(encoded_bytes.into_iter().collect(), state.address);
+	mem.add_block(encoded_bytes.into_iter(), state.address);
 
 	let test_state = clone_with_front_operands(&state, to_store.clone(), [address_value.clone()]);
 

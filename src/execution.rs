@@ -1,6 +1,9 @@
 use crate::{
-	control_flow::ControlFlow, data::OperandStack, memory::Memory, value::Value, ExecState,
-	MetricTracker, Scalar, ValueType,
+	control_flow::ControlFlow,
+	data::{Operand, OperandStack},
+	memory::Memory,
+	value::Value,
+	ExecState, MetricTracker, Scalar, ValueType,
 };
 use byteorder::{ByteOrder, LittleEndian};
 use scry_isa::{
@@ -9,7 +12,7 @@ use scry_isa::{
 use std::{borrow::BorrowMut, fmt::Debug, marker::PhantomData, mem::size_of};
 
 /// The result of performing one execution step
-#[derive(Debug)]
+#[derive(Debug, Eq, PartialEq)]
 pub enum ExecError
 {
 	/// The simulation triggered an exception
@@ -86,29 +89,6 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 			.borrow_mut()
 			.read_instr(self.control.next_addr, tracker)
 			.unwrap();
-		let has_non_uniform_operands = |ops: &OperandStack| {
-			ops.ready_peek().count() < 1
-				|| ops.ready_peek().count() > 2
-				|| ops.ready_peek().any(|op| op.must_read().is_some())
-				|| ops.ready_peek().any(|op| {
-					let first_op_type = ops
-						.ready_peek()
-						.next()
-						.unwrap()
-						.get_value()
-						.unwrap()
-						.value_type();
-					let val = op.get_value().unwrap();
-					val.value_type() != first_op_type
-						|| val.iter().any(|scalar| {
-							match scalar
-							{
-								Scalar::Nar(_) | Scalar::Nan => true,
-								_ => false,
-							}
-						})
-				})
-		};
 		let instr = Instruction::decode(byteorder::LittleEndian::read_u16(&raw_instr));
 		{
 			use Instruction::*;
@@ -170,21 +150,11 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 				},
 				Alu(variant, offset) =>
 				{
-					// TODO: support different types/lengths
-					if has_non_uniform_operands(&self.operands)
-					{
-						return Err(ExecError::Exception);
-					}
-					self.perform_alu(variant, offset, tracker);
+					self.perform_alu(variant, offset, tracker)?;
 				},
 				Alu2(variant, out, offset) =>
 				{
-					// TODO: support different types/lengths
-					if has_non_uniform_operands(&self.operands)
-					{
-						return Err(ExecError::Exception);
-					}
-					self.perform_alu2(variant, out, offset, tracker);
+					self.perform_alu2(variant, out, offset, tracker)?;
 				},
 				Constant(bits) =>
 				{
@@ -230,33 +200,43 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 								(Scalar::Val(_), Scalar::Val(addr_bytes)) =>
 								{
 									// Get address
-									let mut address_bytes = [0u8; size_of::<u128>()];
-									for (idx, byte) in addr_bytes.iter().enumerate()
-									{
-										address_bytes[idx] = *byte;
-									}
-									let address = if let ValueType::Uint(_) = address.value_type()
-									{
-										// LittleEndian lacks a read_usize, so improvise
-										LittleEndian::read_u128(&address_bytes) as usize
-									}
-									else
-									{
-										// LittleEndian lacks a read_isize, so improvise
-										((self.control.next_addr as i128)
-											+ LittleEndian::read_i128(&address_bytes)) as usize
-									};
+									let address =
+										self.get_absolute_address(address.value_type(), addr_bytes);
 
 									self.memory
 										.borrow_mut()
 										.write(address, &to_store, tracker)
-										.unwrap();
+										.map_err(|_| ExecError::Exception)?;
 								},
 								_ => return Err(ExecError::Exception),
 							}
 						},
 						_ => return Err(ExecError::Exception),
 					}
+				},
+				Load(signed, size, target) =>
+				{
+					let (addr, err) = self
+						.operands
+						.ready_iter(self.memory.borrow_mut(), tracker)
+						.next()
+						.unwrap();
+					assert!(err.is_none());
+
+					let address = self
+						.get_absolute_address(addr.value_type(), addr.get_first().bytes().unwrap());
+
+					let read_typ = if signed
+					{
+						ValueType::Int(size.value as u8)
+					}
+					else
+					{
+						ValueType::Uint(size.value as u8)
+					};
+					let op = Operand::read_typed(address, 1, read_typ);
+					self.operands
+						.push_operand(target.value as usize, op, tracker);
 				},
 				_ => todo!(),
 			}
@@ -269,6 +249,26 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 		{
 			Err(ExecError::Err)
 		}
+	}
+
+	fn get_absolute_address(&mut self, address_typ: ValueType, addr_bytes: &[u8]) -> usize
+	{
+		let mut address_bytes = [0u8; size_of::<u128>()];
+		for (idx, byte) in addr_bytes.iter().enumerate()
+		{
+			address_bytes[idx] = *byte;
+		}
+		let address = if let ValueType::Uint(_) = address_typ
+		{
+			// LittleEndian lacks a read_usize, so improvise
+			LittleEndian::read_u128(&address_bytes) as usize
+		}
+		else
+		{
+			// LittleEndian lacks a read_isize, so improvise
+			((self.control.next_addr as i128) + LittleEndian::read_i128(&address_bytes)) as usize
+		};
+		address
 	}
 
 	/// Executes the jump instruction.
@@ -314,6 +314,27 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 		};
 	}
 
+	fn fail_if_nan_nar(v: &Value) -> Result<(), ExecError>
+	{
+		match v.get_first()
+		{
+			Scalar::Nan | Scalar::Nar(_) => Err(ExecError::Exception),
+			_ => Ok(()),
+		}
+	}
+
+	fn fail_if_diff_types(v1: ValueType, v2: ValueType) -> Result<(), ExecError>
+	{
+		if v1 != v2
+		{
+			Err(ExecError::Exception)
+		}
+		else
+		{
+			Ok(())
+		}
+	}
+
 	/// Executes an Alu instruction, consuming the needed inputs and putting the
 	/// result in the relevant list.
 	///
@@ -325,7 +346,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 		variant: AluVariant,
 		offset: Bits<5, false>,
 		tracker: &mut impl MetricTracker,
-	)
+	) -> Result<(), ExecError>
 	{
 		let (typ, mut result_scalars) = {
 			use AluVariant::*;
@@ -333,16 +354,21 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 			// Extract operands
 			let mut ins = self.operands.ready_iter(self.memory.borrow_mut(), tracker);
 			let mut result_scalars = Vec::new();
-			let in1 = ins.next().unwrap();
-			let typ = in1.0.value_type();
-			let in1 = in1.0.iter();
+			let in1 = ins.next();
 
-			match variant
+			let typ = match variant
 			{
 				Add | Sub =>
 				{
 					// Variants with 2 inputs
-					let in2 = ins.next().unwrap();
+					let in2 = ins.next();
+					let in1 = in1.ok_or(ExecError::Exception)?;
+					let in2 = in2.ok_or(ExecError::Exception)?;
+					Self::fail_if_nan_nar(&in1.0)?;
+					Self::fail_if_nan_nar(&in2.0)?;
+					let typ = in1.0.value_type();
+					Self::fail_if_diff_types(typ, in2.0.value_type())?;
+					let in1 = in1.0.iter();
 					let in2 = in2.0.iter();
 
 					let func = match variant
@@ -356,10 +382,15 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 					{
 						result_scalars.push(Scalar::Val(func(sc1, sc2, typ).into_boxed_slice()));
 					}
+					typ
 				},
 				Inc | Dec =>
 				{
 					// Variants with 1 input
+					let in1 = in1.ok_or(ExecError::Exception)?;
+					Self::fail_if_nan_nar(&in1.0)?;
+					let typ = in1.0.value_type();
+					let in1 = in1.0.iter();
 					let func = match variant
 					{
 						Inc => Self::alu_increment_wrapping,
@@ -371,9 +402,10 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 					{
 						result_scalars.push(Scalar::Val(func(sc1, typ).into_boxed_slice()));
 					}
+					typ
 				},
 				_ => unreachable!(),
-			}
+			};
 
 			(typ, result_scalars)
 		};
@@ -384,6 +416,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 				.into(),
 			tracker,
 		);
+		Ok(())
 	}
 
 	/// Executes an Alu2 instruction, consuming the needed inputs and putting
@@ -399,18 +432,21 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 		out_var: Alu2OutputVariant,
 		offset: Bits<5, false>,
 		tracker: &mut impl MetricTracker,
-	)
+	) -> Result<(), ExecError>
 	{
 		let (typ, mut result_scalars_low, mut result_scalars_high) = {
 			// Extract operands
 			let mut ins = self.operands.ready_iter(self.memory.borrow_mut(), tracker);
-			let mut result_scalars_low = Vec::new();
-			let mut result_scalars_high = Vec::new();
-			let in1 = ins.next().unwrap();
+			let in1 = ins.next();
+			let in2 = ins.next();
+			let in1 = in1.ok_or(ExecError::Exception)?;
+			let in2 = in2.ok_or(ExecError::Exception)?;
+			Self::fail_if_nan_nar(&in1.0)?;
+			Self::fail_if_nan_nar(&in2.0)?;
 			let typ = in1.0.value_type();
-			let in1 = in1.0.iter();
+			Self::fail_if_diff_types(typ, in2.0.value_type())?;
 
-			let in2 = ins.next().unwrap();
+			let in1 = in1.0.iter();
 			let in2 = in2.0.iter();
 
 			use Alu2Variant::*;
@@ -421,6 +457,8 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 				_ => unreachable!(),
 			};
 
+			let mut result_scalars_low = Vec::new();
+			let mut result_scalars_high = Vec::new();
 			for (sc1, sc2) in in1.zip(in2)
 			{
 				let (low, high) = func(sc1, sc2, typ);
@@ -454,6 +492,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 		{
 			self.operands.push_operand(offset, op, tracker);
 		}
+		Ok(())
 	}
 
 	/// Performs a byte-wise addition with carry.

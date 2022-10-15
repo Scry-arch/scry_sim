@@ -40,7 +40,7 @@ pub enum Metric
 	/// Data reads from memory performed
 	DataReads,
 	/// Data bytes read from memory
-	DataBytesRead,
+	DataReadBytes,
 	/// Data bytes written to memory
 	DataBytesWritten,
 	/// Unaligned data reads
@@ -101,6 +101,11 @@ impl TrackReport
 		Self {
 			stats: HashMap::new(),
 		}
+	}
+
+	pub fn reset_stat(&mut self, stat: Metric)
+	{
+		self.stats.remove(&stat);
 	}
 }
 impl MetricTracker for TrackReport

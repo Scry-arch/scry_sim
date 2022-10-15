@@ -191,10 +191,10 @@ pub struct BlockedMemory
 impl BlockedMemory
 {
 	/// Construct a new memory object with only the given block
-	pub fn new(mem: Vec<u8>, offset: usize) -> Self
+	pub fn new(mem: impl Iterator<Item = u8>, offset: usize) -> Self
 	{
 		Self {
-			blocks: vec![(offset, mem.into())],
+			blocks: vec![(offset, mem.collect::<Vec<_>>().into())],
 		}
 	}
 
@@ -212,16 +212,16 @@ impl BlockedMemory
 			.and_then(|(offset, mem)| mem.read(addr - offset, size))
 	}
 
-	pub fn add_block(&mut self, mem: Vec<u8>, offset: usize)
+	pub fn add_block(&mut self, mem: impl Iterator<Item = u8>, offset: usize)
 	{
-		let end_addr = offset + mem.len();
+		let end_addr = offset + mem.size_hint().0;
 		// Non-overlapping. TODO: handle overlapping
 		assert!(self.blocks.iter().all(|(other_offset, other_block)| {
 			let other_end_addr = other_offset + other_block.data.len();
 			end_addr <= *other_offset || offset >= other_end_addr
 		}));
 
-		self.blocks.push((offset, mem.into()));
+		self.blocks.push((offset, mem.collect::<Vec<_>>().into()));
 		self.blocks
 			.sort_by(|(offset1, _), (offset2, _)| offset1.partial_cmp(offset2).unwrap())
 	}
@@ -248,7 +248,6 @@ impl Memory for BlockedMemory
 	{
 		let mut found_uninit = None;
 		let scale = into.scale();
-		let size = into.size();
 		for (idx, val) in into.iter_mut().enumerate()
 		{
 			self.read_no_report(addr + (idx * scale), scale)
@@ -257,8 +256,9 @@ impl Memory for BlockedMemory
 					Ok(())
 				})
 				.and_then(|_| {
-					tracker.add_stat(Metric::DataBytesRead, size);
-					if addr % scale != 0
+					tracker.add_stat(Metric::DataReads, 1);
+					tracker.add_stat(Metric::DataReadBytes, scale);
+					if (addr % scale) != 0
 					{
 						tracker.add_stat(Metric::UnalignedReads, 1);
 					}
