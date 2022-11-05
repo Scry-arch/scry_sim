@@ -44,6 +44,7 @@ impl Arbitrary for SupportedInstruction
 				| Duplicate(..)
 				| Echo(..)
 				| EchoLong(..)
+				| Capture(..)
 				| Store => break,
 				_ => instr = Instruction::arbitrary(g),
 			}

@@ -1,7 +1,6 @@
 use byteorder::{ByteOrder, LittleEndian};
 use scry_sim::{MemError, Memory, Metric, MetricTracker, OperandQueue, Scalar, Value};
 
-
 /// A memory that always produces the same instruction and data.
 ///
 /// All read operations will always succeed regardless of address or alignment.

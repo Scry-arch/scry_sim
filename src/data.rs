@@ -247,17 +247,43 @@ impl OperandStack
 			});
 	}
 
-	/// Moves all operands on the ready list to the back of the `dest_idx`
-	/// queue.
-	pub fn reorder_ready(&mut self, dest_idx: usize, tracker: &mut impl MetricTracker)
+	/// Moves all operands on the list with at index `src_idx` to the back of
+	/// the `dest_idx` queue.
+	pub fn reorder_list(
+		&mut self,
+		src_idx: usize,
+		dest_idx: usize,
+		tracker: &mut impl MetricTracker,
+	)
 	{
-		while let Some(op) = self.ready.remove(0).map(|op| {
+		if src_idx == dest_idx
+		{
+			return;
+		}
+		
+		while let Some(op) = if src_idx == 0
+		{
+			Some(&mut self.ready)
+		}
+		else
+		{
+			self.queue.get_mut(src_idx - 1)
+		}
+		.and_then(|list| list.remove(0))
+		.map(|op| {
 			tracker.add_stat(Metric::ReorderedOperands, 1);
 			op
 		})
 		{
 			self.push_op_unreported(dest_idx, op);
 		}
+	}
+
+	/// Moves all operands on the ready list to the back of the `dest_idx`
+	/// queue.
+	pub fn reorder_ready(&mut self, dest_idx: usize, tracker: &mut impl MetricTracker)
+	{
+		self.reorder_list(0, dest_idx, tracker)
 	}
 
 	/// Pushes the current operand queue onto the queue stack keeping the ready

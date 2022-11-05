@@ -143,6 +143,16 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 					// Discard (maybe empty) ready list
 					let _ = self.operands.ready_iter(self.memory.borrow_mut(), tracker);
 				},
+				Capture(cap, target) =>
+				{
+					self.operands.reorder_list(
+						cap.value as usize + 1,
+						target.value as usize + 1,
+						tracker,
+					);
+					// Discard ready list
+					let _ = self.operands.ready_iter(self.memory.borrow_mut(), tracker);
+				},
 				Nop =>
 				{
 					// Discard ready list
@@ -238,7 +248,11 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 					self.operands
 						.push_operand(target.value as usize, op, tracker);
 				},
-				_ => todo!(),
+				instr =>
+				{
+					dbg!(instr);
+					todo!()
+				},
 			}
 		}
 		if self.control.next_addr(&mut self.operands, tracker)
