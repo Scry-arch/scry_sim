@@ -1,5 +1,6 @@
 use crate::misc::{advance_queue, RepeatingMem};
 use quickcheck::{Arbitrary, Gen, TestResult};
+use quickcheck_macros::quickcheck;
 use scry_isa::{Alu2Variant, AluVariant, Bits, BitsDyn, CallVariant, Instruction};
 use scry_sim::{
 	arbitrary::NoCF, ExecError, ExecState, Executor, Memory, Metric, MetricReporter, MetricTracker,

@@ -5,6 +5,7 @@ use crate::{
 use byteorder::{ByteOrder, LittleEndian};
 use duplicate::duplicate;
 use quickcheck::TestResult;
+use quickcheck_macros::quickcheck;
 use scry_isa::{Alu2OutputVariant, Alu2Variant, AluVariant, Bits, Instruction};
 use scry_sim::{
 	arbitrary::{LimitedOps, NoCF, NoReads, SimpleOps},

@@ -1,4 +1,5 @@
 use quickcheck::TestResult;
+use quickcheck_macros::quickcheck;
 use scry_sim::{
 	arbitrary::InstrAddr, CallFrameState, ControlFlowType, OperandList, OperandState, ValueType,
 };

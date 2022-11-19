@@ -1,5 +1,8 @@
 use byteorder::{ByteOrder, LittleEndian};
+use duplicate::duplicate_item;
+use quickcheck_macros::quickcheck;
 use scry_sim::{MemError, Memory, Metric, MetricTracker, OperandQueue, Scalar, Value};
+use std::mem::size_of;
 
 /// A memory that always produces the same instruction and data.
 ///
@@ -125,12 +128,12 @@ pub fn regress_queue(from: OperandQueue) -> OperandQueue
 	from.into_iter().map(|(idx, ops)| (idx + 1, ops)).collect()
 }
 
-/// Interprets the given scalar as a simulation address.
-pub fn as_addr(operand: &Scalar) -> usize
+/// Interprets the given scalar as a usize.
+pub fn as_usize(operand: &Scalar) -> usize
 {
 	let mut result = 0usize;
 
-	// assert!(size_of::<usize>() >= operand.bytes().unwrap().len());
+	assert!(size_of::<usize>() >= operand.bytes().unwrap().len());
 
 	for (idx, byte) in operand.bytes().unwrap().iter().enumerate()
 	{
@@ -141,4 +144,68 @@ pub fn as_addr(operand: &Scalar) -> usize
 	}
 
 	result
+}
+
+/// Interprets the given scalar as a isize.
+pub fn as_isize(operand: &Scalar) -> isize
+{
+	let mut result = 0usize;
+
+	assert!(size_of::<usize>() >= operand.bytes().unwrap().len());
+
+	for (idx, byte) in operand.bytes().unwrap().iter().enumerate()
+	{
+		let mut byte_usize = *byte as usize;
+		let shift_count = idx * 8;
+		byte_usize <<= shift_count;
+		result += byte_usize;
+	}
+
+	// If negative, must sign extend
+	if *operand.bytes().unwrap().last().unwrap() > (i8::MAX as u8)
+		&& size_of::<usize>() > operand.bytes().unwrap().len()
+	{
+		let mut extending_bits = usize::MAX;
+		extending_bits = extending_bits
+			.overflowing_shl(8 * operand.bytes().unwrap().len() as u32)
+			.0;
+		result += extending_bits;
+	}
+
+	// Reinterpret as isize
+	isize::from_le_bytes(result.to_le_bytes())
+}
+
+/// Test as_usize on various type lengths
+#[duplicate_item(
+	name 					typ;
+	[test_as_usize_u8] 		[u8];
+	[test_as_usize_u16] 	[u16];
+	[test_as_usize_u32]  	[u32];
+	[test_as_usize_usize]	[usize];
+)]
+#[quickcheck]
+fn name(operand: typ) -> bool
+{
+	let mut scal = Scalar::Nan;
+	scal.set_val(&operand.to_le_bytes());
+	let result = as_usize(&scal);
+	result == (operand as usize)
+}
+
+/// Test as_isize on various type lengths
+#[duplicate_item(
+	name 					typ;
+	[test_as_isize_i8] 		[i8];
+	[test_as_isize_i16] 	[i16];
+	[test_as_isize_i32]  	[i32];
+	[test_as_isize_isize]	[isize];
+)]
+#[quickcheck]
+fn name(operand: typ) -> bool
+{
+	let mut scal = Scalar::Nan;
+	scal.set_val(&operand.to_le_bytes());
+	let result = as_isize(&scal);
+	result == (operand as isize)
 }

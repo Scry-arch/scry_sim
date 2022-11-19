@@ -76,7 +76,7 @@ impl Scalar
 	/// The given bytes are the new value's state.
 	/// Care should be taken to ensure the length of the slice matches the
 	/// value's type.
-	pub(crate) fn set_val(&mut self, bytes: &[u8])
+	pub fn set_val(&mut self, bytes: &[u8])
 	{
 		if let Scalar::Val(val) = self
 		{

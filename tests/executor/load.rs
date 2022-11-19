@@ -1,8 +1,9 @@
 use crate::{
 	executor::{test_execution_step, test_metrics, ConsumingDiscarding},
-	misc::{as_addr, regress_queue, AllowWrite, RepeatingMem},
+	misc::{as_isize, as_usize, regress_queue, AllowWrite, RepeatingMem},
 };
 use quickcheck::{Arbitrary, Gen, TestResult};
+use quickcheck_macros::quickcheck;
 use scry_isa::{Bits, Instruction};
 use scry_sim::{
 	arbitrary::{NoCF, NoReads},
@@ -295,6 +296,7 @@ fn load_trigger(
 	}
 }
 
+/// Test issuing a load with an absolute address
 #[quickcheck]
 fn load_issue_absolute_address(
 	NoCF(state): NoCF<ExecState>,
@@ -340,7 +342,7 @@ fn load_issue_absolute_address(
 	expected_state
 		.frame
 		.reads
-		.push((as_addr(addr.get_first()), 1, typ));
+		.push((as_usize(addr.get_first()), 1, typ));
 	// Because executor equality depends on the order of the read list,
 	// put the expected state in an executor and extract it so that the order
 	// would be the same as the test executor
@@ -364,6 +366,96 @@ fn load_issue_absolute_address(
 			(Metric::QueuedReads, 1),
 			(Metric::ConsumedOperands, 1),
 			(Metric::ConsumedBytes, addr.size()),
+		]
+		.into(),
+	)
+}
+
+/// Test issuing a load with an relative address
+#[quickcheck]
+fn load_issue_relative_address(
+	NoCF(state): NoCF<ExecState>,
+	typ: ValueType,
+	offset: Value,
+	target: Bits<5, false>,
+) -> TestResult
+{
+	// Ignore Nar/nan or unsigned offsets
+	if offset.get_first().bytes().is_none()
+	{
+		return TestResult::discard();
+	}
+	if let ValueType::Uint(_) = offset.value_type()
+	{
+		return TestResult::discard();
+	}
+	// Ignore address calculation overflow
+	let offset_value = as_isize(offset.get_first());
+	let abs_addr_option = if offset_value < 0
+	{
+		state.address.checked_sub(offset_value.abs_diff(0))
+	}
+	else
+	{
+		state.address.checked_add(offset_value.abs_diff(0))
+	};
+	let absolute_addr = if let Some(addr) = abs_addr_option
+	{
+		addr
+	}
+	else
+	{
+		return TestResult::discard();
+	};
+
+	let mut test_state = state.clone();
+	test_state.frame.op_queue = regress_queue(test_state.frame.op_queue);
+	test_state.frame.op_queue.insert(
+		0,
+		OperandList::new(OperandState::Ready(offset.clone()), Vec::new()),
+	);
+
+	let mut expected_state: ExecState = state.clone();
+	expected_state.address += 2;
+	let read_op = OperandState::MustRead(expected_state.frame.reads.len());
+	if let Some(list) = expected_state
+		.frame
+		.op_queue
+		.get_mut(&(target.value as usize))
+	{
+		list.push(read_op);
+	}
+	else
+	{
+		expected_state
+			.frame
+			.op_queue
+			.insert(target.value as usize, OperandList::new(read_op, Vec::new()));
+	}
+	expected_state.frame.reads.push((absolute_addr, 1, typ));
+	// Because executor equality depends on the order of the read list,
+	// put the expected state in an executor and extract it so that the order
+	// would be the same as the test executor
+	expected_state = Executor::from_state(&expected_state, RepeatingMem::<true>(0, 0)).state();
+
+	let (signed, size) = match typ
+	{
+		ValueType::Int(x) => (true, x),
+		ValueType::Uint(x) => (false, x),
+	};
+
+	test_execution_step(
+		&test_state,
+		RepeatingMem::<false>(
+			Instruction::Load(signed, (size as i32).try_into().unwrap(), target).encode(),
+			0,
+		),
+		&expected_state,
+		&[
+			(Metric::InstructionReads, 1),
+			(Metric::QueuedReads, 1),
+			(Metric::ConsumedOperands, 1),
+			(Metric::ConsumedBytes, offset.size()),
 		]
 		.into(),
 	)

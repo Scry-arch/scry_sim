@@ -1,4 +1,5 @@
 use duplicate::duplicate_item;
+use quickcheck_macros::quickcheck;
 use scry_sim::{
 	arbitrary::{LimitedOps, NoCF, NoReads, Restriction, SimpleOps},
 	CallFrameState, ExecState, ValueType,

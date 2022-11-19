@@ -1,9 +1,10 @@
 use crate::{
 	executor::{test_execution_step, test_execution_step_exceptions},
-	misc::{advance_queue, as_addr, regress_queue, RepeatingMem},
+	misc::{advance_queue, as_isize, as_usize, regress_queue, RepeatingMem},
 };
 use byteorder::{ByteOrder, LittleEndian};
 use quickcheck::TestResult;
+use quickcheck_macros::quickcheck;
 use scry_isa::Instruction;
 use scry_sim::{
 	arbitrary::NoCF, BlockedMemory, ExecState, Memory, Metric, OperandList, OperandState, Scalar,
@@ -156,7 +157,7 @@ fn store_absolute(
 		return TestResult::discard();
 	}
 
-	let store_address = as_addr(address.get_first());
+	let store_address = as_usize(address.get_first());
 
 	test_store_instruction(
 		NoCF(state),
@@ -188,7 +189,7 @@ fn store_relative(
 		return TestResult::discard();
 	}
 
-	let rel_store_address = as_addr(rel_address.get_first()) as isize;
+	let rel_store_address = as_isize(rel_address.get_first());
 	let rel_negative = rel_store_address < 0;
 	let abs_rel = rel_store_address.abs_diff(0);
 

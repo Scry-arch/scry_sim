@@ -1,5 +1,6 @@
 use crate::executor::test_simple_instruction;
 use quickcheck::TestResult;
+use quickcheck_macros::quickcheck;
 use scry_isa::{Bits, Instruction};
 use scry_sim::{arbitrary::NoCF, ExecState, Metric, OperandList, OperandState};
 use std::cmp::min;

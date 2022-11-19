@@ -265,12 +265,29 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 		}
 	}
 
-	fn get_absolute_address(&mut self, address_typ: ValueType, addr_bytes: &[u8]) -> usize
+	/// Returns the absolute address that the given address and its type
+	/// represent.
+	///
+	/// If the address is unsigned, it is returned as is.
+	/// If it is signed, it is treated as an offset from the current address
+	/// being executed.
+	fn get_absolute_address(&mut self, address_typ: ValueType, address: &[u8]) -> usize
 	{
 		let mut address_bytes = [0u8; size_of::<u128>()];
-		for (idx, byte) in addr_bytes.iter().enumerate()
+		for (idx, byte) in address.iter().enumerate()
 		{
 			address_bytes[idx] = *byte;
+			// If signed and negative, must sign extend
+			if let ValueType::Int(_) = address_typ
+			{
+				if *address.last().unwrap() > (i8::MAX as u8)
+				{
+					address_bytes
+						.iter_mut()
+						.skip(address.len())
+						.for_each(|b| *b = u8::MAX);
+				}
+			}
 		}
 		let address = if let ValueType::Uint(_) = address_typ
 		{

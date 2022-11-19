@@ -260,7 +260,7 @@ impl OperandStack
 		{
 			return;
 		}
-		
+
 		while let Some(op) = if src_idx == 0
 		{
 			Some(&mut self.ready)

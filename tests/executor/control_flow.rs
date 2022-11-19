@@ -3,6 +3,7 @@ use crate::{
 	misc::{advance_queue, regress_queue, RepeatingMem},
 };
 use quickcheck::TestResult;
+use quickcheck_macros::quickcheck;
 use scry_isa::{BitValue, Bits, CallVariant, Instruction};
 use scry_sim::{
 	arbitrary::{InstrAddr, NoCF},
