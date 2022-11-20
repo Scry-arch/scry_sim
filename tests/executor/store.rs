@@ -7,8 +7,8 @@ use quickcheck::TestResult;
 use quickcheck_macros::quickcheck;
 use scry_isa::Instruction;
 use scry_sim::{
-	arbitrary::NoCF, BlockedMemory, ExecState, Memory, Metric, OperandList, OperandState, Scalar,
-	Value, ValueType,
+	arbitrary::{ArbScalarVal, ArbValue, NoCF},
+	BlockedMemory, ExecState, Memory, Metric, OperandList, OperandState, Value, ValueType,
 };
 
 /// Creates a state that is identical to the given one except the address is
@@ -141,27 +141,16 @@ fn clone_with_front_operands<const N: usize>(
 #[quickcheck]
 fn store_absolute(
 	NoCF(state): NoCF<ExecState>,
-	address: Value,
-	to_store: Value,
+	ArbScalarVal(addr_size_pow2, addr_scalar): ArbScalarVal,
+	ArbValue(to_store): ArbValue<false, false>,
 	init_mem_bytes: u8,
 ) -> TestResult
 {
-	if address.get_first().bytes().is_none() || to_store.get_first().bytes().is_none()
-	{
-		// Ignore Nars or Nans
-		return TestResult::discard();
-	}
-	if let ValueType::Int(_) = address.value_type()
-	{
-		// Ignore signed addresses
-		return TestResult::discard();
-	}
-
-	let store_address = as_usize(address.get_first());
+	let store_address = as_usize(&addr_scalar);
 
 	test_store_instruction(
 		NoCF(state),
-		&address,
+		&Value::singleton_typed(ValueType::Uint(addr_size_pow2), addr_scalar),
 		&to_store,
 		init_mem_bytes,
 		store_address,
@@ -172,24 +161,12 @@ fn store_absolute(
 #[quickcheck]
 fn store_relative(
 	NoCF(state): NoCF<ExecState>,
-	// state: ExecState,
-	rel_address: Value,
-	to_store: Value,
+	ArbScalarVal(addr_size_pow2, addr_scalar): ArbScalarVal,
+	ArbValue(to_store): ArbValue<false, false>,
 	init_mem_bytes: u8,
 ) -> TestResult
 {
-	if rel_address.get_first().bytes().is_none() || to_store.get_first().bytes().is_none()
-	{
-		// Ignore Nars or Nans
-		return TestResult::discard();
-	}
-	if let ValueType::Uint(_) = rel_address.value_type()
-	{
-		// Ignore unsigned addresses
-		return TestResult::discard();
-	}
-
-	let rel_store_address = as_isize(rel_address.get_first());
+	let rel_store_address = as_isize(&addr_scalar);
 	let rel_negative = rel_store_address < 0;
 	let abs_rel = rel_store_address.abs_diff(0);
 
@@ -212,7 +189,7 @@ fn store_relative(
 
 	test_store_instruction(
 		NoCF(state),
-		&rel_address,
+		&Value::singleton_typed(ValueType::Int(addr_size_pow2), addr_scalar),
 		&to_store,
 		init_mem_bytes,
 		store_address,
@@ -280,15 +257,9 @@ fn store_nar_addr(
 	NoCF(state): NoCF<ExecState>,
 	address_type: ValueType,
 	payload: usize,
-	to_store: Value,
+	ArbValue(to_store): ArbValue<true, false>,
 ) -> TestResult
 {
-	if let Scalar::Nan = to_store.get_first()
-	{
-		// Ignore when value is Nan
-		return TestResult::discard();
-	}
-
 	let test_state = clone_with_front_operands(
 		&state,
 		to_store.clone(),
@@ -314,17 +285,11 @@ fn store_nar_addr(
 #[quickcheck]
 fn store_nar_value(
 	NoCF(state): NoCF<ExecState>,
-	address: Value,
+	ArbValue(address): ArbValue<true, false>,
 	payload: usize,
 	to_store: ValueType,
 ) -> TestResult
 {
-	if let Scalar::Nan = address.get_first()
-	{
-		// Ignore when addr is Nan
-		return TestResult::discard();
-	}
-
 	let test_state = clone_with_front_operands(
 		&state,
 		Value::new_nar_typed(to_store, payload),

@@ -37,6 +37,15 @@ impl<R> OperandState<R>
 			Self::MustRead(_) => None,
 		}
 	}
+
+	pub fn get_value(&self) -> Option<&Value>
+	{
+		match self
+		{
+			Self::Ready(v) => Some(v),
+			Self::MustRead(_) => None,
+		}
+	}
 }
 
 /// Control flow types

@@ -210,8 +210,11 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 								(Scalar::Val(_), Scalar::Val(addr_bytes)) =>
 								{
 									// Get address
-									let address =
-										self.get_absolute_address(address.value_type(), addr_bytes);
+									let address = self.get_absolute_address(
+										(address.value_type(), addr_bytes),
+										None,
+										to_store.scale(),
+									);
 
 									self.memory
 										.borrow_mut()
@@ -226,16 +229,6 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 				},
 				Load(signed, size, target) =>
 				{
-					let (addr, err) = self
-						.operands
-						.ready_iter(self.memory.borrow_mut(), tracker)
-						.next()
-						.unwrap();
-					assert!(err.is_none());
-
-					let address = self
-						.get_absolute_address(addr.value_type(), addr.get_first().bytes().unwrap());
-
 					let read_typ = if signed
 					{
 						ValueType::Int(size.value as u8)
@@ -244,6 +237,29 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 					{
 						ValueType::Uint(size.value as u8)
 					};
+
+					let (base_addr, offset) = {
+						let mut ready_ops =
+							self.operands.ready_iter(self.memory.borrow_mut(), tracker);
+						let (in1, err) = ready_ops.next().unwrap();
+						assert!(err.is_none());
+						let in2 = ready_ops.next().map(|(in2, err)| {
+							assert!(err.is_none());
+							in2
+						});
+						(in1, in2)
+					};
+					let address = self.get_absolute_address(
+						(
+							base_addr.value_type(),
+							base_addr.get_first().bytes().unwrap(),
+						),
+						offset
+							.as_ref()
+							.map(|v| (v.value_type(), v.get_first().bytes().unwrap())),
+						read_typ.scale(),
+					);
+
 					let op = Operand::read_typed(address, 1, read_typ);
 					self.operands
 						.push_operand(target.value as usize, op, tracker);
@@ -265,31 +281,44 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 		}
 	}
 
+	/// Converts the given bytes to the equivalent 128-bit bytes.
+	/// If the given typ is a signed integer, will sign-extend the bytes
+	fn extend_bytes_to_128(bytes: &[u8], typ: ValueType) -> [u8; size_of::<u128>()]
+	{
+		let mut new_bytes = [0u8; size_of::<u128>()];
+		for (idx, byte) in bytes.iter().enumerate()
+		{
+			new_bytes[idx] = *byte;
+			// If signed and negative, must sign extend
+			if let ValueType::Int(_) = typ
+			{
+				if *bytes.last().unwrap() > (i8::MAX as u8)
+				{
+					new_bytes
+						.iter_mut()
+						.skip(bytes.len())
+						.for_each(|b| *b = u8::MAX);
+				}
+			}
+		}
+		new_bytes
+	}
+
 	/// Returns the absolute address that the given address and its type
 	/// represent.
 	///
 	/// If the address is unsigned, it is returned as is.
 	/// If it is signed, it is treated as an offset from the current address
 	/// being executed.
-	fn get_absolute_address(&mut self, address_typ: ValueType, address: &[u8]) -> usize
+	fn get_absolute_address(
+		&mut self,
+		base_address: (ValueType, &[u8]),
+		offset: Option<(ValueType, &[u8])>,
+		scale: usize,
+	) -> usize
 	{
-		let mut address_bytes = [0u8; size_of::<u128>()];
-		for (idx, byte) in address.iter().enumerate()
-		{
-			address_bytes[idx] = *byte;
-			// If signed and negative, must sign extend
-			if let ValueType::Int(_) = address_typ
-			{
-				if *address.last().unwrap() > (i8::MAX as u8)
-				{
-					address_bytes
-						.iter_mut()
-						.skip(address.len())
-						.for_each(|b| *b = u8::MAX);
-				}
-			}
-		}
-		let address = if let ValueType::Uint(_) = address_typ
+		let address_bytes = Self::extend_bytes_to_128(base_address.1, base_address.0);
+		let address = if let ValueType::Uint(_) = base_address.0
 		{
 			// LittleEndian lacks a read_usize, so improvise
 			LittleEndian::read_u128(&address_bytes) as usize
@@ -299,7 +328,22 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 			// LittleEndian lacks a read_isize, so improvise
 			((self.control.next_addr as i128) + LittleEndian::read_i128(&address_bytes)) as usize
 		};
-		address
+
+		let to_add = offset.map_or(0, |(typ, bytes)| {
+			assert!(
+				if let ValueType::Uint(_) = typ
+				{
+					true
+				}
+				else
+				{
+					false
+				}
+			);
+			LittleEndian::read_u128(&Self::extend_bytes_to_128(bytes, typ)) as usize * scale
+		});
+
+		address + to_add
 	}
 
 	/// Executes the jump instruction.

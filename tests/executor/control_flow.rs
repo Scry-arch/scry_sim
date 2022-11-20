@@ -6,9 +6,9 @@ use quickcheck::TestResult;
 use quickcheck_macros::quickcheck;
 use scry_isa::{BitValue, Bits, CallVariant, Instruction};
 use scry_sim::{
-	arbitrary::{InstrAddr, NoCF},
+	arbitrary::{ArbValue, InstrAddr, NoCF},
 	CallFrameState, ControlFlowType, ExecState, Executor, Metric, MetricTracker, OperandList,
-	OperandState, Scalar, TrackReport, Value, ValueType,
+	OperandState, Scalar, TrackReport, ValueType,
 };
 use std::collections::HashMap;
 
@@ -301,7 +301,7 @@ fn test_jump_immediate(
 	NoCF(state): NoCF<ExecState>,
 	target: Bits<7, true>,
 	location: Bits<6, false>,
-	condition: Option<Value>,
+	condition: Option<ArbValue<false, false>>,
 	expect_jump: impl FnOnce(&mut ExecState, usize, usize),
 	may_trigger: bool,
 ) -> TestResult
@@ -315,7 +315,7 @@ fn test_jump_immediate(
 	{
 		test_state.frame.op_queue.insert(
 			0,
-			OperandList::new(OperandState::Ready(condition.clone()), vec![]),
+			OperandList::new(OperandState::Ready(condition.0.clone()), vec![]),
 		);
 	}
 
@@ -329,13 +329,13 @@ fn test_jump_immediate(
 
 	let (unconditional, is_zero) = if let Some(condition) = &condition
 	{
-		if let Scalar::Val(s) = condition.get_first()
+		if let Scalar::Val(s) = condition.0.get_first()
 		{
 			(false, s.iter().all(|b| *b == 0))
 		}
 		else
 		{
-			return TestResult::discard();
+			unreachable!()
 		}
 	}
 	else
@@ -400,7 +400,7 @@ fn test_jump_immediate(
 		expected_metrics.add_stat(Metric::ConsumedOperands, 1);
 		expected_metrics.add_stat(
 			Metric::ConsumedBytes,
-			condition.map_or(0, |c| c.get_first().bytes().unwrap().len()),
+			condition.map_or(0, |c| c.0.get_first().bytes().unwrap().len()),
 		);
 	}
 	if may_trigger
@@ -420,7 +420,7 @@ fn test_jump_immediate(
 fn jmp_imm_immediately(
 	state: NoCF<ExecState>,
 	target: Bits<7, true>,
-	condition: Value,
+	condition: ArbValue<false, false>,
 ) -> TestResult
 {
 	test_jump_immediate(
@@ -439,7 +439,7 @@ fn jmp_imm_non_trigger(
 	state: NoCF<ExecState>,
 	target: Bits<7, true>,
 	location: Bits<6, false>,
-	condition: Value,
+	condition: ArbValue<false, false>,
 ) -> TestResult
 {
 	if location.value == 0

@@ -176,6 +176,31 @@ pub fn as_isize(operand: &Scalar) -> isize
 	isize::from_le_bytes(result.to_le_bytes())
 }
 
+/// Get the address represented by the given value.
+///
+/// The value is assumed to be an unsigned integer.
+pub fn get_absolute_address(addr: &Scalar) -> usize
+{
+	as_usize(addr)
+}
+
+/// Get the absolute address from the current address and the given offset
+/// value.
+///
+/// The value is assumed to be a signed integer
+pub fn get_relative_address(current_address: usize, offset: &Scalar) -> Option<usize>
+{
+	let offset_value = as_isize(offset);
+	if offset_value < 0
+	{
+		current_address.checked_sub(offset_value.abs_diff(0))
+	}
+	else
+	{
+		current_address.checked_add(offset_value.abs_diff(0))
+	}
+}
+
 /// Test as_usize on various type lengths
 #[duplicate_item(
 	name 					typ;

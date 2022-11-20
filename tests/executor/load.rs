@@ -1,12 +1,15 @@
 use crate::{
 	executor::{test_execution_step, test_metrics, ConsumingDiscarding},
-	misc::{as_isize, as_usize, regress_queue, AllowWrite, RepeatingMem},
+	misc::{
+		as_usize, get_absolute_address, get_relative_address, regress_queue, AllowWrite,
+		RepeatingMem,
+	},
 };
 use quickcheck::{Arbitrary, Gen, TestResult};
 use quickcheck_macros::quickcheck;
 use scry_isa::{Bits, Instruction};
 use scry_sim::{
-	arbitrary::{NoCF, NoReads},
+	arbitrary::{ArbScalarVal, ArbValue, NoCF, NoReads},
 	BlockedMemory, ExecState, Executor, Metric, MetricTracker, OperandList, OperandState,
 	TrackReport, Value, ValueType,
 };
@@ -296,31 +299,24 @@ fn load_trigger(
 	}
 }
 
-/// Test issuing a load with an absolute address
-#[quickcheck]
-fn load_issue_absolute_address(
+/// Tests executing load instructions.
+///
+/// Given the initial state, regresses the operand queue and puts the given
+/// operand queue as the ready queue.
+/// Then tests that when the next instruction is a load the issued load has the
+/// given load type and will load from the given address and outputting to the
+/// given target. Also tests metrics.
+fn test_issue_load(
 	NoCF(state): NoCF<ExecState>,
-	typ: ValueType,
-	addr: Value,
+	load_operands: OperandList,
+	loaded_typ: ValueType,
+	addr: usize,
 	target: Bits<5, false>,
 ) -> TestResult
 {
-	// Ignore Nar/nan or signed addresses
-	if addr.get_first().bytes().is_none()
-	{
-		return TestResult::discard();
-	}
-	if let ValueType::Int(_) = addr.value_type()
-	{
-		return TestResult::discard();
-	}
-
 	let mut test_state = state.clone();
 	test_state.frame.op_queue = regress_queue(test_state.frame.op_queue);
-	test_state.frame.op_queue.insert(
-		0,
-		OperandList::new(OperandState::Ready(addr.clone()), Vec::new()),
-	);
+	test_state.frame.op_queue.insert(0, load_operands.clone());
 
 	let mut expected_state: ExecState = state.clone();
 	expected_state.address += 2;
@@ -339,16 +335,13 @@ fn load_issue_absolute_address(
 			.op_queue
 			.insert(target.value as usize, OperandList::new(read_op, Vec::new()));
 	}
-	expected_state
-		.frame
-		.reads
-		.push((as_usize(addr.get_first()), 1, typ));
+	expected_state.frame.reads.push((addr, 1, loaded_typ));
 	// Because executor equality depends on the order of the read list,
 	// put the expected state in an executor and extract it so that the order
 	// would be the same as the test executor
 	expected_state = Executor::from_state(&expected_state, RepeatingMem::<true>(0, 0)).state();
 
-	let (signed, size) = match typ
+	let (signed, size) = match loaded_typ
 	{
 		ValueType::Int(x) => (true, x),
 		ValueType::Uint(x) => (false, x),
@@ -364,10 +357,41 @@ fn load_issue_absolute_address(
 		&[
 			(Metric::InstructionReads, 1),
 			(Metric::QueuedReads, 1),
-			(Metric::ConsumedOperands, 1),
-			(Metric::ConsumedBytes, addr.size()),
+			(Metric::ConsumedOperands, 1 + load_operands.rest.len()),
+			(
+				Metric::ConsumedBytes,
+				load_operands.first.get_value().unwrap().scale()
+					+ load_operands
+						.rest
+						.iter()
+						.fold(0, |sum, op| sum + op.get_value().unwrap().scale()),
+			),
 		]
 		.into(),
+	)
+}
+
+/// Test issuing a load with an absolute address
+#[quickcheck]
+fn load_issue_absolute_address(
+	NoCF(state): NoCF<ExecState>,
+	typ: ValueType,
+	ArbScalarVal(addr_size_pow2, addr_scalar): ArbScalarVal,
+	target: Bits<5, false>,
+) -> TestResult
+{
+	test_issue_load(
+		NoCF(state),
+		OperandList::new(
+			OperandState::Ready(Value::singleton_typed(
+				ValueType::Uint(addr_size_pow2),
+				addr_scalar.clone(),
+			)),
+			Vec::new(),
+		),
+		typ,
+		get_absolute_address(&addr_scalar),
+		target,
 	)
 }
 
@@ -376,30 +400,12 @@ fn load_issue_absolute_address(
 fn load_issue_relative_address(
 	NoCF(state): NoCF<ExecState>,
 	typ: ValueType,
-	offset: Value,
+	ArbScalarVal(offset_size_pow2, offset_scalar): ArbScalarVal,
 	target: Bits<5, false>,
 ) -> TestResult
 {
-	// Ignore Nar/nan or unsigned offsets
-	if offset.get_first().bytes().is_none()
-	{
-		return TestResult::discard();
-	}
-	if let ValueType::Uint(_) = offset.value_type()
-	{
-		return TestResult::discard();
-	}
 	// Ignore address calculation overflow
-	let offset_value = as_isize(offset.get_first());
-	let abs_addr_option = if offset_value < 0
-	{
-		state.address.checked_sub(offset_value.abs_diff(0))
-	}
-	else
-	{
-		state.address.checked_add(offset_value.abs_diff(0))
-	};
-	let absolute_addr = if let Some(addr) = abs_addr_option
+	let absolute_addr = if let Some(addr) = get_relative_address(state.address, &offset_scalar)
 	{
 		addr
 	}
@@ -408,67 +414,63 @@ fn load_issue_relative_address(
 		return TestResult::discard();
 	};
 
-	let mut test_state = state.clone();
-	test_state.frame.op_queue = regress_queue(test_state.frame.op_queue);
-	test_state.frame.op_queue.insert(
-		0,
-		OperandList::new(OperandState::Ready(offset.clone()), Vec::new()),
-	);
-
-	let mut expected_state: ExecState = state.clone();
-	expected_state.address += 2;
-	let read_op = OperandState::MustRead(expected_state.frame.reads.len());
-	if let Some(list) = expected_state
-		.frame
-		.op_queue
-		.get_mut(&(target.value as usize))
-	{
-		list.push(read_op);
-	}
-	else
-	{
-		expected_state
-			.frame
-			.op_queue
-			.insert(target.value as usize, OperandList::new(read_op, Vec::new()));
-	}
-	expected_state.frame.reads.push((absolute_addr, 1, typ));
-	// Because executor equality depends on the order of the read list,
-	// put the expected state in an executor and extract it so that the order
-	// would be the same as the test executor
-	expected_state = Executor::from_state(&expected_state, RepeatingMem::<true>(0, 0)).state();
-
-	let (signed, size) = match typ
-	{
-		ValueType::Int(x) => (true, x),
-		ValueType::Uint(x) => (false, x),
-	};
-
-	test_execution_step(
-		&test_state,
-		RepeatingMem::<false>(
-			Instruction::Load(signed, (size as i32).try_into().unwrap(), target).encode(),
-			0,
+	test_issue_load(
+		NoCF(state),
+		OperandList::new(
+			OperandState::Ready(Value::singleton_typed(
+				ValueType::Int(offset_size_pow2),
+				offset_scalar,
+			)),
+			Vec::new(),
 		),
-		&expected_state,
-		&[
-			(Metric::InstructionReads, 1),
-			(Metric::QueuedReads, 1),
-			(Metric::ConsumedOperands, 1),
-			(Metric::ConsumedBytes, offset.size()),
-		]
-		.into(),
+		typ,
+		absolute_addr,
+		target,
 	)
 }
 
-// Load test:
-//
-//
-// 2. Load issue test:
-//
-// Simply see it go on the list
-//
-// 3. Nar/nar inputs
-//
-// 4. Invalid address
-//
+/// Test issuing a load with an relative address
+#[quickcheck]
+fn load_issue_indexed(
+	NoCF(state): NoCF<ExecState>,
+	loaded_typ: ValueType,
+	ArbValue(base_addr): ArbValue<false, false>,
+	ArbScalarVal(index_size_pow2, index_scalar): ArbScalarVal,
+	target: Bits<5, false>,
+) -> TestResult
+{
+	// Calculate expected load address
+	let checked_absolute_addr = if let ValueType::Int(_) = base_addr.value_type()
+	{
+		get_relative_address(state.address, base_addr.get_first())
+	}
+	else
+	{
+		Some(get_absolute_address(base_addr.get_first()))
+	};
+	let offset = as_usize(&index_scalar).checked_mul(loaded_typ.scale());
+	let absolute_addr = if let Some(addr) =
+		checked_absolute_addr.and_then(|addr| offset.and_then(|offset| addr.checked_add(offset)))
+	{
+		addr
+	}
+	else
+	{
+		// Ignore address calculation overflow
+		return TestResult::discard();
+	};
+
+	test_issue_load(
+		NoCF(state),
+		OperandList::new(
+			OperandState::Ready(base_addr.clone()),
+			vec![OperandState::Ready(Value::singleton_typed(
+				ValueType::Uint(index_size_pow2),
+				index_scalar,
+			))],
+		),
+		loaded_typ,
+		absolute_addr,
+		target,
+	)
+}
