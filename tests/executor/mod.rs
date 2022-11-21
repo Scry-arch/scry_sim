@@ -45,8 +45,7 @@ impl Arbitrary for SupportedInstruction
 				| Duplicate(..)
 				| Echo(..)
 				| EchoLong(..)
-				| Capture(..)
-				| Store => break,
+				| Capture(..) => break,
 				_ => instr = Instruction::arbitrary(g),
 			}
 		}
@@ -77,8 +76,7 @@ impl ConsumingDiscarding
 			Alu(AluVariant::Add, _)
 			| Alu(AluVariant::Sub, _)
 			| Alu2(Alu2Variant::Add, _, _)
-			| Alu2(Alu2Variant::Sub, _, _)
-			| Store => 2,
+			| Alu2(Alu2Variant::Sub, _, _) => 2,
 			_ => panic!("Other instructions aren't guaranteed to consume or discard their inputs."),
 		}
 	}
@@ -100,8 +98,7 @@ impl Arbitrary for ConsumingDiscarding
 				| Alu(AluVariant::Dec, _)
 				| Alu2(Alu2Variant::Add, _, _)
 				| Alu2(Alu2Variant::Sub, _, _)
-				| Nop
-				| Store => break,
+				| Nop => break,
 				_ => instr = Instruction::arbitrary(g),
 			}
 		}

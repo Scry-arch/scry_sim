@@ -3,7 +3,7 @@ use crate::{
 	data::{Operand, OperandStack},
 	memory::Memory,
 	value::Value,
-	ExecState, MetricTracker, Scalar, ValueType,
+	ExecState, MemError, MetricTracker, Scalar, ValueType,
 };
 use byteorder::{ByteOrder, LittleEndian};
 use scry_isa::{
@@ -191,41 +191,30 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 				},
 				Store =>
 				{
-					match {
-						let mut ready_iter =
-							self.operands.ready_iter(self.memory.borrow_mut(), tracker);
-						(ready_iter.next(), ready_iter.next())
-					}
-					{
-						(Some((to_store, to_store_err)), Some((address, address_err))) =>
-						{
-							assert!(to_store_err.is_none());
-							assert!(address_err.is_none());
-							match (to_store.get_first(), address.get_first())
-							{
-								(Scalar::Nan, _) | (_, Scalar::Nan) =>
-								{
-									// Do nothing
-								},
-								(Scalar::Val(_), Scalar::Val(addr_bytes)) =>
-								{
-									// Get address
-									let address = self.get_absolute_address(
-										(address.value_type(), addr_bytes),
-										None,
-										to_store.scale(),
-									);
+					let mut ready_iter =
+						self.operands.ready_iter(self.memory.borrow_mut(), tracker);
 
-									self.memory
-										.borrow_mut()
-										.write(address, &to_store, tracker)
-										.map_err(|_| ExecError::Exception)?;
-								},
-								_ => return Err(ExecError::Exception),
-							}
+					let (to_store, to_store_err) = ready_iter.next().ok_or(ExecError::Exception)?;
+					assert!(to_store_err.is_none());
+					match (
+						to_store.get_first(),
+						Self::get_mem_instr_effective_addr(
+							ready_iter,
+							self.control.next_addr,
+							to_store.value_type().scale(),
+						),
+					)
+					{
+						(Scalar::Nan, _) | (_, Err(None)) => Ok(()), // Do nothing
+						(Scalar::Val(_), Ok(address)) =>
+						{
+							self.memory
+								.borrow_mut()
+								.write(address, &to_store, tracker)
+								.map_err(|_| ExecError::Exception)
 						},
-						_ => return Err(ExecError::Exception),
-					}
+						_ => Err(ExecError::Exception),
+					}?;
 				},
 				Load(signed, size, target) =>
 				{
@@ -238,27 +227,12 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 						ValueType::Uint(size.value as u8)
 					};
 
-					let (base_addr, offset) = {
-						let mut ready_ops =
-							self.operands.ready_iter(self.memory.borrow_mut(), tracker);
-						let (in1, err) = ready_ops.next().unwrap();
-						assert!(err.is_none());
-						let in2 = ready_ops.next().map(|(in2, err)| {
-							assert!(err.is_none());
-							in2
-						});
-						(in1, in2)
-					};
-					let address = self.get_absolute_address(
-						(
-							base_addr.value_type(),
-							base_addr.get_first().bytes().unwrap(),
-						),
-						offset
-							.as_ref()
-							.map(|v| (v.value_type(), v.get_first().bytes().unwrap())),
+					let address = Self::get_mem_instr_effective_addr(
+						self.operands.ready_iter(self.memory.borrow_mut(), tracker),
+						self.control.next_addr,
 						read_typ.scale(),
-					);
+					)
+					.unwrap();
 
 					let op = Operand::read_typed(address, 1, read_typ);
 					self.operands
@@ -279,6 +253,60 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 		{
 			Err(ExecError::Err)
 		}
+	}
+
+	/// Returns the effective address of a memory instruction (load, store).
+	///
+	/// Extracts address resolution operands from the given ready queue
+	/// iterator. If the base address is relative, uses the given current
+	/// address as base. If indexed address, uses the given scale for the
+	/// indices during resolution.
+	///
+	/// If any operand is Nar, or the base address operand is missing, returns
+	/// an error with exception. If any operand is Nan, returns an error with
+	/// None. Otherwise, returns the resolved address.
+	fn get_mem_instr_effective_addr(
+		mut ready_iter: impl Iterator<Item = (Value, Option<(MemError, usize)>)>,
+		current_addr: usize,
+		scale: usize,
+	) -> Result<usize, Option<ExecError>>
+	{
+		ready_iter
+			.next()
+			.ok_or(Some(ExecError::Exception))
+			.and_then(|(in1, err1)| {
+				assert!(err1.is_none());
+
+				let in2 = ready_iter.next();
+				let in2_extracted = in2.as_ref().map(|(in2, err2)| {
+					assert!(err2.is_none());
+					(in2.value_type(), in2.get_first().bytes().unwrap())
+				});
+
+				match (in1.get_first(), in2.as_ref().map(|(v, _)| v.get_first()))
+				{
+					(Scalar::Nan, _) | (_, Some(Scalar::Nan)) =>
+					{
+						// Nothing should be done
+						Err(None)
+					},
+					(Scalar::Val(_), None) | (Scalar::Val(_), Some(Scalar::Val(_))) =>
+					{
+						Self::get_absolute_address(
+							current_addr,
+							(in1.value_type(), in1.get_first().bytes().unwrap()),
+							in2_extracted,
+							scale,
+						)
+						.ok_or(Some(ExecError::Exception))
+					},
+					_ =>
+					{
+						// If any is NaR, exception
+						Err(Some(ExecError::Exception))
+					},
+				}
+			})
 	}
 
 	/// Converts the given bytes to the equivalent 128-bit bytes.
@@ -311,11 +339,11 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 	/// If it is signed, it is treated as an offset from the current address
 	/// being executed.
 	fn get_absolute_address(
-		&mut self,
+		current_addr: usize,
 		base_address: (ValueType, &[u8]),
 		offset: Option<(ValueType, &[u8])>,
 		scale: usize,
-	) -> usize
+	) -> Option<usize>
 	{
 		let address_bytes = Self::extend_bytes_to_128(base_address.1, base_address.0);
 		let address = if let ValueType::Uint(_) = base_address.0
@@ -326,24 +354,18 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 		else
 		{
 			// LittleEndian lacks a read_isize, so improvise
-			((self.control.next_addr as i128) + LittleEndian::read_i128(&address_bytes)) as usize
+			((current_addr as i128) + LittleEndian::read_i128(&address_bytes)) as usize
 		};
 
 		let to_add = offset.map_or(0, |(typ, bytes)| {
-			assert!(
-				if let ValueType::Uint(_) = typ
-				{
-					true
-				}
-				else
-				{
-					false
-				}
-			);
+			if let ValueType::Int(_) = typ
+			{
+				unimplemented!()
+			}
 			LittleEndian::read_u128(&Self::extend_bytes_to_128(bytes, typ)) as usize * scale
 		});
 
-		address + to_add
+		address.checked_add(to_add)
 	}
 
 	/// Executes the jump instruction.

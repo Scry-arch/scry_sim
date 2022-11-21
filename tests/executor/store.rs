@@ -1,6 +1,9 @@
 use crate::{
 	executor::{test_execution_step, test_execution_step_exceptions},
-	misc::{advance_queue, as_isize, as_usize, regress_queue, RepeatingMem},
+	misc::{
+		get_absolute_address, get_indexed_address, get_relative_address, regress_queue,
+		RepeatingMem,
+	},
 };
 use byteorder::{ByteOrder, LittleEndian};
 use quickcheck::TestResult;
@@ -11,26 +14,12 @@ use scry_sim::{
 	BlockedMemory, ExecState, Memory, Metric, OperandList, OperandState, Value, ValueType,
 };
 
-/// Creates a state that is identical to the given one except the address is
-/// advanced by 1 and so is the operand queue
-fn clone_and_advance(state: &ExecState) -> ExecState
-{
-	// Create the expected state after the step.
-	// Should just have expended the ready list.
-	let mut expected_state: ExecState = state.clone();
-	expected_state.address += 2;
-	expected_state.frame.op_queue.remove(&0);
-	expected_state.frame.op_queue = advance_queue(expected_state.frame.op_queue);
-	expected_state.frame.clean_reads();
-	expected_state
-}
-
 /// Tests the store instruction.
-fn test_store_instruction(
+fn test_store_instruction<const ADDR_OPS: usize>(
 	// Start state
 	NoCF(state): NoCF<ExecState>,
 	// Store address operand
-	address_value: &Value,
+	address_operands: [Value; ADDR_OPS],
 	// Value to store
 	to_store: &Value,
 	// Initial value of all non-instruction memory bytes
@@ -59,9 +48,10 @@ fn test_store_instruction(
 	LittleEndian::write_u16(&mut encoded_bytes, Instruction::Store.encode());
 	mem.add_block(encoded_bytes.into_iter(), state.address);
 
-	let test_state = clone_with_front_operands(&state, to_store.clone(), [address_value.clone()]);
+	let test_state = clone_with_front_operands(&state, to_store.clone(), address_operands.clone());
 
-	let expected_state = clone_and_advance(&state);
+	let mut expected_state = state.clone();
+	expected_state.address += 2;
 
 	let step_result = test_execution_step::<BlockedMemory>(
 		&test_state,
@@ -69,10 +59,10 @@ fn test_store_instruction(
 		&expected_state,
 		&[
 			(Metric::InstructionReads, 1),
-			(Metric::ConsumedOperands, 2),
+			(Metric::ConsumedOperands, 1 + ADDR_OPS),
 			(
 				Metric::ConsumedBytes,
-				address_value.scale() + to_store.scale(),
+				to_store.scale() + address_operands.iter().fold(0, |sum, v| sum + v.scale()),
 			),
 			(Metric::DataBytesWritten, to_store.scale()),
 			(
@@ -121,19 +111,12 @@ fn clone_with_front_operands<const N: usize>(
 {
 	// Initialize test state with the right operands in the ready list
 	let mut test_state = state.clone();
+	test_state.frame.op_queue = regress_queue(test_state.frame.op_queue);
 	let new_ready_list = OperandList::new(
 		OperandState::Ready(first),
 		rest.into_iter().map(|v| OperandState::Ready(v)).collect(),
 	);
-	if let Some(ready_list) = test_state.frame.op_queue.get_mut(&0)
-	{
-		let old_list = std::mem::replace(ready_list, new_ready_list);
-		ready_list.extend(old_list.into_iter());
-	}
-	else
-	{
-		test_state.frame.op_queue.insert(0, new_ready_list);
-	}
+	test_state.frame.op_queue.insert(0, new_ready_list);
 	test_state
 }
 
@@ -146,11 +129,14 @@ fn store_absolute(
 	init_mem_bytes: u8,
 ) -> TestResult
 {
-	let store_address = as_usize(&addr_scalar);
+	let store_address = get_absolute_address(&addr_scalar);
 
 	test_store_instruction(
 		NoCF(state),
-		&Value::singleton_typed(ValueType::Uint(addr_size_pow2), addr_scalar),
+		[Value::singleton_typed(
+			ValueType::Uint(addr_size_pow2),
+			addr_scalar,
+		)],
 		&to_store,
 		init_mem_bytes,
 		store_address,
@@ -166,30 +152,59 @@ fn store_relative(
 	init_mem_bytes: u8,
 ) -> TestResult
 {
-	let rel_store_address = as_isize(&addr_scalar);
-	let rel_negative = rel_store_address < 0;
-	let abs_rel = rel_store_address.abs_diff(0);
-
-	let store_address = if rel_negative
+	// Don't allow the final store address to overflow the address space
+	let store_address = if let Some(addr) = get_relative_address(state.address, &addr_scalar)
 	{
-		state.address.checked_sub(abs_rel)
+		addr
 	}
 	else
 	{
-		state.address.checked_add(abs_rel)
-	};
-
-	// Don't allow the final store address to overflow the address space
-	if store_address.is_none()
-	{
 		return TestResult::discard();
-	}
-
-	let store_address = store_address.unwrap();
+	};
 
 	test_store_instruction(
 		NoCF(state),
-		&Value::singleton_typed(ValueType::Int(addr_size_pow2), addr_scalar),
+		[Value::singleton_typed(
+			ValueType::Int(addr_size_pow2),
+			addr_scalar,
+		)],
+		&to_store,
+		init_mem_bytes,
+		store_address,
+	)
+}
+
+/// Tests the store instruction when taking an indexed address.
+#[quickcheck]
+fn store_indexed(
+	NoCF(state): NoCF<ExecState>,
+	ArbValue(base_addr): ArbValue<false, false>,
+	ArbScalarVal(index_size_pow2, index_scalar): ArbScalarVal,
+	ArbValue(to_store): ArbValue<false, false>,
+	init_mem_bytes: u8,
+) -> TestResult
+{
+	// Don't allow the final store address to overflow the address space
+	let store_address = if let Some(addr) = get_indexed_address(
+		state.address,
+		&base_addr,
+		&index_scalar,
+		to_store.value_type().scale(),
+	)
+	{
+		addr
+	}
+	else
+	{
+		return TestResult::discard();
+	};
+
+	test_store_instruction(
+		NoCF(state),
+		[
+			base_addr,
+			Value::singleton_typed(ValueType::Uint(index_size_pow2), index_scalar),
+		],
 		&to_store,
 		init_mem_bytes,
 		store_address,
@@ -210,7 +225,8 @@ fn store_nan_addr(
 		[Value::new_nan_typed(address_type)],
 	);
 
-	let expected_state = clone_and_advance(&state);
+	let mut expected_state = state.clone();
+	expected_state.address += 2;
 
 	test_execution_step(
 		&test_state,
@@ -236,7 +252,8 @@ fn store_nan_value(NoCF(state): NoCF<ExecState>, address: Value, to_store: Value
 	let test_state =
 		clone_with_front_operands(&state, Value::new_nan_typed(to_store), [address.clone()]);
 
-	let expected_state = clone_and_advance(&state);
+	let mut expected_state = state.clone();
+	expected_state.address += 2;
 
 	test_execution_step(
 		&test_state,
@@ -308,13 +325,17 @@ fn store_nar_value(
 	)
 }
 
-/// Tests the store instruction throws exception is an address isn't given
+/// Tests the store instruction throws exception if an address isn't given (and
+/// the value to store is not NaN)
 #[quickcheck]
-fn store_missing_addr(NoCF(mut state): NoCF<ExecState>, to_store: Value) -> TestResult
+fn store_missing_addr(
+	NoCF(mut state): NoCF<ExecState>,
+	to_store: ArbValue<true, false>,
+) -> TestResult
 {
 	// Regress the operand queue so that the ready list can be empty
 	state.frame.op_queue = regress_queue(state.frame.op_queue);
-	let test_state = clone_with_front_operands(&state, to_store.clone(), []);
+	let test_state = clone_with_front_operands(&state, to_store.0.clone(), []);
 
 	test_execution_step_exceptions(
 		&test_state,
@@ -322,7 +343,7 @@ fn store_missing_addr(NoCF(mut state): NoCF<ExecState>, to_store: Value) -> Test
 		&[
 			(Metric::InstructionReads, 1),
 			(Metric::ConsumedOperands, 1),
-			(Metric::ConsumedBytes, to_store.scale()),
+			(Metric::ConsumedBytes, to_store.0.scale()),
 		]
 		.into(),
 	)

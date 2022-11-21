@@ -1,7 +1,7 @@
 use crate::{
 	executor::{test_execution_step, test_metrics, ConsumingDiscarding},
 	misc::{
-		as_usize, get_absolute_address, get_relative_address, regress_queue, AllowWrite,
+		get_absolute_address, get_indexed_address, get_relative_address, regress_queue, AllowWrite,
 		RepeatingMem,
 	},
 };
@@ -439,18 +439,8 @@ fn load_issue_indexed(
 	target: Bits<5, false>,
 ) -> TestResult
 {
-	// Calculate expected load address
-	let checked_absolute_addr = if let ValueType::Int(_) = base_addr.value_type()
-	{
-		get_relative_address(state.address, base_addr.get_first())
-	}
-	else
-	{
-		Some(get_absolute_address(base_addr.get_first()))
-	};
-	let offset = as_usize(&index_scalar).checked_mul(loaded_typ.scale());
 	let absolute_addr = if let Some(addr) =
-		checked_absolute_addr.and_then(|addr| offset.and_then(|offset| addr.checked_add(offset)))
+		get_indexed_address(state.address, &base_addr, &index_scalar, loaded_typ.scale())
 	{
 		addr
 	}

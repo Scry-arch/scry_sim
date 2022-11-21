@@ -1,7 +1,7 @@
 use byteorder::{ByteOrder, LittleEndian};
 use duplicate::duplicate_item;
 use quickcheck_macros::quickcheck;
-use scry_sim::{MemError, Memory, Metric, MetricTracker, OperandQueue, Scalar, Value};
+use scry_sim::{MemError, Memory, Metric, MetricTracker, OperandQueue, Scalar, Value, ValueType};
 use std::mem::size_of;
 
 /// A memory that always produces the same instruction and data.
@@ -199,6 +199,31 @@ pub fn get_relative_address(current_address: usize, offset: &Scalar) -> Option<u
 	{
 		current_address.checked_add(offset_value.abs_diff(0))
 	}
+}
+
+/// Get the absolute address from the given indexed address.
+///
+/// The base address may me signed or unsiged while the index is assumed to be
+/// unsigned. In case of relative base address, the given current address is
+/// used.
+pub fn get_indexed_address(
+	current_address: usize,
+	base_addr: &Value,
+	index: &Scalar,
+	index_scale: usize,
+) -> Option<usize>
+{
+	let checked_absolute_addr = if let ValueType::Int(_) = base_addr.value_type()
+	{
+		get_relative_address(current_address, base_addr.get_first())
+	}
+	else
+	{
+		Some(get_absolute_address(base_addr.get_first()))
+	};
+	let offset = as_usize(&index).checked_mul(index_scale);
+
+	checked_absolute_addr.and_then(|addr| offset.and_then(|offset| addr.checked_add(offset)))
 }
 
 /// Test as_usize on various type lengths
