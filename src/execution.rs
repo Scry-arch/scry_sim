@@ -153,11 +153,6 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 					// Discard ready list
 					let _ = self.operands.ready_iter(self.memory.borrow_mut(), tracker);
 				},
-				Nop =>
-				{
-					// Discard ready list
-					let _ = self.operands.ready_iter(self.memory.borrow_mut(), tracker);
-				},
 				Alu(variant, offset) =>
 				{
 					self.perform_alu(variant, offset, tracker)?;

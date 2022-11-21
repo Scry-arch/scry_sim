@@ -39,7 +39,6 @@ impl Arbitrary for SupportedInstruction
 				| Alu(AluVariant::Dec, _)
 				| Alu2(Alu2Variant::Add, _, _)
 				| Alu2(Alu2Variant::Sub, _, _)
-				| Nop
 				| Constant(..)
 				| Call(CallVariant::Ret, _)
 				| Duplicate(..)
@@ -71,7 +70,7 @@ impl ConsumingDiscarding
 		use Instruction::*;
 		idx >= match self.0
 		{
-			Nop => 0,
+			Capture(..) => 0,
 			Alu(AluVariant::Inc, _) | Alu(AluVariant::Dec, _) => 1,
 			Alu(AluVariant::Add, _)
 			| Alu(AluVariant::Sub, _)
@@ -97,8 +96,7 @@ impl Arbitrary for ConsumingDiscarding
 				| Alu(AluVariant::Sub, _)
 				| Alu(AluVariant::Dec, _)
 				| Alu2(Alu2Variant::Add, _, _)
-				| Alu2(Alu2Variant::Sub, _, _)
-				| Nop => break,
+				| Alu2(Alu2Variant::Sub, _, _) => break,
 				_ => instr = Instruction::arbitrary(g),
 			}
 		}
@@ -247,7 +245,7 @@ fn instruction_nop(state: NoCF<ExecState>) -> TestResult
 {
 	test_simple_instruction(
 		state,
-		Instruction::Nop,
+		Instruction::nop(),
 		|old_op_queue| {
 			let mut new_op_q = old_op_queue.clone();
 			// Discard ready list if present
