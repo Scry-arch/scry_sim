@@ -233,6 +233,37 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 					self.operands
 						.push_operand(target.value as usize, op, tracker);
 				},
+				Pick(target) =>
+				{
+					// let mut ready_iter = self.operands.ready_iter(self.memory.borrow_mut(),
+					// tracker);
+					let choose_first = {
+						let mut ready_peek = self.operands.ready_peek();
+						let condition = ready_peek.next().unwrap();
+						assert!(ready_peek.next().is_some());
+						assert!(ready_peek.next().is_some());
+						condition
+							.get_value()
+							.unwrap()
+							.get_first()
+							.bytes()
+							.unwrap()
+							.iter()
+							.all(|b| *b == 0)
+					};
+
+					self.operands.reorder(
+						0,
+						if choose_first { 1 } else { 2 },
+						(target.value + 1) as usize,
+						tracker,
+					);
+
+					// Consume the condition, discard the remaining
+					self.operands
+						.ready_iter(self.memory.borrow_mut(), tracker)
+						.next();
+				},
 				instr =>
 				{
 					dbg!(instr);

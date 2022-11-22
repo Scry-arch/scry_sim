@@ -12,6 +12,7 @@ mod alu_instructions;
 mod control_flow;
 mod data_flow;
 mod load;
+mod pick;
 mod store;
 
 /// Used to generate arbitrary instruction that are supported by the
