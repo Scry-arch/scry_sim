@@ -94,6 +94,28 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 			use Instruction::*;
 			match instr
 			{
+				Call(CallVariant::Call, offset) =>
+				{
+					let (addr, addr_error) = self
+						.operands
+						.ready_iter(self.memory.borrow_mut(), tracker)
+						.next()
+						.unwrap();
+					assert!(addr_error.is_none());
+
+					let target_addr = Self::get_absolute_address(
+						self.control.next_addr,
+						(addr.value_type(), addr.get_first().bytes().unwrap()),
+						None,
+					)
+					.unwrap();
+
+					self.control.call(
+						self.control.next_addr + ((offset.value() * 2) as usize),
+						target_addr,
+						tracker,
+					);
+				},
 				Call(CallVariant::Ret, offset) =>
 				{
 					self.control.ret(
@@ -306,7 +328,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 				let in2 = ready_iter.next();
 				let in2_extracted = in2.as_ref().map(|(in2, err2)| {
 					assert!(err2.is_none());
-					(in2.value_type(), in2.get_first().bytes().unwrap())
+					(in2.value_type(), in2.get_first().bytes().unwrap(), scale)
 				});
 
 				match (in1.get_first(), in2.as_ref().map(|(v, _)| v.get_first()))
@@ -322,7 +344,6 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 							current_addr,
 							(in1.value_type(), in1.get_first().bytes().unwrap()),
 							in2_extracted,
-							scale,
 						)
 						.ok_or(Some(ExecError::Exception))
 					},
@@ -364,11 +385,13 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 	/// If the address is unsigned, it is returned as is.
 	/// If it is signed, it is treated as an offset from the current address
 	/// being executed.
+	/// `with_offset`, if given is the index offset to add to the resolved base
+	/// address. The type and bytes are the index value to use and the last
+	/// usize is the size of each element the index defines
 	fn get_absolute_address(
 		current_addr: usize,
 		base_address: (ValueType, &[u8]),
-		offset: Option<(ValueType, &[u8])>,
-		scale: usize,
+		add_offset: Option<(ValueType, &[u8], usize)>,
 	) -> Option<usize>
 	{
 		let address_bytes = Self::extend_bytes_to_128(base_address.1, base_address.0);
@@ -383,7 +406,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 			((current_addr as i128) + LittleEndian::read_i128(&address_bytes)) as usize
 		};
 
-		let to_add = offset.map_or(0, |(typ, bytes)| {
+		let to_add = add_offset.map_or(0, |(typ, bytes, scale)| {
 			if let ValueType::Int(_) = typ
 			{
 				unimplemented!()

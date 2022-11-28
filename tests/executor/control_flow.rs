@@ -1,14 +1,17 @@
 use crate::{
 	executor::{test_execution_step, SupportedInstruction},
-	misc::{advance_queue, regress_queue, RepeatingMem},
+	misc::{
+		advance_queue, get_absolute_address, get_relative_address, regress_queue, RepeatingMem,
+	},
 };
 use quickcheck::TestResult;
 use quickcheck_macros::quickcheck;
 use scry_isa::{BitValue, Bits, CallVariant, Instruction};
 use scry_sim::{
 	arbitrary::{ArbValue, InstrAddr, NoCF},
-	CallFrameState, ControlFlowType, ExecState, Executor, Metric, MetricTracker, OperandList,
-	OperandState, Scalar, TrackReport, ValueType,
+	CallFrameState, ControlFlowType, ExecState, Executor, Metric,
+	Metric::{ConsumedBytes, ConsumedOperands, IssuedCalls},
+	MetricTracker, OperandList, OperandState, Scalar, TrackReport, ValueType,
 };
 use std::collections::HashMap;
 
@@ -499,5 +502,219 @@ fn jmp_unconditional_non_trigger(
 				.insert(location_addr, ControlFlowType::Branch(target_addr));
 		},
 		false,
+	)
+}
+
+/// Test the triggering of a call that was previously issued.
+#[quickcheck]
+fn call_trigger(
+	NoCF(state): NoCF<ExecState>,
+	instr: SupportedInstruction,
+	call_target: InstrAddr,
+) -> TestResult
+{
+	// Skip any test with immediate control flow triggering
+	// or where the instruction is a call
+	match instr.0
+	{
+		Instruction::Call(CallVariant::Call, _) => return TestResult::discard(),
+		Instruction::Call(_, offset) | Instruction::Jump(_, offset) if offset.value == 0 =>
+		{
+			return TestResult::discard()
+		},
+		_ => (),
+	}
+	let instr_encoded = Instruction::encode(&instr.0);
+
+	// Execute one step on the frame to get the expected result of the next
+	// instruction
+	let mut expected_metrics = TrackReport::new();
+	let mut expected_state =
+		match Executor::from_state(&state, RepeatingMem::<true>(instr_encoded, 0))
+			.step(&mut expected_metrics)
+		{
+			Ok(exec) => exec.state(),
+			_ => return TestResult::discard(),
+		};
+	// Add new frame with the ready list being the same as the old ready list
+	let ready_list = expected_state.frame.op_queue.remove(&0);
+	expected_state.frame.op_queue = advance_queue(expected_state.frame.op_queue);
+	let reads = expected_state.frame.reads.clone();
+	let new_frame = CallFrameState {
+		ret_addr: state.address + 2,
+		branches: Default::default(),
+		op_queue: HashMap::from_iter(ready_list.map(|list| (0, list)).into_iter()),
+		reads,
+	};
+	expected_state
+		.frame_stack
+		.insert(0, std::mem::replace(&mut expected_state.frame, new_frame));
+	expected_state.clean_reads();
+	// Move the current address to the call target
+	expected_state.address = call_target.0;
+
+	// Add trigger metric
+	expected_metrics.add_stat(Metric::TriggeredCalls, 1);
+
+	// Construct test state
+	let mut test_state = state.clone();
+	test_state
+		.frame
+		.branches
+		.insert(state.address, ControlFlowType::Call(call_target.0));
+
+	test_execution_step(
+		&test_state,
+		RepeatingMem::<true>(instr_encoded, 0),
+		&expected_state,
+		&expected_metrics,
+	)
+}
+
+/// Test executing a call instruction that immediately triggers.
+#[quickcheck]
+fn call_trigger_immediately(
+	NoCF(state): NoCF<ExecState>,
+	ArbValue(addr): ArbValue<false, false>,
+) -> TestResult
+{
+	// The semantics of immediately triggering is the same as if
+	// there already was a call issued that triggers now and the next instruction
+	// does nothing.
+	// Therefore, run that scenario and check that the result is the same
+
+	let mut nop_call_state: ExecState = state.clone();
+	nop_call_state.frame.branches.insert(
+		state.address,
+		ControlFlowType::Call(
+			if let ValueType::Int(_) = addr.value_type()
+			{
+				if let Some(addr) = get_relative_address(state.address, addr.get_first())
+				{
+					addr
+				}
+				else
+				{
+					return TestResult::discard();
+				}
+			}
+			else
+			{
+				get_absolute_address(addr.get_first())
+			},
+		),
+	);
+	let mut expected_metrics = TrackReport::new();
+	let expected_state = match Executor::from_state(
+		&nop_call_state,
+		RepeatingMem::<true>(Instruction::nop().encode(), 0),
+	)
+	.step(&mut expected_metrics)
+	{
+		Ok(exec) => exec.state(),
+		Err(_) => return TestResult::discard(),
+	};
+	expected_metrics.add_stat(IssuedCalls, 1);
+	expected_metrics.add_stat(ConsumedOperands, 1);
+	expected_metrics.add_stat(ConsumedBytes, addr.scale());
+
+	let mut test_state: ExecState = state.clone();
+	if let Some(list) = test_state.frame.op_queue.get_mut(&0)
+	{
+		list.rest.insert(
+			0,
+			std::mem::replace(&mut list.first, OperandState::Ready(addr)),
+		);
+	}
+	else
+	{
+		test_state
+			.frame
+			.op_queue
+			.insert(0, OperandList::new(OperandState::Ready(addr), Vec::new()));
+	}
+
+	test_execution_step(
+		&test_state,
+		RepeatingMem::<true>(
+			Instruction::Call(CallVariant::Call, 0.try_into().unwrap()).encode(),
+			0,
+		),
+		&expected_state,
+		&expected_metrics,
+	)
+}
+
+/// Test the call instruction with an absolute address operand that doesn't
+/// immediately trigger.
+#[quickcheck]
+fn call_non_trigger(
+	NoCF(state): NoCF<ExecState>,
+	ArbValue(addr): ArbValue<false, false>,
+	offset: Bits<6, false>,
+) -> TestResult
+{
+	if offset.value() == 0
+	{
+		return TestResult::discard();
+	}
+
+	let instr_encoded = Instruction::encode(&Instruction::Call(CallVariant::Call, offset));
+	let addr_value = OperandState::Ready(addr.clone());
+
+	let mut expected_state = state.clone();
+	// Call discards any operand after the first
+	expected_state.frame.op_queue.remove(&0);
+	expected_state.frame.clean_reads();
+	expected_state.frame.op_queue = advance_queue(expected_state.frame.op_queue);
+	expected_state.frame.branches.insert(
+		state.address + (offset.value() as usize * 2),
+		ControlFlowType::Call(
+			if let ValueType::Int(_) = addr.value_type()
+			{
+				if let Some(addr) = get_relative_address(state.address, addr.get_first())
+				{
+					addr
+				}
+				else
+				{
+					return TestResult::discard();
+				}
+			}
+			else
+			{
+				get_absolute_address(addr.get_first())
+			},
+		),
+	);
+	expected_state.address += 2;
+
+	use Metric::*;
+	let expected_metrics = TrackReport::from([
+		(IssuedCalls, 1),
+		(InstructionReads, 1),
+		(ConsumedOperands, 1),
+		(ConsumedBytes, addr.scale()),
+	]);
+
+	let mut test_state: ExecState = state.clone();
+	if let Some(list) = test_state.frame.op_queue.get_mut(&0)
+	{
+		list.rest
+			.insert(0, std::mem::replace(&mut list.first, addr_value));
+	}
+	else
+	{
+		test_state
+			.frame
+			.op_queue
+			.insert(0, OperandList::new(addr_value, Vec::new()));
+	}
+
+	test_execution_step(
+		&test_state,
+		RepeatingMem::<true>(instr_encoded, 0),
+		&expected_state,
+		&expected_metrics,
 	)
 }

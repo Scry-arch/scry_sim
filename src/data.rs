@@ -291,7 +291,7 @@ impl OperandStack
 	pub fn push_queue(&mut self)
 	{
 		self.stack
-			.push_back(std::mem::replace(&mut self.queue, VecDeque::new()));
+			.push_front(std::mem::replace(&mut self.queue, VecDeque::new()));
 	}
 
 	/// Pops the top operand queue from the queue stack keeping the ready list
