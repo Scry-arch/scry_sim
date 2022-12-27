@@ -11,7 +11,7 @@ use scry_sim::{
 	arbitrary::{LimitedOps, NoCF, NoReads, SimpleOps},
 	ExecState, Metric, OperandList, OperandState, Scalar, TrackReport, Value,
 };
-use std::cmp::min;
+use std::{cmp::min, ops::Shr};
 
 /// Manages the calculation of applying the given semantic function to the given
 /// inputs.
@@ -449,5 +449,26 @@ fn sub_carry(
 		|x| conv(x, i32::overflowing_sub),
 		|x| conv(x, i64::overflowing_sub),
 		|x| conv(x, i128::overflowing_sub),
+	)
+}
+
+/// Test the Alu instruction variant `ShiftRight`
+#[quickcheck]
+fn shr(state: AluTestState<1>, offset: Bits<5, false>) -> TestResult
+{
+	test_alu_instruction(
+		state,
+		offset,
+		AluVariant::ShiftRight,
+		|sc| u8::shr(sc[0], 1),
+		|sc| u16::shr(sc[0], 1),
+		|sc| u32::shr(sc[0], 1),
+		|sc| u64::shr(sc[0], 1),
+		|sc| u128::shr(sc[0], 1),
+		|sc| i8::shr(sc[0], 1),
+		|sc| i16::shr(sc[0], 1),
+		|sc| i32::shr(sc[0], 1),
+		|sc| i64::shr(sc[0], 1),
+		|sc| i128::shr(sc[0], 1),
 	)
 }

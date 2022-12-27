@@ -530,7 +530,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 					}
 					typ
 				},
-				Inc | Dec =>
+				Inc | Dec | ShiftRight =>
 				{
 					// Variants with 1 input
 					let in1 = in1.ok_or(ExecError::Exception)?;
@@ -541,7 +541,8 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 					{
 						Inc => Self::alu_increment_wrapping,
 						Dec => Self::alu_decrement_wrapping,
-						_ => unreachable!(),
+						ShiftRight => Self::alu_shift_right_once,
+						_ => todo!(),
 					};
 
 					for sc1 in in1
@@ -550,7 +551,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 					}
 					typ
 				},
-				_ => unreachable!(),
+				_ => todo!(),
 			};
 
 			(typ, result_scalars)
@@ -782,6 +783,47 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 	fn alu_decrement_wrapping(in1: &Scalar, typ: ValueType) -> Vec<u8>
 	{
 		Self::alu_add_carry(in1, &Self::negate(Self::scalar_one(typ), typ)).0
+	}
+
+	/// Performs a shift right by 1 of the given scalar.
+	///
+	/// The bytes of the input are assumed to have the given type.
+	///
+	/// Returns the resulting bytes of the same length as the input.
+	fn alu_shift_right_once(in1: &Scalar, typ: ValueType) -> Vec<u8>
+	{
+		let mut result_bytes = Vec::new();
+		let bytes = in1.bytes().unwrap();
+
+		for i in 0..bytes.len()
+		{
+			let byte = bytes[i];
+			// This is a logical shift right
+			let shifted = byte >> 1;
+
+			let high_bit = if let Some(next_byte) = bytes.get(i + 1)
+			{
+				// We have to ensure that the highest bit is the same as the lowest in the next
+				// byte
+				(*next_byte & 0b1) << 7
+			}
+			else
+			{
+				// Last byte, must ensure using arithmetic shift if signed
+				if let ValueType::Int(_) = typ
+				{
+					byte & 0b10000000
+				}
+				else
+				{
+					0
+				}
+			};
+			// shifted is guaranteed to have 0 in the highest bit
+			result_bytes.push(high_bit + shifted);
+		}
+
+		result_bytes
 	}
 
 	/// Performs addition on the given scalars, returning the wrapping result
