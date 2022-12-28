@@ -472,3 +472,24 @@ fn shr(state: AluTestState<1>, offset: Bits<5, false>) -> TestResult
 		|sc| i128::shr(sc[0], 1),
 	)
 }
+
+/// Test the Alu instruction variant `Mul`
+#[quickcheck]
+fn mul(state: AluTestState<2>, offset: Bits<5, false>) -> TestResult
+{
+	test_alu_instruction(
+		state,
+		offset,
+		AluVariant::Mul,
+		|sc| u8::wrapping_mul(sc[0], sc[1]),
+		|sc| u16::wrapping_mul(sc[0], sc[1]),
+		|sc| u32::wrapping_mul(sc[0], sc[1]),
+		|sc| u64::wrapping_mul(sc[0], sc[1]),
+		|sc| u128::wrapping_mul(sc[0], sc[1]),
+		|sc| i8::wrapping_mul(sc[0], sc[1]),
+		|sc| i16::wrapping_mul(sc[0], sc[1]),
+		|sc| i32::wrapping_mul(sc[0], sc[1]),
+		|sc| i64::wrapping_mul(sc[0], sc[1]),
+		|sc| i128::wrapping_mul(sc[0], sc[1]),
+	)
+}

@@ -6,6 +6,7 @@ use crate::{
 	ExecState, MemError, MetricTracker, Scalar, ValueType,
 };
 use byteorder::{ByteOrder, LittleEndian};
+use duplicate::duplicate;
 use scry_isa::{
 	Alu2OutputVariant, Alu2Variant, AluVariant, BitValue, Bits, CallVariant, Instruction,
 };
@@ -504,7 +505,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 
 			let typ = match variant
 			{
-				Add | Sub =>
+				Add | Sub | Mul =>
 				{
 					// Variants with 2 inputs
 					let in2 = ins.next();
@@ -521,6 +522,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 					{
 						Add => Self::alu_add_saturated,
 						Sub => Self::alu_sub_saturated,
+						Mul => Self::alu_multiply,
 						_ => unreachable!(),
 					};
 
@@ -824,6 +826,50 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 		}
 
 		result_bytes
+	}
+
+	/// Performs multiplication on the given scalars, returning the lower-order
+	/// result
+	fn alu_multiply(sc1: &Scalar, sc2: &Scalar, typ: ValueType) -> Vec<u8>
+	{
+		use ValueType::*;
+		duplicate! {
+			[_;] // used just to allow duplicate! in match case position
+			match typ {
+				duplicate!{
+					[
+						Sign letter; [Uint] [u]; [Int] [i];
+					]
+					Sign(0) => {
+						let v1 = sc1.bytes().unwrap()[0];
+						let v2 = sc2.bytes().unwrap()[0];
+						vec![v1.wrapping_mul(v2)]
+					},
+					duplicate!{
+						[
+							power size bits;
+							[1] [2] [16];
+							[2] [4] [32];
+							[3] [8] [64];
+							[4] [16] [128];
+						]
+						Sign(power) => {
+							paste::paste!{
+								let v1 = LittleEndian::
+									[< read_ letter bits >](sc1.bytes().unwrap());
+								let v2 = LittleEndian::
+									[< read_ letter bits >](sc2.bytes().unwrap());
+								let mut result = [0u8;size];
+								LittleEndian::[< write_ letter bits >]
+									(&mut result, v1.wrapping_mul(v2));
+								result.into()
+							}
+						},
+					}
+				}
+				_ => todo!()
+			}
+		}
 	}
 
 	/// Performs addition on the given scalars, returning the wrapping result
