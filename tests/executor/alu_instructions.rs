@@ -3,7 +3,7 @@ use crate::{
 	misc::{advance_queue, RepeatingMem},
 };
 use byteorder::{ByteOrder, LittleEndian};
-use duplicate::duplicate;
+use duplicate::substitute;
 use quickcheck::TestResult;
 use quickcheck_macros::quickcheck;
 use scry_isa::{Alu2OutputVariant, Alu2Variant, AluVariant, Bits, Instruction};
@@ -11,7 +11,10 @@ use scry_sim::{
 	arbitrary::{LimitedOps, NoCF, NoReads, SimpleOps},
 	ExecState, Metric, OperandList, OperandState, Scalar, TrackReport, Value,
 };
-use std::{cmp::min, ops::Shr};
+use std::{
+	cmp::min,
+	ops::{BitAnd, BitOr, Shr},
+};
 
 /// Manages the calculation of applying the given semantic function to the given
 /// inputs.
@@ -255,7 +258,7 @@ fn test_alu2_instruction<const OPS: usize>(
 	// Calculate expected outputs based on each Ali2OutputVariant
 	// Wrap the match in non-duplicating duplicate! so that we can
 	// call duplicate! in match arm positions
-	duplicate! { [not_used []]
+	substitute! { [not_used []]
 		match out_var {
 			duplicate!{
 				[var idx; [High] [1] ; [Low] [0];]
@@ -470,6 +473,48 @@ fn shr(state: AluTestState<1>, offset: Bits<5, false>) -> TestResult
 		|sc| i32::shr(sc[0], 1),
 		|sc| i64::shr(sc[0], 1),
 		|sc| i128::shr(sc[0], 1),
+	)
+}
+
+/// Test the Alu instruction variant `BitAnd`
+#[quickcheck]
+fn bit_and(state: AluTestState<2>, offset: Bits<5, false>) -> TestResult
+{
+	test_alu_instruction(
+		state,
+		offset,
+		AluVariant::BitAnd,
+		|sc| u8::bitand(sc[0], sc[1]),
+		|sc| u16::bitand(sc[0], sc[1]),
+		|sc| u32::bitand(sc[0], sc[1]),
+		|sc| u64::bitand(sc[0], sc[1]),
+		|sc| u128::bitand(sc[0], sc[1]),
+		|sc| i8::bitand(sc[0], sc[1]),
+		|sc| i16::bitand(sc[0], sc[1]),
+		|sc| i32::bitand(sc[0], sc[1]),
+		|sc| i64::bitand(sc[0], sc[1]),
+		|sc| i128::bitand(sc[0], sc[1]),
+	)
+}
+
+/// Test the Alu instruction variant `BitOr`
+#[quickcheck]
+fn bit_or(state: AluTestState<2>, offset: Bits<5, false>) -> TestResult
+{
+	test_alu_instruction(
+		state,
+		offset,
+		AluVariant::BitOr,
+		|sc| u8::bitor(sc[0], sc[1]),
+		|sc| u16::bitor(sc[0], sc[1]),
+		|sc| u32::bitor(sc[0], sc[1]),
+		|sc| u64::bitor(sc[0], sc[1]),
+		|sc| u128::bitor(sc[0], sc[1]),
+		|sc| i8::bitor(sc[0], sc[1]),
+		|sc| i16::bitor(sc[0], sc[1]),
+		|sc| i32::bitor(sc[0], sc[1]),
+		|sc| i64::bitor(sc[0], sc[1]),
+		|sc| i128::bitor(sc[0], sc[1]),
 	)
 }
 

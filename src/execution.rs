@@ -6,7 +6,7 @@ use crate::{
 	ExecState, MemError, MetricTracker, Scalar, ValueType,
 };
 use byteorder::{ByteOrder, LittleEndian};
-use duplicate::duplicate;
+use duplicate::substitute;
 use scry_isa::{
 	Alu2OutputVariant, Alu2Variant, AluVariant, BitValue, Bits, CallVariant, Instruction,
 };
@@ -505,7 +505,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 
 			let typ = match variant
 			{
-				Add | Sub | Mul =>
+				Add | Sub | Mul | BitAnd | BitOr =>
 				{
 					// Variants with 2 inputs
 					let in2 = ins.next();
@@ -523,6 +523,8 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 						Add => Self::alu_add_saturated,
 						Sub => Self::alu_sub_saturated,
 						Mul => Self::alu_multiply,
+						BitAnd => Self::alu_bitwise_and,
+						BitOr => Self::alu_bitwise_or,
 						_ => unreachable!(),
 					};
 
@@ -828,13 +830,55 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 		result_bytes
 	}
 
+	/// Performs a bitwise operation on the 2 given scalars.
+	///
+	/// The given closure should perform the needed operand on a pair of bytes.
+	///
+	/// Returns the resulting bytes. Assumes the two given scalars are valid
+	/// values (not Nan or Nar) and have the same length. The result then has
+	/// the same length.
+	fn alu_bitwise_op(in1: &Scalar, in2: &Scalar, op: impl Fn(&u8, &u8) -> u8) -> Vec<u8>
+	{
+		let mut result_bytes = Vec::new();
+
+		for (b1, b2) in in1.bytes().unwrap().iter().zip(in2.bytes().unwrap().iter())
+		{
+			result_bytes.push(op(b1, b2));
+		}
+		result_bytes
+	}
+
+	/// Performs a bitwise 'and' on the given scalars.
+	///
+	/// Ignores the given type.
+	///
+	/// Returns the resulting bytes. Assumes the two given scalars are valid
+	/// values (not Nan or Nar) and have the same length. The result then has
+	/// the same length.
+	fn alu_bitwise_and(in1: &Scalar, in2: &Scalar, _: ValueType) -> Vec<u8>
+	{
+		Self::alu_bitwise_op(in1, in2, |b1, b2| b1 & b2)
+	}
+
+	/// Performs a bitwise 'or' on the given scalars.
+	///
+	/// Ignores the given type.
+	///
+	/// Returns the resulting bytes. Assumes the two given scalars are valid
+	/// values (not Nan or Nar) and have the same length. The result then has
+	/// the same length.
+	fn alu_bitwise_or(in1: &Scalar, in2: &Scalar, _: ValueType) -> Vec<u8>
+	{
+		Self::alu_bitwise_op(in1, in2, |b1, b2| b1 | b2)
+	}
+
 	/// Performs multiplication on the given scalars, returning the lower-order
 	/// result
 	fn alu_multiply(sc1: &Scalar, sc2: &Scalar, typ: ValueType) -> Vec<u8>
 	{
 		use ValueType::*;
-		duplicate! {
-			[_;] // used just to allow duplicate! in match case position
+		substitute! {
+			[throw_away [];] // used just to allow duplicate! in match case position
 			match typ {
 				duplicate!{
 					[

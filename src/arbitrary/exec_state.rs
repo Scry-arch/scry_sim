@@ -1,7 +1,7 @@
 use crate::{
 	CallFrameState, ControlFlowType, ExecState, OperandList, OperandState, Scalar, Value, ValueType,
 };
-use duplicate::{duplicate_item, *};
+use duplicate::{duplicate_item, substitute};
 use num_traits::{PrimInt, Unsigned};
 use quickcheck::{Arbitrary, Gen};
 use std::{
@@ -208,7 +208,7 @@ impl Arbitrary for CallFrameState
 
 				use ShrinkState::*;
 				// We wrap the match in duplicate to allow use to duplicate enum variant matches
-				duplicate! {[throwaway [];]
+				substitute! {[throwaway [];]
 					match &mut self.state {
 						Start => {
 							// Shrink return address
@@ -790,7 +790,8 @@ impl<T: Restriction> Restriction for SimpleOps<T>
 					OperandState::Ready(v) =>
 					{
 						v.len() == len
-							&& v.value_type() == typ && v.iter().all(|sc| sc.bytes().is_some())
+							&& v.value_type() == typ
+							&& v.iter().all(|sc| sc.bytes().is_some())
 					},
 				}
 			})
