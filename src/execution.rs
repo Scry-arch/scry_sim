@@ -534,7 +534,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 					}
 					typ
 				},
-				Inc | Dec | ShiftRight =>
+				Inc | Dec | ShiftRight | RotateLeft | RotateRight =>
 				{
 					// Variants with 1 input
 					let in1 = in1.ok_or(ExecError::Exception)?;
@@ -546,6 +546,8 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 						Inc => Self::alu_increment_wrapping,
 						Dec => Self::alu_decrement_wrapping,
 						ShiftRight => Self::alu_shift_right_once,
+						RotateLeft => Self::alu_rotate_left_once,
+						RotateRight => Self::alu_rotate_right_once,
 						_ => todo!(),
 					};
 
@@ -870,6 +872,48 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 	fn alu_bitwise_or(in1: &Scalar, in2: &Scalar, _: ValueType) -> Vec<u8>
 	{
 		Self::alu_bitwise_op(in1, in2, |b1, b2| b1 | b2)
+	}
+
+	/// Performs a rotate-left by 1 of the given scalar.
+	///
+	/// Ignores the given type.
+	///
+	/// Returns the resulting bytes of the same length as the input.
+	fn alu_rotate_left_once(in1: &Scalar, _: ValueType) -> Vec<u8>
+	{
+		let bytes = in1.bytes().unwrap();
+
+		bytes
+			.iter()
+			.fold(
+				(bytes.last().unwrap() >> 7, Vec::new()),
+				|(carry, mut result), b| {
+					result.push((b << 1) + carry);
+					(b >> 7, result)
+				},
+			)
+			.1
+	}
+
+	/// Performs a rotate-right by 1 of the given scalar.
+	///
+	/// Ignores the given type.
+	///
+	/// Returns the resulting bytes of the same length as the input.
+	fn alu_rotate_right_once(in1: &Scalar, _: ValueType) -> Vec<u8>
+	{
+		let bytes = in1.bytes().unwrap();
+
+		let mut result = bytes
+			.iter()
+			.rev()
+			.fold((bytes[0] << 7, Vec::new()), |(carry, mut result), b| {
+				result.push((b >> 1) + carry);
+				(b << 7, result)
+			})
+			.1;
+		result.reverse();
+		result
 	}
 
 	/// Performs multiplication on the given scalars, returning the lower-order

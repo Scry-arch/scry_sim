@@ -3,7 +3,7 @@ use crate::{
 	misc::{advance_queue, RepeatingMem},
 };
 use byteorder::{ByteOrder, LittleEndian};
-use duplicate::substitute;
+use duplicate::{duplicate_item, substitute};
 use quickcheck::TestResult;
 use quickcheck_macros::quickcheck;
 use scry_isa::{Alu2OutputVariant, Alu2Variant, AluVariant, Bits, Instruction};
@@ -309,46 +309,71 @@ fn test_alu2_instruction<const OPS: usize>(
 	}
 }
 
-/// Test the Alu instruction variant `Add`
+/// Tests the Alu instruction variants that two inputs and have a std function
+/// doing the same thing
+#[duplicate_item(
+	test_name 	alu_var			std_fn;
+	[add]		[Add]			[saturating_add];
+	[sub]		[Sub]			[saturating_sub];
+	[bit_and]	[BitAnd]		[bitand];
+	[bit_or]	[BitOr]			[bitor];
+	[mul]		[Mul]			[wrapping_mul];
+)]
 #[quickcheck]
-fn add(state: AluTestState<2>, offset: Bits<5, false>) -> TestResult
+fn test_name(state: AluTestState<2>, offset: Bits<5, false>) -> TestResult
 {
 	test_alu_instruction(
 		state,
 		offset,
-		AluVariant::Add,
-		|sc| u8::saturating_add(sc[0], sc[1]),
-		|sc| u16::saturating_add(sc[0], sc[1]),
-		|sc| u32::saturating_add(sc[0], sc[1]),
-		|sc| u64::saturating_add(sc[0], sc[1]),
-		|sc| u128::saturating_add(sc[0], sc[1]),
-		|sc| i8::saturating_add(sc[0], sc[1]),
-		|sc| i16::saturating_add(sc[0], sc[1]),
-		|sc| i32::saturating_add(sc[0], sc[1]),
-		|sc| i64::saturating_add(sc[0], sc[1]),
-		|sc| i128::saturating_add(sc[0], sc[1]),
+		AluVariant::alu_var,
+		|sc| u8::std_fn(sc[0], sc[1]),
+		|sc| u16::std_fn(sc[0], sc[1]),
+		|sc| u32::std_fn(sc[0], sc[1]),
+		|sc| u64::std_fn(sc[0], sc[1]),
+		|sc| u128::std_fn(sc[0], sc[1]),
+		|sc| i8::std_fn(sc[0], sc[1]),
+		|sc| i16::std_fn(sc[0], sc[1]),
+		|sc| i32::std_fn(sc[0], sc[1]),
+		|sc| i64::std_fn(sc[0], sc[1]),
+		|sc| i128::std_fn(sc[0], sc[1]),
 	)
 }
 
-/// Test the Alu instruction variant `Inc`
+/// Test the Alu instruction variants that take one input, whose
+/// second input is implicitly '1', and where there is a std function
+/// that does the same for all data types
+#[duplicate_item(
+	test_name 	alu_var			std_fn;
+	[inc]		[Inc]			[wrapping_add];
+	[dec]		[Dec]			[wrapping_sub];
+	[shr]		[ShiftRight]	[shr];
+	[rol_once]	[RotateLeft]	[rotate_left];
+	[ror_once]	[RotateRight]	[rotate_right];
+)]
 #[quickcheck]
-fn inc(state: AluTestState<1>, offset: Bits<5, false>) -> TestResult
+fn test_name(state: AluTestState<1>, offset: Bits<5, false>) -> TestResult
 {
 	test_alu_instruction(
 		state,
 		offset,
-		AluVariant::Inc,
-		|sc| u8::wrapping_add(sc[0], 1),
-		|sc| u16::wrapping_add(sc[0], 1),
-		|sc| u32::wrapping_add(sc[0], 1),
-		|sc| u64::wrapping_add(sc[0], 1),
-		|sc| u128::wrapping_add(sc[0], 1),
-		|sc| i8::wrapping_add(sc[0], 1),
-		|sc| i16::wrapping_add(sc[0], 1),
-		|sc| i32::wrapping_add(sc[0], 1),
-		|sc| i64::wrapping_add(sc[0], 1),
-		|sc| i128::wrapping_add(sc[0], 1),
+		AluVariant::alu_var,
+		|sc| u8::std_fn(sc[0], 1),
+		|sc| u16::std_fn(sc[0], 1),
+		|sc| u32::std_fn(sc[0], 1),
+		|sc| u64::std_fn(sc[0], 1),
+		|sc| u128::std_fn(sc[0], 1),
+		|sc| i8::std_fn(sc[0], 1),
+		|sc| i16::std_fn(sc[0], 1),
+		|sc| i32::std_fn(sc[0], 1),
+		|sc| i64::std_fn(sc[0], 1),
+		|sc| i128::std_fn(sc[0], 1),
 	)
+}
+
+fn conv<I: Copy>(inputs: [I; 2], semantic_fn: impl Fn(I, I) -> (I, bool)) -> (I, u8)
+{
+	let result = semantic_fn(inputs[0], inputs[1]);
+	(result.0, result.1 as u8)
 }
 
 /// Test the Alu2 instruction variant `Add`
@@ -359,11 +384,6 @@ fn add_carry(
 	out_var: Alu2OutputVariant,
 ) -> TestResult
 {
-	fn conv<I: Copy>(inputs: [I; 2], semantic_fn: impl Fn(I, I) -> (I, bool)) -> (I, u8)
-	{
-		let result = semantic_fn(inputs[0], inputs[1]);
-		(result.0, result.1 as u8)
-	}
 	test_alu2_instruction(
 		state,
 		offset,
@@ -382,48 +402,6 @@ fn add_carry(
 	)
 }
 
-/// Test the Alu instruction variant `Sub`
-#[quickcheck]
-fn sub(state: AluTestState<2>, offset: Bits<5, false>) -> TestResult
-{
-	test_alu_instruction(
-		state,
-		offset,
-		AluVariant::Sub,
-		|sc| u8::saturating_sub(sc[0], sc[1]),
-		|sc| u16::saturating_sub(sc[0], sc[1]),
-		|sc| u32::saturating_sub(sc[0], sc[1]),
-		|sc| u64::saturating_sub(sc[0], sc[1]),
-		|sc| u128::saturating_sub(sc[0], sc[1]),
-		|sc| i8::saturating_sub(sc[0], sc[1]),
-		|sc| i16::saturating_sub(sc[0], sc[1]),
-		|sc| i32::saturating_sub(sc[0], sc[1]),
-		|sc| i64::saturating_sub(sc[0], sc[1]),
-		|sc| i128::saturating_sub(sc[0], sc[1]),
-	)
-}
-
-/// Test the Alu instruction variant `Dec`
-#[quickcheck]
-fn dec(state: AluTestState<1>, offset: Bits<5, false>) -> TestResult
-{
-	test_alu_instruction(
-		state,
-		offset,
-		AluVariant::Dec,
-		|sc| u8::wrapping_sub(sc[0], 1),
-		|sc| u16::wrapping_sub(sc[0], 1),
-		|sc| u32::wrapping_sub(sc[0], 1),
-		|sc| u64::wrapping_sub(sc[0], 1),
-		|sc| u128::wrapping_sub(sc[0], 1),
-		|sc| i8::wrapping_sub(sc[0], 1),
-		|sc| i16::wrapping_sub(sc[0], 1),
-		|sc| i32::wrapping_sub(sc[0], 1),
-		|sc| i64::wrapping_sub(sc[0], 1),
-		|sc| i128::wrapping_sub(sc[0], 1),
-	)
-}
-
 /// Test the Alu2 instruction variant `Sub`
 #[quickcheck]
 fn sub_carry(
@@ -432,11 +410,6 @@ fn sub_carry(
 	out_var: Alu2OutputVariant,
 ) -> TestResult
 {
-	fn conv<I: Copy>(inputs: [I; 2], semantic_fn: impl Fn(I, I) -> (I, bool)) -> (I, u8)
-	{
-		let result = semantic_fn(inputs[0], inputs[1]);
-		(result.0, result.1 as u8)
-	}
 	test_alu2_instruction(
 		state,
 		offset,
@@ -452,89 +425,5 @@ fn sub_carry(
 		|x| conv(x, i32::overflowing_sub),
 		|x| conv(x, i64::overflowing_sub),
 		|x| conv(x, i128::overflowing_sub),
-	)
-}
-
-/// Test the Alu instruction variant `ShiftRight`
-#[quickcheck]
-fn shr(state: AluTestState<1>, offset: Bits<5, false>) -> TestResult
-{
-	test_alu_instruction(
-		state,
-		offset,
-		AluVariant::ShiftRight,
-		|sc| u8::shr(sc[0], 1),
-		|sc| u16::shr(sc[0], 1),
-		|sc| u32::shr(sc[0], 1),
-		|sc| u64::shr(sc[0], 1),
-		|sc| u128::shr(sc[0], 1),
-		|sc| i8::shr(sc[0], 1),
-		|sc| i16::shr(sc[0], 1),
-		|sc| i32::shr(sc[0], 1),
-		|sc| i64::shr(sc[0], 1),
-		|sc| i128::shr(sc[0], 1),
-	)
-}
-
-/// Test the Alu instruction variant `BitAnd`
-#[quickcheck]
-fn bit_and(state: AluTestState<2>, offset: Bits<5, false>) -> TestResult
-{
-	test_alu_instruction(
-		state,
-		offset,
-		AluVariant::BitAnd,
-		|sc| u8::bitand(sc[0], sc[1]),
-		|sc| u16::bitand(sc[0], sc[1]),
-		|sc| u32::bitand(sc[0], sc[1]),
-		|sc| u64::bitand(sc[0], sc[1]),
-		|sc| u128::bitand(sc[0], sc[1]),
-		|sc| i8::bitand(sc[0], sc[1]),
-		|sc| i16::bitand(sc[0], sc[1]),
-		|sc| i32::bitand(sc[0], sc[1]),
-		|sc| i64::bitand(sc[0], sc[1]),
-		|sc| i128::bitand(sc[0], sc[1]),
-	)
-}
-
-/// Test the Alu instruction variant `BitOr`
-#[quickcheck]
-fn bit_or(state: AluTestState<2>, offset: Bits<5, false>) -> TestResult
-{
-	test_alu_instruction(
-		state,
-		offset,
-		AluVariant::BitOr,
-		|sc| u8::bitor(sc[0], sc[1]),
-		|sc| u16::bitor(sc[0], sc[1]),
-		|sc| u32::bitor(sc[0], sc[1]),
-		|sc| u64::bitor(sc[0], sc[1]),
-		|sc| u128::bitor(sc[0], sc[1]),
-		|sc| i8::bitor(sc[0], sc[1]),
-		|sc| i16::bitor(sc[0], sc[1]),
-		|sc| i32::bitor(sc[0], sc[1]),
-		|sc| i64::bitor(sc[0], sc[1]),
-		|sc| i128::bitor(sc[0], sc[1]),
-	)
-}
-
-/// Test the Alu instruction variant `Mul`
-#[quickcheck]
-fn mul(state: AluTestState<2>, offset: Bits<5, false>) -> TestResult
-{
-	test_alu_instruction(
-		state,
-		offset,
-		AluVariant::Mul,
-		|sc| u8::wrapping_mul(sc[0], sc[1]),
-		|sc| u16::wrapping_mul(sc[0], sc[1]),
-		|sc| u32::wrapping_mul(sc[0], sc[1]),
-		|sc| u64::wrapping_mul(sc[0], sc[1]),
-		|sc| u128::wrapping_mul(sc[0], sc[1]),
-		|sc| i8::wrapping_mul(sc[0], sc[1]),
-		|sc| i16::wrapping_mul(sc[0], sc[1]),
-		|sc| i32::wrapping_mul(sc[0], sc[1]),
-		|sc| i64::wrapping_mul(sc[0], sc[1]),
-		|sc| i128::wrapping_mul(sc[0], sc[1]),
 	)
 }
