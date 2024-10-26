@@ -232,3 +232,21 @@ fn capture(state: NoCF<ExecState>, cap: Bits<5, false>, target: Bits<5, false>) 
 		},
 	)
 }
+
+/// Test the "NoOp" instruction
+#[quickcheck]
+fn noop(state: NoCF<ExecState>) -> TestResult
+{
+	test_simple_instruction(
+		state,
+		Instruction::NoOp,
+		|old_op_queue| {
+			let mut new_op_q = old_op_queue.clone();
+			// discard ready list
+			let _ = new_op_q.remove(&0);
+
+			new_op_q
+		},
+		|_| [].into(),
+	)
+}

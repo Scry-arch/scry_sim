@@ -76,6 +76,12 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 		}
 	}
 
+	/// Discard the current ready list
+	fn discard_ready_list(&mut self, tracker: &mut impl MetricTracker)
+	{
+		let _ = self.operands.ready_iter(self.memory.borrow_mut(), tracker);
+	}
+
 	/// Perform one execution step.
 	///
 	/// An execution step starts by executing an instruction and then checks
@@ -123,15 +129,14 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 						self.control.next_addr + ((offset.value() * 2) as usize),
 						tracker,
 					);
-					// Discard everything in the ready list
-					let _ = self.operands.ready_iter(self.memory.borrow_mut(), tracker);
+					self.discard_ready_list(tracker);
 				},
 				EchoLong(offset) =>
 				{
 					self.operands
 						.reorder_ready(offset.value() as usize + 1, tracker);
 					// Discard (now empty) ready list
-					let _ = self.operands.ready_iter(self.memory.borrow_mut(), tracker);
+					self.discard_ready_list(tracker);
 				},
 				Duplicate(to_next, tar1, tar2) =>
 				{
@@ -151,7 +156,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 					self.operands
 						.reorder_ready(tar2.value() as usize + 1, tracker);
 					// Discard (now empty) ready list
-					let _ = self.operands.ready_iter(self.memory.borrow_mut(), tracker);
+					self.discard_ready_list(tracker);
 				},
 				Echo(to_next, tar1, tar2) =>
 				{
@@ -164,7 +169,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 						self.operands.reorder_ready(1, tracker);
 					}
 					// Discard (maybe empty) ready list
-					let _ = self.operands.ready_iter(self.memory.borrow_mut(), tracker);
+					self.discard_ready_list(tracker);
 				},
 				Capture(cap, target) =>
 				{
@@ -173,8 +178,8 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 						target.value as usize + 1,
 						tracker,
 					);
-					// Discard ready list
-					let _ = self.operands.ready_iter(self.memory.borrow_mut(), tracker);
+
+					self.discard_ready_list(tracker);
 				},
 				Alu(variant, offset) =>
 				{
@@ -201,7 +206,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 					self.operands.reorder_ready(1, tracker);
 
 					// Discard (now empty) ready list
-					let _ = self.operands.ready_iter(self.memory.borrow_mut(), tracker);
+					self.discard_ready_list(tracker);
 				},
 				Jump(target, location) =>
 				{
@@ -286,6 +291,10 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 					self.operands
 						.ready_iter(self.memory.borrow_mut(), tracker)
 						.next();
+				},
+				NoOp =>
+				{
+					self.discard_ready_list(tracker);
 				},
 				instr =>
 				{
@@ -432,7 +441,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 		};
 		assert!(op2.is_none()); // TODO: implement 2-operand jumps
 
-		// If no operands are given, its an unconditional jump
+		// If no operands are given, it's an unconditional jump
 		let unconditional = op1.is_none();
 		let is_zero = op1.map_or(false, |(val1, errs)| {
 			assert!(errs.is_none());
