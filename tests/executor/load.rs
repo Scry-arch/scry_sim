@@ -7,7 +7,7 @@ use crate::{
 };
 use quickcheck::{Arbitrary, Gen, TestResult};
 use quickcheck_macros::quickcheck;
-use scry_isa::{Bits, Instruction};
+use scry_isa::Instruction;
 use scry_sim::{
 	arbitrary::{ArbScalarVal, ArbValue, NoCF, NoReads},
 	BlockedMemory, ExecState, Executor, Metric, MetricTracker, OperandList, OperandState,
@@ -304,14 +304,12 @@ fn load_trigger(
 /// Given the initial state, regresses the operand queue and puts the given
 /// operand queue as the ready queue.
 /// Then tests that when the next instruction is a load the issued load has the
-/// given load type and will load from the given address and outputting to the
-/// given target. Also tests metrics.
+/// given load type and will load from the given address. Also tests metrics.
 fn test_issue_load(
 	NoCF(state): NoCF<ExecState>,
 	load_operands: OperandList,
 	loaded_typ: ValueType,
 	addr: usize,
-	target: Bits<5, false>,
 ) -> TestResult
 {
 	let mut test_state = state.clone();
@@ -321,10 +319,7 @@ fn test_issue_load(
 	let mut expected_state: ExecState = state.clone();
 	expected_state.address += 2;
 	let read_op = OperandState::MustRead(expected_state.frame.reads.len());
-	if let Some(list) = expected_state
-		.frame
-		.op_queue
-		.get_mut(&(target.value as usize))
+	if let Some(list) = expected_state.frame.op_queue.get_mut(&0)
 	{
 		list.push(read_op);
 	}
@@ -333,7 +328,7 @@ fn test_issue_load(
 		expected_state
 			.frame
 			.op_queue
-			.insert(target.value as usize, OperandList::new(read_op, Vec::new()));
+			.insert(0, OperandList::new(read_op, Vec::new()));
 	}
 	expected_state.frame.reads.push((addr, 1, loaded_typ));
 	// Because executor equality depends on the order of the read list,
@@ -350,7 +345,12 @@ fn test_issue_load(
 	test_execution_step(
 		&test_state,
 		RepeatingMem::<false>(
-			Instruction::Load(signed, (size as i32).try_into().unwrap(), target).encode(),
+			Instruction::Load(
+				signed,
+				(size as i32).try_into().unwrap(),
+				255.try_into().unwrap(),
+			)
+			.encode(),
 			0,
 		),
 		&expected_state,
@@ -377,7 +377,6 @@ fn load_issue_absolute_address(
 	NoCF(state): NoCF<ExecState>,
 	typ: ValueType,
 	ArbScalarVal(addr_size_pow2, addr_scalar): ArbScalarVal,
-	target: Bits<5, false>,
 ) -> TestResult
 {
 	test_issue_load(
@@ -391,7 +390,6 @@ fn load_issue_absolute_address(
 		),
 		typ,
 		get_absolute_address(&addr_scalar),
-		target,
 	)
 }
 
@@ -401,7 +399,6 @@ fn load_issue_relative_address(
 	NoCF(state): NoCF<ExecState>,
 	typ: ValueType,
 	ArbScalarVal(offset_size_pow2, offset_scalar): ArbScalarVal,
-	target: Bits<5, false>,
 ) -> TestResult
 {
 	// Ignore address calculation overflow
@@ -425,7 +422,6 @@ fn load_issue_relative_address(
 		),
 		typ,
 		absolute_addr,
-		target,
 	)
 }
 
@@ -436,7 +432,6 @@ fn load_issue_indexed(
 	loaded_typ: ValueType,
 	ArbValue(base_addr): ArbValue<false, false>,
 	ArbScalarVal(index_size_pow2, index_scalar): ArbScalarVal,
-	target: Bits<5, false>,
 ) -> TestResult
 {
 	let absolute_addr = if let Some(addr) =
@@ -461,6 +456,5 @@ fn load_issue_indexed(
 		),
 		loaded_typ,
 		absolute_addr,
-		target,
 	)
 }

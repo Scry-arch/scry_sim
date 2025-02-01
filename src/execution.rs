@@ -212,8 +212,9 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 				{
 					self.handle_jump(target, location, tracker);
 				},
-				Store =>
+				Store(index) =>
 				{
+					assert_eq!(index.value, 255, "Stack stores not implemented yet");
 					let mut ready_iter =
 						self.operands.ready_iter(self.memory.borrow_mut(), tracker);
 
@@ -239,8 +240,9 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 						_ => Err(ExecError::Exception),
 					}?;
 				},
-				Load(signed, size, target) =>
+				Load(signed, size, index) =>
 				{
+					assert_eq!(index.value, 255, "Stack loads not implemented yet");
 					let read_typ = if signed
 					{
 						ValueType::Int(size.value as u8)
@@ -258,8 +260,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 					.unwrap();
 
 					let op = Operand::read_typed(address, 1, read_typ);
-					self.operands
-						.push_operand(target.value as usize, op, tracker);
+					self.operands.push_operand(0, op, tracker);
 				},
 				Pick(target) =>
 				{
