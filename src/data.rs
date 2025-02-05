@@ -1,13 +1,16 @@
 use crate::{
 	memory::{MemError, Memory},
 	value::Value,
-	CallFrameState, ExecState, Metric, MetricTracker, OperandList, OperandState, ValueType,
+	CallFrameState, ExecState, Metric, MetricTracker, OperandList, OperandState, StackFrame,
+	ValueType,
 };
+use delegate::delegate;
 use std::{
 	cell::{Ref, RefCell},
 	collections::{HashMap, VecDeque},
 	fmt::Debug,
 	iter::{once, FromIterator},
+	mem::replace,
 	ops::Deref,
 	rc::Rc,
 };
@@ -430,5 +433,98 @@ impl<'a> From<&'a ExecState> for OperandStack
 			queue: curr_frame_op_queue,
 			ready: first_list,
 		}
+	}
+}
+
+/// The program stack
+#[derive(Debug)]
+pub struct ProgramStack
+{
+	top: StackFrame,
+	rest: VecDeque<StackFrame>,
+}
+impl ProgramStack
+{
+	delegate! {
+		to self.top {
+			pub fn total_size(&self) -> usize;
+			pub fn secondary_size(&self) -> usize;
+			pub fn can_increase_primary(&self, amount: usize) -> bool;
+			pub fn increase_primary(&mut self, amount: usize);
+			pub fn decrease_primary(&mut self, amount: usize);
+			pub fn add_block(&mut self, addr: usize, size: usize, primary: bool);
+			pub fn release_bytes(&mut self, amount: usize);
+			pub fn get_address(&self, scalar_pow2: u8, index: usize, primary_base: bool) -> Option<usize>;
+		}
+	}
+
+	pub fn new(top: StackFrame) -> Self
+	{
+		Self {
+			top,
+			rest: VecDeque::new(),
+		}
+	}
+
+	pub fn top(&self) -> &StackFrame
+	{
+		&self.top
+	}
+
+	pub fn top_mut(&mut self) -> &mut StackFrame
+	{
+		&mut self.top
+	}
+
+	pub fn perform_call(&mut self)
+	{
+		let new_top = self.top.frame_call();
+		self.rest.push_front(replace(&mut self.top, new_top));
+	}
+
+	pub fn can_perform_return(&self) -> bool
+	{
+		!self.rest.is_empty()
+	}
+
+	pub fn perform_return(&mut self)
+	{
+		assert!(self.can_perform_return());
+		let old_top = replace(&mut self.top, self.rest.pop_front().unwrap());
+		self.top.frame_return(old_top);
+	}
+
+	pub fn set_frame_state(&self, idx: usize, to_set: &mut CallFrameState)
+	{
+		to_set.stack = if idx == 0
+		{
+			self.top.clone()
+		}
+		else
+		{
+			self.rest[idx - 1].clone()
+		};
+	}
+
+	pub fn set_all_frame_states<'a>(&self, to_set: impl Iterator<Item = &'a mut CallFrameState>)
+	{
+		to_set
+			.enumerate()
+			.for_each(|(idx, frame)| self.set_frame_state(idx, frame));
+	}
+}
+/// Constructs a ProgramStack equivalent to an execution state
+impl<'a> From<&'a ExecState> for ProgramStack
+{
+	fn from(state: &'a ExecState) -> Self
+	{
+		let top = state.frame.stack.clone();
+		let rest = state
+			.frame_stack
+			.iter()
+			.map(|c| &c.stack)
+			.cloned()
+			.collect();
+		Self { top, rest }
 	}
 }

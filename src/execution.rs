@@ -1,6 +1,6 @@
 use crate::{
 	control_flow::ControlFlow,
-	data::{Operand, OperandStack},
+	data::{Operand, OperandStack, ProgramStack},
 	memory::Memory,
 	value::Value,
 	ExecState, MemError, MetricTracker, Scalar, ValueType,
@@ -29,6 +29,7 @@ pub struct Executor<M: Memory, B: BorrowMut<M>>
 {
 	control: ControlFlow,
 	operands: OperandStack,
+	stack: ProgramStack,
 	memory: B,
 	phantom: PhantomData<M>,
 }
@@ -42,6 +43,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 		Self {
 			operands: OperandStack::new(ready_ops),
 			control: ControlFlow::new(start_addr),
+			stack: ProgramStack::new(Default::default()),
 			memory,
 			phantom: PhantomData,
 		}
@@ -54,6 +56,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 		Self {
 			operands: state.into(),
 			control: state.into(),
+			stack: state.into(),
 			memory,
 			phantom: PhantomData,
 		}
@@ -68,6 +71,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 		assert!(frames.len() > 0);
 
 		self.operands.set_all_frame_states(frames.iter_mut());
+		self.stack.set_all_frame_states(frames.iter_mut());
 
 		ExecState {
 			address: self.control.next_addr,
@@ -304,7 +308,9 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 				},
 			}
 		}
-		if self.control.next_addr(&mut self.operands, tracker)
+		if self
+			.control
+			.next_addr(&mut self.operands, &mut self.stack, tracker)
 		{
 			Ok(self)
 		}

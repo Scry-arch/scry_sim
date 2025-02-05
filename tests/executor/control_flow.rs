@@ -73,6 +73,7 @@ fn return_trigger_impl(
 	// and extract it immediately, ensuring the order of reads will follow the
 	// implementation
 	expected_state = Executor::from_state(&expected_state, RepeatingMem::<true>(0, 0)).state();
+	expected_state.frame.stack.frame_return(frame.stack.clone());
 
 	// Construct test state
 	let mut test_state = state.clone();
@@ -540,11 +541,14 @@ fn call_trigger(
 	let ready_list = expected_state.frame.op_queue.remove(&0);
 	expected_state.frame.op_queue = advance_queue(expected_state.frame.op_queue);
 	let reads = expected_state.frame.reads.clone();
+	// Create expected stack frame
+	let frame_blocks = expected_state.frame.stack.frame_call();
 	let new_frame = CallFrameState {
 		ret_addr: state.address + 2,
 		branches: Default::default(),
 		op_queue: HashMap::from_iter(ready_list.map(|list| (0, list)).into_iter()),
 		reads,
+		stack: frame_blocks,
 	};
 	expected_state
 		.frame_stack

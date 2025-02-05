@@ -1,5 +1,6 @@
 use crate::{
-	CallFrameState, ControlFlowType, ExecState, OperandList, OperandState, Scalar, Value, ValueType,
+	CallFrameState, ControlFlowType, ExecState, OperandList, OperandState, Scalar, StackFrame,
+	Value, ValueType,
 };
 use duplicate::{duplicate_item, substitute};
 use num_traits::{PrimInt, Unsigned};
@@ -138,6 +139,93 @@ impl OperandState<usize>
 	}
 }
 
+impl Arbitrary for StackFrame
+{
+	fn arbitrary(g: &mut Gen) -> Self
+	{
+		let mut frame = StackFrame {
+			blocks: Vec::new(),
+			primary_size: 0,
+		};
+
+		// add blocks
+		let nr_blocks = u8::arbitrary(g) % g.size() as u8;
+		for _ in 0..nr_blocks
+		{
+			loop
+			{
+				let address = usize::arbitrary(g);
+				let size = usize::arbitrary(g) % (64 * g.size());
+
+				frame.blocks.push((address, size));
+
+				if frame.validate().is_ok()
+				{
+					break;
+				}
+				else
+				{
+					// try again
+					frame.blocks.pop();
+				}
+			}
+		}
+
+		// decide on primary size
+		if frame.total_size() > 0
+		{
+			frame.primary_size = usize::arbitrary(g) % frame.total_size();
+		}
+
+		// make sure is valid frame
+		frame.validate().unwrap();
+
+		frame
+	}
+
+	fn shrink(&self) -> Box<dyn Iterator<Item = Self>>
+	{
+		let mut result = Vec::new();
+
+		for i in 0..self.blocks.len()
+		{
+			// Shrink by reducing block size
+			result.extend(
+				self.blocks[i]
+					.1
+					.shrink()
+					.filter(|s| *s > 0)
+					.map(|new_size| {
+						let mut clone = self.clone();
+						clone.blocks[i].1 = new_size;
+						clone
+					})
+					.filter(|shrunk| shrunk.validate().is_ok()),
+			);
+
+			// Shrink by removing a block
+			let mut clone = self.clone();
+			clone.blocks.remove(i);
+			if clone.validate().is_ok()
+			{
+				result.push(clone);
+			}
+
+			// Shrink by reducing primary size
+			let clone = self.clone();
+			result.extend(self.primary_size.shrink().map(move |new_size| {
+				let mut clone = clone.clone();
+				clone.primary_size = new_size;
+				clone.validate().unwrap();
+				clone
+			}))
+			// TODO: Shrink addresses
+		}
+
+		Box::new(result.into_iter())
+	}
+}
+
 impl Arbitrary for CallFrameState
 {
 	fn arbitrary(g: &mut Gen) -> Self
@@ -171,6 +259,7 @@ impl Arbitrary for CallFrameState
 				.collect(),
 			op_queue,
 			reads,
+			stack: Arbitrary::arbitrary(g),
 		}
 	}
 
@@ -186,6 +275,7 @@ impl Arbitrary for CallFrameState
 			ReadsAddr(usize),
 			ReadsLen(usize),
 			ReadsTyp(usize),
+			Stack,
 			Done,
 		}
 		struct Shrinker
@@ -382,12 +472,22 @@ impl Arbitrary for CallFrameState
 									self.next()
 								} else {
 									// No more reads
-									self.state = Done;
+									self.state = Stack;
 									self.next()
 								}
 							}
 						}
-
+						Stack => {
+							// Shrink stack frame
+							let clone = self.original.clone();
+							self.other = Box::new(self.original.stack.shrink().map(move|shrunk| {
+								let mut clone = clone.clone();
+								clone.stack = shrunk;
+								clone
+							}));
+							self.state = Done;
+							self.next()
+						}
 						_ => None
 					}
 				}
@@ -397,7 +497,7 @@ impl Arbitrary for CallFrameState
 		Box::new(Shrinker {
 			original: self.clone(),
 			state: ShrinkState::Start,
-			other: Box::new(std::iter::empty()),
+			other: Box::new(empty()),
 		})
 	}
 }
