@@ -1,7 +1,7 @@
 use crate::{
 	memory::{MemError, Memory},
 	value::Value,
-	CallFrameState, ExecState, Metric, MetricTracker, OperandList, OperandState, StackFrame,
+	Block, CallFrameState, ExecState, Metric, MetricTracker, OperandList, OperandState, StackFrame,
 	ValueType,
 };
 use delegate::delegate;
@@ -452,7 +452,7 @@ impl ProgramStack
 			pub fn can_increase_primary(&self, amount: usize) -> bool;
 			pub fn increase_primary(&mut self, amount: usize);
 			pub fn decrease_primary(&mut self, amount: usize);
-			pub fn add_block(&mut self, addr: usize, size: usize, primary: bool);
+			pub fn add_block(&mut self, block: Block, primary: bool);
 			pub fn release_bytes(&mut self, amount: usize);
 			pub fn get_address(&self, scalar_pow2: u8, index: usize, primary_base: bool) -> Option<usize>;
 		}

@@ -1,6 +1,6 @@
 use crate::{
-	CallFrameState, ControlFlowType, ExecState, OperandList, OperandState, Scalar, StackFrame,
-	Value, ValueType,
+	Block, CallFrameState, ControlFlowType, ExecState, OperandList, OperandState, Scalar,
+	StackFrame, Value, ValueType,
 };
 use duplicate::{duplicate_item, substitute};
 use num_traits::{PrimInt, Unsigned};
@@ -157,7 +157,7 @@ impl Arbitrary for StackFrame
 				let address = usize::arbitrary(g);
 				let size = usize::arbitrary(g) % (64 * g.size());
 
-				frame.blocks.push((address, size));
+				frame.blocks.push(Block { address, size });
 
 				if frame.validate().is_ok()
 				{
@@ -192,12 +192,12 @@ impl Arbitrary for StackFrame
 			// Shrink by reducing block size
 			result.extend(
 				self.blocks[i]
-					.1
+					.size
 					.shrink()
 					.filter(|s| *s > 0)
 					.map(|new_size| {
 						let mut clone = self.clone();
-						clone.blocks[i].1 = new_size;
+						clone.blocks[i].size = new_size;
 						clone
 					})
 					.filter(|shrunk| shrunk.validate().is_ok()),

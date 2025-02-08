@@ -148,7 +148,7 @@ pub struct StackFrame
 	/// Lower index block also has lower index in the stack frame.
 	/// [0].0 is therefore the base address of the frame.
 	/// If empty, no memory is reserved for the stack frame.
-	pub blocks: Vec<(usize, usize)>,
+	pub blocks: Vec<Block>,
 
 	/// The size of the primary stack frame in bytes.
 	pub primary_size: usize,
@@ -159,7 +159,7 @@ impl StackFrame
 	/// message
 	pub fn validate(&self) -> Result<(), &str>
 	{
-		if self.blocks.iter().any(|(_, size)| *size == 0)
+		if self.blocks.iter().any(|b| b.size == 0)
 		{
 			return Err("Stack frame block has size 0");
 		}
@@ -172,17 +172,9 @@ impl StackFrame
 		if self
 			.blocks
 			.iter()
-			.any(|(addr, size)| addr.checked_add(*size).is_none())
+			.any(|b| b.address.checked_add(b.size).is_none())
 		{
 			return Err("Block size overflows address space");
-		}
-
-		// Assert the block do not overlap
-		fn block_overlaps_block(block1: (usize, usize), block2: (usize, usize)) -> bool
-		{
-			((block2.0 <= block1.0) && (block1.0 < (block2.0 + block2.1)))
-				|| ((block2.0 < (block1.0 + block1.1))
-					&& ((block1.0 + block1.1) <= (block2.0 + block2.1)))
 		}
 
 		for (idx, b) in self.blocks.iter().enumerate()
@@ -191,7 +183,7 @@ impl StackFrame
 				.blocks
 				.iter()
 				.skip(idx + 1)
-				.any(|b2| block_overlaps_block(*b, *b2) || block_overlaps_block(*b2, *b))
+				.any(|b2| Block::overlap(b, b2))
 			{
 				return Err("Overlapping stack frame blocks");
 			}
@@ -202,7 +194,7 @@ impl StackFrame
 	/// The total reserved size of the stack frame.
 	pub fn total_size(&self) -> usize
 	{
-		self.blocks.iter().fold(0, |c, (_, size)| c + size)
+		self.blocks.iter().fold(0, |c, b| c + b.size)
 	}
 
 	/// The size of the secondary stack frame.
@@ -248,13 +240,13 @@ impl StackFrame
 	///
 	/// If `primary=true`, then the added size is reserved to the primary stack.
 	/// Otherwise, to the secondary.
-	pub fn add_block(&mut self, addr: usize, size: usize, primary: bool)
+	pub fn add_block(&mut self, block: Block, primary: bool)
 	{
-		self.blocks.push((addr, size));
+		self.blocks.push(block);
 
 		if primary
 		{
-			self.primary_size += size;
+			self.primary_size += self.blocks.last().unwrap().size;
 		}
 	}
 
@@ -275,14 +267,14 @@ impl StackFrame
 		{
 			let remaining = amount - released;
 
-			if remaining >= self.blocks.last().unwrap().1
+			if remaining >= self.blocks.last().unwrap().size
 			{
-				let popped_amount = self.blocks.pop().unwrap().1;
+				let popped_amount = self.blocks.pop().unwrap().size;
 				released += popped_amount;
 			}
 			else
 			{
-				self.blocks.last_mut().unwrap().1 -= remaining;
+				self.blocks.last_mut().unwrap().size -= remaining;
 			}
 		}
 		assert_eq!(released, amount);
@@ -311,16 +303,16 @@ impl StackFrame
 		// Now need to find the block containing that offset
 		self.blocks
 			.iter()
-			.fold(Err(frame_offset), |offset, (addr, size)| {
+			.fold(Err(frame_offset), |offset, b| {
 				if let Err(offset) = offset
 				{
-					if *size < offset
+					if b.size < offset
 					{
-						Err(offset - size)
+						Err(offset - b.size)
 					}
 					else
 					{
-						Ok(*addr)
+						Ok(b.address)
 					}
 				}
 				else
@@ -342,12 +334,12 @@ impl StackFrame
 			.iter()
 			.enumerate()
 			.rev()
-			.fold(Err(self.secondary_size()), |remaining, (idx, (_, size))| {
+			.fold(Err(self.secondary_size()), |remaining, (idx, b)| {
 				if let Err(remaining) = remaining
 				{
-					if remaining > *size
+					if remaining > b.size
 					{
-						Err(remaining - size)
+						Err(remaining - b.size)
 					}
 					else
 					{
@@ -370,13 +362,16 @@ impl StackFrame
 		{
 			let (block_idx, size) = self.get_split().unwrap();
 
-			let first_block = self.blocks[block_idx];
-			let mut new_blocks = vec![(first_block.0 + (first_block.1 - size), size)];
+			let first_block = &self.blocks[block_idx];
+			let mut new_blocks = vec![Block {
+				address: first_block.address + (first_block.size - size),
+				size,
+			}];
 
 			self.blocks
 				.iter()
 				.skip(block_idx + 1)
-				.for_each(|b| new_blocks.push(*b));
+				.for_each(|b| new_blocks.push(b.clone()));
 
 			Self {
 				blocks: new_blocks,
@@ -399,7 +394,7 @@ impl StackFrame
 		if let Some((split_idx, secondary_size)) = self.get_split()
 		{
 			self.blocks.truncate(split_idx + 1);
-			self.blocks.last_mut().unwrap().1 -= secondary_size;
+			self.blocks.last_mut().unwrap().size -= secondary_size;
 		}
 
 		// Now add the callee's primary frame blocks
@@ -408,7 +403,7 @@ impl StackFrame
 			assert!(!callee_frame.blocks.is_empty());
 			let (split_idx, secondary_size) = callee_frame.get_split().unwrap_or((
 				callee_frame.blocks.len() - 1,
-				callee_frame.blocks.last().unwrap().1,
+				callee_frame.blocks.last().unwrap().size,
 			));
 
 			// Add all the full blocks
@@ -416,13 +411,99 @@ impl StackFrame
 				.blocks
 				.iter()
 				.take(split_idx)
-				.for_each(|b| self.blocks.push(*b));
+				.for_each(|b| self.blocks.push(b.clone()));
 			// Add the potentially partial last block
-			self.blocks.push((
-				callee_frame.blocks[split_idx].0,
-				callee_frame.blocks[split_idx].1 - secondary_size,
-			));
+			self.blocks.push(Block {
+				address: callee_frame.blocks[split_idx].address,
+				size: callee_frame.blocks[split_idx].size - secondary_size,
+			});
 		}
+	}
+}
+
+/// References a block of memory with its base address and the size in bytes.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct Block
+{
+	pub address: usize,
+	pub size: usize,
+}
+impl Block
+{
+	/// Returns whether the given address is in this block.
+	pub fn address_in(&self, address: usize) -> bool
+	{
+		(self.address <= address) && (address < self.address + self.size)
+	}
+
+	/// Returns whether the given block overlaps this one.
+	///
+	/// I.e. if any of the other addresses referenced by the other is in this.
+	/// Not the other way.
+	pub fn overlapped_by(&self, other: &Block) -> bool
+	{
+		self.address_in(other.address) || self.address_in(other.address + other.size - 1)
+	}
+
+	/// Returns whether the given block is fully within this one
+	pub fn encompasses(&self, other: &Block) -> bool
+	{
+		self.address_in(other.address) && self.address_in(other.address + other.size - 1)
+	}
+
+	/// Returns whether the two block overlap
+	pub fn overlap(block1: &Block, block2: &Block) -> bool
+	{
+		block1.overlapped_by(block2) || block2.overlapped_by(block1)
+	}
+
+	/// Return whether any of the given block overlap with eack other
+	pub fn any_overlaps<'a>(blocks: impl Iterator<Item = &'a Block> + Clone) -> bool
+	{
+		for (i, block) in blocks.clone().enumerate()
+		{
+			if blocks.clone().skip(i + 1).any(|b| Block::overlap(block, b))
+			{
+				return true;
+			}
+		}
+		false
+	}
+}
+
+pub struct StackBuffer
+{
+	/// The blocks of the buffer and their reservations.
+	///
+	/// New blocks go in the end of the list.
+	pub blocks: Vec<(Block, Vec<Block>)>,
+}
+impl StackBuffer
+{
+	pub fn validate(&self) -> Result<(), &str>
+	{
+		// Check no blocks overlap
+		if Block::any_overlaps(self.blocks.iter().map(|b| &b.0))
+		{
+			return Err("Stack buffer blocks overlap");
+		}
+
+		for (block, reservations) in self.blocks.iter()
+		{
+			// Check all reservations are within the block
+			if reservations.iter().any(|r| !block.encompasses(r))
+			{
+				return Err("Reservation block outside stack buffer block");
+			}
+
+			// Check no reservations overlap each other
+			if Block::any_overlaps(reservations.iter())
+			{
+				return Err("Reservations overlap");
+			}
+		}
+
+		Ok(())
 	}
 }
 
