@@ -3,7 +3,7 @@ use crate::{
 	data::{Operand, OperandStack, ProgramStack},
 	memory::Memory,
 	value::Value,
-	ExecState, MemError, MetricTracker, Scalar, ValueType,
+	Block, ExecState, MemError, MetricTracker, Scalar, ValueType,
 };
 use byteorder::{ByteOrder, LittleEndian};
 use duplicate::substitute;
@@ -30,6 +30,7 @@ pub struct Executor<M: Memory, B: BorrowMut<M>>
 	control: ControlFlow,
 	operands: OperandStack,
 	stack: ProgramStack,
+	stack_buffer: Vec<Block>,
 	memory: B,
 	phantom: PhantomData<M>,
 }
@@ -44,6 +45,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 			operands: OperandStack::new(ready_ops),
 			control: ControlFlow::new(start_addr),
 			stack: ProgramStack::new(Default::default()),
+			stack_buffer: Vec::new(),
 			memory,
 			phantom: PhantomData,
 		}
@@ -57,6 +59,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 			operands: state.into(),
 			control: state.into(),
 			stack: state.into(),
+			stack_buffer: state.stack_buffer.clone(),
 			memory,
 			phantom: PhantomData,
 		}
@@ -77,6 +80,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 			address: self.control.next_addr,
 			frame: frames.remove(0),
 			frame_stack: frames,
+			stack_buffer: self.stack_buffer.clone(),
 		}
 	}
 

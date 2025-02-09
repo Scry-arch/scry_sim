@@ -430,6 +430,20 @@ pub struct Block
 }
 impl Block
 {
+	pub fn validate(&self) -> Result<(), String>
+	{
+		if self.address.checked_add(self.size).is_none()
+		{
+			return Err("Block size overflow".to_string());
+		}
+
+		if self.size == 0
+		{
+			return Err("Block size is 0".to_string());
+		}
+		Ok(())
+	}
+
 	/// Returns whether the given address is in this block.
 	pub fn address_in(&self, address: usize) -> bool
 	{
@@ -458,52 +472,21 @@ impl Block
 	}
 
 	/// Return whether any of the given block overlap with eack other
-	pub fn any_overlaps<'a>(blocks: impl Iterator<Item = &'a Block> + Clone) -> bool
+	pub fn any_overlaps<'a>(
+		blocks: impl Iterator<Item = &'a Block> + Clone,
+	) -> Option<(&'a Block, &'a Block)>
 	{
 		for (i, block) in blocks.clone().enumerate()
 		{
-			if blocks.clone().skip(i + 1).any(|b| Block::overlap(block, b))
+			if let Some(other) = blocks
+				.clone()
+				.skip(i + 1)
+				.find(|b| Block::overlap(block, b))
 			{
-				return true;
+				return Some((block, other));
 			}
 		}
-		false
-	}
-}
-
-pub struct StackBuffer
-{
-	/// The blocks of the buffer and their reservations.
-	///
-	/// New blocks go in the end of the list.
-	pub blocks: Vec<(Block, Vec<Block>)>,
-}
-impl StackBuffer
-{
-	pub fn validate(&self) -> Result<(), &str>
-	{
-		// Check no blocks overlap
-		if Block::any_overlaps(self.blocks.iter().map(|b| &b.0))
-		{
-			return Err("Stack buffer blocks overlap");
-		}
-
-		for (block, reservations) in self.blocks.iter()
-		{
-			// Check all reservations are within the block
-			if reservations.iter().any(|r| !block.encompasses(r))
-			{
-				return Err("Reservation block outside stack buffer block");
-			}
-
-			// Check no reservations overlap each other
-			if Block::any_overlaps(reservations.iter())
-			{
-				return Err("Reservations overlap");
-			}
-		}
-
-		Ok(())
+		None
 	}
 }
 
@@ -687,6 +670,9 @@ pub struct ExecState
 	/// The first frame is of the current function's caller, the next is the
 	/// caller of the caller and so on. May be empty.
 	pub frame_stack: Vec<CallFrameState>,
+
+	/// Free blocks that may be used to reserve stack frames
+	pub stack_buffer: Vec<Block>,
 }
 impl ExecState
 {
@@ -695,12 +681,36 @@ impl ExecState
 	/// It is invalid if:
 	/// * Any call frame is invalid
 	/// * Next address is not 2-byte aligned
-	pub fn valid(&self) -> bool
+	pub fn validate(&self) -> Result<(), String>
 	{
-		once(&self.frame)
-			.chain(self.frame_stack.iter())
-			.all(CallFrameState::valid)
-			&& (self.address % 2 == 0)
+		let frames = once(&self.frame).chain(self.frame_stack.iter());
+
+		// Validate frames
+		for f in frames.clone()
+		{
+			if !f.valid()
+			{
+				return Err("Invalid call frame".into());
+			}
+		}
+
+		// Check no stack blocks overlap
+		if let Some((b1, b2)) = Block::any_overlaps(
+			frames
+				.flat_map(|f| f.stack.blocks.iter())
+				.chain(self.stack_buffer.iter()),
+		)
+		{
+			return Err(format!("Stack blocks overlap: {:?},  {:?}", b1, b2));
+		}
+
+		// Check address alignment
+		if self.address % 2 != 0
+		{
+			return Err("Unaligned next address".into());
+		}
+
+		Ok(())
 	}
 
 	/// Goes through all pending reads and ensures that they are referenced by

@@ -117,6 +117,7 @@ fn return_trigger(
 			address: state.address,
 			frame: frame.clone(),
 			frame_stack: Vec::new(),
+			stack_buffer: Vec::new(),
 		},
 		RepeatingMem::<true>(instr_encoded, 0),
 	)

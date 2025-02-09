@@ -37,7 +37,7 @@ fn frame_shrinks_valid(frame: NoShrink<CallFrameState>) -> bool
 #[ignore]
 fn state_shrinks_valid(state: NoShrink<ExecState>) -> bool
 {
-	state.0.shrink().all(|f| f.valid())
+	state.0.shrink().all(|f| f.validate().is_ok())
 }
 
 /// Test that all arbitrary execution state restricters shrink to valid state
@@ -53,10 +53,9 @@ fn state_shrinks_valid(state: NoShrink<ExecState>) -> bool
 #[ignore]
 fn test_name(state: NoShrink<restricter<ExecState, generics>>) -> bool
 {
-	state
-		.0
-		.shrink()
-		.all(|state| state.as_ref().valid() && restricter::<_, generics>::restriction_holds(&state))
+	state.0.shrink().all(|state| {
+		state.as_ref().validate().is_ok() && restricter::<_, generics>::restriction_holds(&state)
+	})
 }
 
 #[quickcheck]
@@ -66,7 +65,7 @@ fn shrink_no_cf_simple_ops_no_reads_limited_ops_2_2(
 ) -> bool
 {
 	state.0.shrink().all(|state| {
-		state.as_ref().valid()
+		state.as_ref().validate().is_ok()
 			&& NoCF::restriction_holds(&state)
 			&& SimpleOps::restriction_holds(&state)
 			&& NoReads::restriction_holds(&state)

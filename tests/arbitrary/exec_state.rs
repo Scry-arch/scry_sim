@@ -9,7 +9,7 @@ use scry_sim::{
 #[quickcheck]
 fn arb_state_is_valid(state: ExecState) -> bool
 {
-	state.valid()
+	state.validate().is_ok()
 }
 
 /// Tests that any frame with the return address not 2-byte aligned is not
@@ -19,7 +19,7 @@ fn state_unaligned_address(mut state: ExecState) -> bool
 {
 	// Assume address is already aligned, unalign it.
 	state.address += 1;
-	!state.valid()
+	state.validate().is_err()
 }
 
 /// Tests that any state with an invalid frame is invalid
@@ -46,7 +46,7 @@ fn state_invalid_frame(
 		state.frame_stack.insert(insert_idx - 1, frame);
 	}
 
-	!state.valid()
+	state.validate().is_err()
 }
 
 /// Test that all arbitrary execution state restricters produce valid states
@@ -59,7 +59,7 @@ fn state_invalid_frame(
 #[quickcheck]
 fn test_name(state: restricter<ExecState>) -> bool
 {
-	state.as_ref().valid() && restricter::restriction_holds(&state)
+	state.as_ref().validate().is_ok() && restricter::restriction_holds(&state)
 }
 
 #[quickcheck]

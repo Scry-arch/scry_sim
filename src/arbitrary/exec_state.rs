@@ -139,6 +139,51 @@ impl OperandState<usize>
 	}
 }
 
+impl Arbitrary for Block
+{
+	fn arbitrary(g: &mut Gen) -> Self
+	{
+		loop
+		{
+			let address = usize::arbitrary(g);
+			let size = usize::arbitrary(g) % (64 * g.size());
+
+			let result = Self { address, size };
+
+			if result.validate().is_ok()
+			{
+				return result;
+			}
+		}
+	}
+
+	fn shrink(&self) -> Box<dyn Iterator<Item = Self>>
+	{
+		let clone = self.clone();
+		// Shrink size
+		Box::new(
+			self.size
+				.shrink()
+				.filter(|shrunk| *shrunk > 0)
+				.map(move |shrunk| {
+					Self {
+						address: clone.address,
+						size: shrunk,
+					}
+				})
+				.chain(
+					// Shrink address
+					self.address.shrink().map(move |address| {
+						Self {
+							address,
+							size: clone.size,
+						}
+					}),
+				),
+		)
+	}
+}
+
 impl Arbitrary for StackFrame
 {
 	fn arbitrary(g: &mut Gen) -> Self
@@ -154,10 +199,7 @@ impl Arbitrary for StackFrame
 		{
 			loop
 			{
-				let address = usize::arbitrary(g);
-				let size = usize::arbitrary(g) % (64 * g.size());
-
-				frame.blocks.push(Block { address, size });
+				frame.blocks.push(Arbitrary::arbitrary(g));
 
 				if frame.validate().is_ok()
 				{
@@ -192,12 +234,10 @@ impl Arbitrary for StackFrame
 			// Shrink by reducing block size
 			result.extend(
 				self.blocks[i]
-					.size
 					.shrink()
-					.filter(|s| *s > 0)
-					.map(|new_size| {
+					.map(|new_block| {
 						let mut clone = self.clone();
-						clone.blocks[i].size = new_size;
+						clone.blocks[i] = new_block;
 						clone
 					})
 					.filter(|shrunk| shrunk.validate().is_ok()),
@@ -219,7 +259,6 @@ impl Arbitrary for StackFrame
 				clone.validate().unwrap();
 				clone
 			}))
-			// TODO: Shrink addresses
 		}
 
 		Box::new(result.into_iter())
@@ -506,21 +545,61 @@ impl Arbitrary for ExecState
 {
 	fn arbitrary(g: &mut Gen) -> Self
 	{
-		// We limit the call depth for performance reasons
-		let stack_len = usize::arbitrary(g) % 5;
-		let mut stack = Vec::with_capacity(stack_len);
-		for _ in 0..stack_len
-		{
-			stack.push(Arbitrary::arbitrary(g));
-		}
-
-		Self {
-			// Ensure that the address may be increased by 2 (after executing an instructino)
+		let mut result = Self {
+			// Ensure that the address may be increased by 2 (after executing an instruction)
 			// without causing overflow
 			address: InstrAddr::arbitrary(g).0 % (usize::MAX - 3),
 			frame: Arbitrary::arbitrary(g),
-			frame_stack: stack,
+			frame_stack: vec![],
+			stack_buffer: vec![],
+		};
+		assert!(result.validate().is_ok());
+
+		// We limit the call depth for performance reasons
+		let stack_len = usize::arbitrary(g) % 2;
+
+		// Create call frames
+		for _ in 0..stack_len
+		{
+			loop
+			{
+				result.frame_stack.push(Arbitrary::arbitrary(g));
+
+				// Check new frame does not clash with others
+				if result.validate().is_ok()
+				{
+					break;
+				}
+				else
+				{
+					// Try again
+					result.frame_stack.pop();
+				}
+			}
 		}
+
+		// Create stack buffers
+		for _ in 0..stack_len
+		{
+			loop
+			{
+				result.stack_buffer.push(Arbitrary::arbitrary(g));
+
+				// Check new frame does not clash with others
+				if result.validate().is_ok()
+				{
+					break;
+				}
+				else
+				{
+					// Try again
+					result.stack_buffer.pop();
+				}
+			}
+		}
+
+		assert!(result.validate().is_ok());
+		result
 	}
 
 	fn shrink(&self) -> Box<dyn Iterator<Item = Self>>
@@ -535,11 +614,16 @@ impl Arbitrary for ExecState
 		}));
 
 		// Shrink first frame
-		result.extend(self.frame.shrink().map(|new_frame| {
-			let mut clone = self.clone();
-			clone.frame = new_frame;
-			clone
-		}));
+		result.extend(
+			self.frame
+				.shrink()
+				.map(|new_frame| {
+					let mut clone = self.clone();
+					clone.frame = new_frame;
+					clone
+				})
+				.filter(|new_frame| new_frame.validate().is_ok()),
+		);
 
 		// Remove first frame
 		if self.frame_stack.len() > 0
@@ -553,11 +637,16 @@ impl Arbitrary for ExecState
 		for (idx, frame) in self.frame_stack.iter().enumerate()
 		{
 			// Shrink frames
-			result.extend(frame.shrink().map(|f| {
-				let mut clone = self.clone();
-				*clone.frame_stack.get_mut(idx).unwrap() = f;
-				clone
-			}));
+			result.extend(
+				frame
+					.shrink()
+					.map(|f| {
+						let mut clone = self.clone();
+						*clone.frame_stack.get_mut(idx).unwrap() = f;
+						clone
+					})
+					.filter(|new_frame| new_frame.validate().is_ok()),
+			);
 			// Remove frames
 			let mut clone = self.clone();
 			clone.frame_stack.remove(idx);
