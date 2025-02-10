@@ -72,3 +72,14 @@ fn shrink_no_cf_simple_ops_no_reads_limited_ops_2_2(
 			&& LimitedOps::<_, 2, 2>::restriction_holds(&state)
 	})
 }
+
+#[quickcheck]
+#[ignore]
+fn shrink_no_cf_limited_ops_0_0(state: NoShrink<NoCF<LimitedOps<ExecState, 0, 0>>>) -> bool
+{
+	state.0.shrink().all(|state| {
+		state.as_ref().validate().is_ok()
+			&& NoCF::restriction_holds(&state)
+			&& LimitedOps::<_, 0, 0>::restriction_holds(&state)
+	})
+}

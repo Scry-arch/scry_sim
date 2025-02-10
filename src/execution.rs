@@ -3,7 +3,7 @@ use crate::{
 	data::{Operand, OperandStack, ProgramStack},
 	memory::Memory,
 	value::Value,
-	Block, ExecState, MemError, MetricTracker, Scalar, ValueType,
+	Block, ExecState, MemError, Metric, MetricTracker, Scalar, ValueType,
 };
 use byteorder::{ByteOrder, LittleEndian};
 use duplicate::substitute;
@@ -303,6 +303,51 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 				},
 				NoOp =>
 				{
+					self.discard_ready_list(tracker);
+				},
+				StackRes(reserving, primary, amount) =>
+				{
+					assert!(reserving && !primary, "TODO");
+					assert_eq!(self.operands.ready_peek().count(), 0, "TODO");
+					assert!(!self.stack_buffer.is_empty(), "TODO");
+
+					let reserve_bytes = 2usize.pow(amount.value as u32);
+
+					if reserving
+					{
+						// Check stack buffer top has free block
+						if self.stack_buffer.last().unwrap().size >= reserve_bytes
+						{
+							// Remove from buffer
+							let free_block = self.stack_buffer.pop().unwrap();
+							if free_block.size != reserve_bytes
+							{
+								// Return any remaining free block to the buffer
+								self.stack_buffer.push(Block {
+									address: free_block.address + reserve_bytes,
+									size: free_block.size - reserve_bytes,
+								});
+							}
+
+							// Add reserved to stack frame
+							self.stack.top_mut().blocks.push(Block {
+								address: free_block.address,
+								size: reserve_bytes,
+							});
+
+							tracker.add_stat(Metric::StackReserveTotal, 1);
+							tracker.add_stat(Metric::StackReserveTotalBytes, reserve_bytes);
+						}
+						else
+						{
+							todo!()
+						}
+					}
+					else
+					{
+						todo!()
+					}
+
 					self.discard_ready_list(tracker);
 				},
 				instr =>

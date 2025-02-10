@@ -13,6 +13,7 @@ mod control_flow;
 mod data_flow;
 mod load;
 mod pick;
+mod stack;
 mod store;
 
 /// Used to generate arbitrary instruction that are supported by the
@@ -64,8 +65,8 @@ impl Arbitrary for SupportedInstruction
 struct ConsumingDiscarding(Instruction);
 impl ConsumingDiscarding
 {
-	// Returns whether an operand with the given index in the ready list
-	// is discarded by this instruction.
+	/// Returns whether an operand with the given index in the ready list
+	/// is discarded by this instruction.
 	fn discards(&self, idx: usize) -> bool
 	{
 		use Instruction::*;

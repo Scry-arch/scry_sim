@@ -37,6 +37,12 @@ pub enum Metric
 	/// Operands reordered from one operand list into another
 	ReorderedOperands,
 
+	// Stack
+	/// Total number of total stack frame reserves executed
+	StackReserveTotal,
+	/// Total bytes reserved for the total stack frame
+	StackReserveTotalBytes,
+
 	// Memory
 	/// Instructions read from memory
 	InstructionReads,
