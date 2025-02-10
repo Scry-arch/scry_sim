@@ -307,45 +307,100 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 				},
 				StackRes(reserving, primary, amount) =>
 				{
-					assert!(reserving && !primary, "TODO");
-					assert_eq!(self.operands.ready_peek().count(), 0, "TODO");
-					assert!(!self.stack_buffer.is_empty(), "TODO");
+					assert!(!primary, "TODO: Missing primary support");
+					assert_eq!(
+						self.operands.ready_peek().count(),
+						0,
+						"TODO: reserve/free with operant"
+					);
 
 					let reserve_bytes = 2usize.pow(amount.value as u32);
 
 					if reserving
 					{
-						// Check stack buffer top has free block
-						if self.stack_buffer.last().unwrap().size >= reserve_bytes
+						assert!(!self.stack_buffer.is_empty(), "TODO: Reserve empty buffer");
+						assert!(
+							self.stack_buffer.last().unwrap().size >= reserve_bytes,
+							"TODO: Reserve inadequate buffer"
+						);
+						// Remove from buffer
+						let free_block = self.stack_buffer.pop().unwrap();
+						if free_block.size != reserve_bytes
 						{
-							// Remove from buffer
-							let free_block = self.stack_buffer.pop().unwrap();
-							if free_block.size != reserve_bytes
-							{
-								// Return any remaining free block to the buffer
-								self.stack_buffer.push(Block {
-									address: free_block.address + reserve_bytes,
-									size: free_block.size - reserve_bytes,
-								});
-							}
-
-							// Add reserved to stack frame
-							self.stack.top_mut().blocks.push(Block {
-								address: free_block.address,
-								size: reserve_bytes,
+							// Return any remaining free block to the buffer
+							self.stack_buffer.push(Block {
+								address: free_block.address + reserve_bytes,
+								size: free_block.size - reserve_bytes,
 							});
+						}
 
-							tracker.add_stat(Metric::StackReserveTotal, 1);
-							tracker.add_stat(Metric::StackReserveTotalBytes, reserve_bytes);
-						}
-						else
-						{
-							todo!()
-						}
+						// Add reserved to stack frame
+						self.stack.top_mut().blocks.push(Block {
+							address: free_block.address,
+							size: reserve_bytes,
+						});
+
+						tracker.add_stat(Metric::StackReserveTotal, 1);
+						tracker.add_stat(Metric::StackReserveTotalBytes, reserve_bytes);
 					}
 					else
 					{
-						todo!()
+						assert!(
+							self.stack.top().total_size() >= reserve_bytes,
+							"TODO: support stack free exception"
+						);
+
+						let mut buffer_block = |block: Block| {
+							if self
+								.stack_buffer
+								.last()
+								.map(|b| block.address + block.size == b.address)
+								.unwrap_or(false)
+							{
+								// If the freed block is connected to the last buffer block, merge
+								// them
+								let top = self.stack_buffer.last_mut().unwrap();
+								*top = Block {
+									address: block.address,
+									size: top.size + block.size,
+								};
+							}
+							else
+							{
+								self.stack_buffer.push(block);
+							}
+						};
+
+						let mut not_freed = reserve_bytes;
+						while not_freed != 0
+						{
+							let top = self.stack.top_mut();
+
+							if top.blocks.last().unwrap().size <= not_freed
+							{
+								// Freeing more that the top of the stack
+
+								let block = top.blocks.pop().unwrap();
+								not_freed -= block.size;
+
+								buffer_block(block);
+							}
+							else
+							{
+								// Freeing less that the size of the top of the stack
+								let top = top.blocks.last_mut().unwrap();
+								top.size -= not_freed;
+
+								buffer_block(Block {
+									address: top.address + top.size,
+									size: not_freed,
+								});
+								break;
+							}
+						}
+
+						tracker.add_stat(Metric::StackFreeTotal, 1);
+						tracker.add_stat(Metric::StackFreeTotalBytes, reserve_bytes);
 					}
 
 					self.discard_ready_list(tracker);

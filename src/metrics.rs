@@ -42,6 +42,10 @@ pub enum Metric
 	StackReserveTotal,
 	/// Total bytes reserved for the total stack frame
 	StackReserveTotalBytes,
+	/// Total number of total stack frame frees executed
+	StackFreeTotal,
+	/// Total bytes freed from the total stack frame
+	StackFreeTotalBytes,
 
 	// Memory
 	/// Instructions read from memory
