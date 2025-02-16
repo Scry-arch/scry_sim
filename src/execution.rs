@@ -3,7 +3,7 @@ use crate::{
 	data::{Operand, OperandStack, ProgramStack},
 	memory::Memory,
 	value::Value,
-	Block, ExecState, MemError, Metric, MetricTracker, Scalar, ValueType,
+	ExecState, MemError, Metric, MetricTracker, Scalar, ValueType,
 };
 use byteorder::{ByteOrder, LittleEndian};
 use duplicate::substitute;
@@ -30,7 +30,7 @@ pub struct Executor<M: Memory, B: BorrowMut<M>>
 	control: ControlFlow,
 	operands: OperandStack,
 	stack: ProgramStack,
-	stack_buffer: Vec<Block>,
+	stack_buffer: usize,
 	memory: B,
 	phantom: PhantomData<M>,
 }
@@ -45,7 +45,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 			operands: OperandStack::new(ready_ops),
 			control: ControlFlow::new(start_addr),
 			stack: ProgramStack::new(Default::default()),
-			stack_buffer: Vec::new(),
+			stack_buffer: 0,
 			memory,
 			phantom: PhantomData,
 		}
@@ -318,27 +318,16 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 
 					if reserving
 					{
-						assert!(!self.stack_buffer.is_empty(), "TODO: Reserve empty buffer");
+						assert!(self.stack_buffer > 0, "TODO: Reserve empty buffer");
 						assert!(
-							self.stack_buffer.last().unwrap().size >= reserve_bytes,
+							self.stack_buffer >= reserve_bytes,
 							"TODO: Reserve inadequate buffer"
 						);
 						// Remove from buffer
-						let free_block = self.stack_buffer.pop().unwrap();
-						if free_block.size != reserve_bytes
-						{
-							// Return any remaining free block to the buffer
-							self.stack_buffer.push(Block {
-								address: free_block.address + reserve_bytes,
-								size: free_block.size - reserve_bytes,
-							});
-						}
+						self.stack_buffer -= reserve_bytes;
 
 						// Add reserved to stack frame
-						self.stack.top_mut().blocks.push(Block {
-							address: free_block.address,
-							size: reserve_bytes,
-						});
+						self.stack.top_mut().block.size += reserve_bytes;
 
 						tracker.add_stat(Metric::StackReserveTotal, 1);
 						tracker.add_stat(Metric::StackReserveTotalBytes, reserve_bytes);
@@ -346,58 +335,14 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 					else
 					{
 						assert!(
-							self.stack.top().total_size() >= reserve_bytes,
+							self.stack.top().block.size >= reserve_bytes,
 							"TODO: support stack free exception"
 						);
+						// Add to buffer
+						self.stack_buffer += reserve_bytes;
 
-						let mut buffer_block = |block: Block| {
-							if self
-								.stack_buffer
-								.last()
-								.map(|b| block.address + block.size == b.address)
-								.unwrap_or(false)
-							{
-								// If the freed block is connected to the last buffer block, merge
-								// them
-								let top = self.stack_buffer.last_mut().unwrap();
-								*top = Block {
-									address: block.address,
-									size: top.size + block.size,
-								};
-							}
-							else
-							{
-								self.stack_buffer.push(block);
-							}
-						};
-
-						let mut not_freed = reserve_bytes;
-						while not_freed != 0
-						{
-							let top = self.stack.top_mut();
-
-							if top.blocks.last().unwrap().size <= not_freed
-							{
-								// Freeing more that the top of the stack
-
-								let block = top.blocks.pop().unwrap();
-								not_freed -= block.size;
-
-								buffer_block(block);
-							}
-							else
-							{
-								// Freeing less that the size of the top of the stack
-								let top = top.blocks.last_mut().unwrap();
-								top.size -= not_freed;
-
-								buffer_block(Block {
-									address: top.address + top.size,
-									size: not_freed,
-								});
-								break;
-							}
-						}
+						// Add reserved to stack frame
+						self.stack.top_mut().block.size -= reserve_bytes;
 
 						tracker.add_stat(Metric::StackFreeTotal, 1);
 						tracker.add_stat(Metric::StackFreeTotalBytes, reserve_bytes);

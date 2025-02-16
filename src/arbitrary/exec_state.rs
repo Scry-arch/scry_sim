@@ -150,7 +150,7 @@ impl Arbitrary for Block
 
 			let result = Self { address, size };
 
-			if result.validate().is_ok()
+			if result.validate::<false>().is_ok()
 			{
 				return result;
 			}
@@ -189,34 +189,14 @@ impl Arbitrary for StackFrame
 	fn arbitrary(g: &mut Gen) -> Self
 	{
 		let mut frame = StackFrame {
-			blocks: Vec::new(),
+			block: Arbitrary::arbitrary(g),
 			primary_size: 0,
 		};
 
-		// add blocks
-		let nr_blocks = u8::arbitrary(g) % g.size() as u8;
-		for _ in 0..nr_blocks
-		{
-			loop
-			{
-				frame.blocks.push(Arbitrary::arbitrary(g));
-
-				if frame.validate().is_ok()
-				{
-					break;
-				}
-				else
-				{
-					// try again
-					frame.blocks.pop();
-				}
-			}
-		}
-
 		// decide on primary size
-		if frame.total_size() > 0
+		if frame.block.size > 0
 		{
-			frame.primary_size = usize::arbitrary(g) % frame.total_size();
+			frame.primary_size = usize::arbitrary(g) % frame.block.size;
 		}
 
 		// make sure is valid frame
@@ -227,41 +207,31 @@ impl Arbitrary for StackFrame
 
 	fn shrink(&self) -> Box<dyn Iterator<Item = Self>>
 	{
-		let mut result = Vec::new();
-
-		for i in 0..self.blocks.len()
-		{
+		let clone = self.clone();
+		Box::new(
 			// Shrink by reducing block size
-			result.extend(
-				self.blocks[i]
-					.shrink()
-					.map(|new_block| {
-						let mut clone = self.clone();
-						clone.blocks[i] = new_block;
-						clone
-					})
-					.filter(|shrunk| shrunk.validate().is_ok()),
-			);
-
-			// Shrink by removing a block
-			let mut clone = self.clone();
-			clone.blocks.remove(i);
-			if clone.validate().is_ok()
-			{
-				result.push(clone);
-			}
+			self.block
+			.shrink()
+			.map(move|new_block| {
+				let mut clone = clone.clone();
+				clone.block = new_block;
+				clone
+			})
+			.filter(|shrunk| shrunk.validate().is_ok())
 
 			// Shrink by reducing primary size
-			let clone = self.clone();
-			result.extend(self.primary_size.shrink().map(move |new_size| {
-				let mut clone = clone.clone();
-				clone.primary_size = new_size;
-				clone.validate().unwrap();
-				clone
-			}))
-		}
-
-		Box::new(result.into_iter())
+			.chain(
+				{
+					let clone = self.clone();
+					self.primary_size.shrink().map(move |new_size| {
+						let mut clone = clone.clone();
+						clone.primary_size = new_size;
+						clone.validate().unwrap();
+						clone
+					})
+				}
+			),
+		)
 	}
 }
 
@@ -551,12 +521,13 @@ impl Arbitrary for ExecState
 			address: InstrAddr::arbitrary(g).0 % (usize::MAX - 3),
 			frame: Arbitrary::arbitrary(g),
 			frame_stack: vec![],
-			stack_buffer: vec![],
+			stack_buffer: usize::arbitrary(g),
 		};
 		assert!(result.validate().is_ok());
 
 		// We limit the call depth for performance reasons
 		let stack_len = usize::arbitrary(g) % 2;
+		let mut next_addr = result.frame.stack.block.address + result.frame.stack.block.size;
 
 		// Create call frames
 		for _ in 0..stack_len
@@ -564,36 +535,19 @@ impl Arbitrary for ExecState
 			loop
 			{
 				result.frame_stack.push(Arbitrary::arbitrary(g));
+				result.frame_stack.last_mut().unwrap().stack.block.address = next_addr;
 
 				// Check new frame does not clash with others
 				if result.validate().is_ok()
 				{
+					let block = &result.frame_stack.last().unwrap().stack.block;
+					next_addr = block.address + block.size;
 					break;
 				}
 				else
 				{
 					// Try again
 					result.frame_stack.pop();
-				}
-			}
-		}
-
-		// Create stack buffers
-		for _ in 0..stack_len
-		{
-			loop
-			{
-				result.stack_buffer.push(Arbitrary::arbitrary(g));
-
-				// Check new frame does not clash with others
-				if result.validate().is_ok()
-				{
-					break;
-				}
-				else
-				{
-					// Try again
-					result.stack_buffer.pop();
 				}
 			}
 		}
@@ -631,26 +585,6 @@ impl Arbitrary for ExecState
 			let mut clone = self.clone();
 			clone.frame = clone.frame_stack.remove(0);
 			result.push(clone);
-		}
-
-		// Shrink/remove other frames
-		for (idx, frame) in self.frame_stack.iter().enumerate()
-		{
-			// Shrink frames
-			result.extend(
-				frame
-					.shrink()
-					.map(|f| {
-						let mut clone = self.clone();
-						*clone.frame_stack.get_mut(idx).unwrap() = f;
-						clone
-					})
-					.filter(|new_frame| new_frame.validate().is_ok()),
-			);
-			// Remove frames
-			let mut clone = self.clone();
-			clone.frame_stack.remove(idx);
-			result.push(clone)
 		}
 
 		Box::new(result.into_iter())

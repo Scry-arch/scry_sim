@@ -140,15 +140,8 @@ pub type OperandQueue = HashMap<usize, OperandList>;
 #[derive(Debug, Eq, PartialEq, Clone, Default)]
 pub struct StackFrame
 {
-	/// Memory blocks comprising the stack.
-	///
-	/// 0. The address of the block.
-	/// 0. The size of the block in bytes.
-	///
-	/// Lower index block also has lower index in the stack frame.
-	/// [0].0 is therefore the base address of the frame.
-	/// If empty, no memory is reserved for the stack frame.
-	pub blocks: Vec<Block>,
+	/// Memory block comprising the stack.
+	pub block: Block,
 
 	/// The size of the primary stack frame in bytes.
 	pub primary_size: usize,
@@ -159,48 +152,23 @@ impl StackFrame
 	/// message
 	pub fn validate(&self) -> Result<(), &str>
 	{
-		if self.blocks.iter().any(|b| b.size == 0)
-		{
-			return Err("Stack frame block has size 0");
-		}
-
-		if self.total_size() < self.primary_size
+		if self.block.size < self.primary_size
 		{
 			return Err("Primary stack frame is larger than the whole stack frame");
 		}
 
-		if self
-			.blocks
-			.iter()
-			.any(|b| b.address.checked_add(b.size).is_none())
+		if self.block.address.checked_add(self.block.size).is_none()
 		{
 			return Err("Block size overflows address space");
 		}
 
-		for (idx, b) in self.blocks.iter().enumerate()
-		{
-			if self
-				.blocks
-				.iter()
-				.skip(idx + 1)
-				.any(|b2| Block::overlap(b, b2))
-			{
-				return Err("Overlapping stack frame blocks");
-			}
-		}
 		Ok(())
-	}
-
-	/// The total reserved size of the stack frame.
-	pub fn total_size(&self) -> usize
-	{
-		self.blocks.iter().fold(0, |c, b| c + b.size)
 	}
 
 	/// The size of the secondary stack frame.
 	pub fn secondary_size(&self) -> usize
 	{
-		self.total_size() - self.primary_size
+		self.block.size - self.primary_size
 	}
 
 	/// Returns whether the primary stack frame can be increased by the given
@@ -210,7 +178,7 @@ impl StackFrame
 	/// amount.
 	pub fn can_increase_primary(&self, amount: usize) -> bool
 	{
-		(self.primary_size + amount) >= self.total_size()
+		(self.primary_size + amount) >= self.block.size
 	}
 
 	/// Increases the size of the primary frame by the given amount.
@@ -236,17 +204,18 @@ impl StackFrame
 		self.primary_size += amount;
 	}
 
-	/// Adds the given block to the frame.
+	/// Increases the size of the stack.
 	///
 	/// If `primary=true`, then the added size is reserved to the primary stack.
 	/// Otherwise, to the secondary.
-	pub fn add_block(&mut self, block: Block, primary: bool)
+	pub fn add_block(&mut self, amount: usize, primary: bool)
 	{
-		self.blocks.push(block);
+		assert!(amount > 0);
+		self.block.size += amount;
 
 		if primary
 		{
-			self.primary_size += self.blocks.last().unwrap().size;
+			self.primary_size += amount;
 		}
 	}
 
@@ -256,32 +225,14 @@ impl StackFrame
 	/// (before the call), then the primary size is decreased to fit.
 	pub fn release_bytes(&mut self, amount: usize)
 	{
-		assert!(
-			self.total_size() >= amount,
-			"Releasing more than frame size."
-		);
+		assert!(amount > 0);
+		assert!(self.block.size >= amount, "Releasing more than frame size.");
 
-		let mut released = 0;
+		self.block.size -= amount;
 
-		while released < amount
+		if self.primary_size < self.block.size
 		{
-			let remaining = amount - released;
-
-			if remaining >= self.blocks.last().unwrap().size
-			{
-				let popped_amount = self.blocks.pop().unwrap().size;
-				released += popped_amount;
-			}
-			else
-			{
-				self.blocks.last_mut().unwrap().size -= remaining;
-			}
-		}
-		assert_eq!(released, amount);
-
-		if self.primary_size < self.total_size()
-		{
-			self.primary_size = self.total_size();
+			self.primary_size = self.block.size;
 		}
 	}
 
@@ -300,129 +251,41 @@ impl StackFrame
 		let scalar_size = 1 << scalar_pow2;
 		let frame_offset = base_offset + (index * scalar_size);
 
-		// Now need to find the block containing that offset
-		self.blocks
-			.iter()
-			.fold(Err(frame_offset), |offset, b| {
-				if let Err(offset) = offset
-				{
-					if b.size < offset
-					{
-						Err(offset - b.size)
-					}
-					else
-					{
-						Ok(b.address)
-					}
-				}
-				else
-				{
-					offset
-				}
-			})
-			.ok()
-	}
-
-	/// Get the index of the block containing the split between the primary and
-	/// secondary stack frames. Also returns the size of the __secondary__
-	/// frame in that block.
-	///
-	/// If the secondary frame is empty, returns None.
-	fn get_split(&self) -> Option<(usize, usize)>
-	{
-		self.blocks
-			.iter()
-			.enumerate()
-			.rev()
-			.fold(Err(self.secondary_size()), |remaining, (idx, b)| {
-				if let Err(remaining) = remaining
-				{
-					if remaining > b.size
-					{
-						Err(remaining - b.size)
-					}
-					else
-					{
-						Ok((idx, remaining))
-					}
-				}
-				else
-				{
-					remaining
-				}
-			})
-			.ok()
+		if frame_offset >= self.block.size
+		{
+			None
+		}
+		else
+		{
+			Some(self.block.address + frame_offset)
+		}
 	}
 
 	/// Returns the stack frame that would result from performing a call from
 	/// this stack frame.
 	pub fn frame_call(&mut self) -> StackFrame
 	{
-		if self.secondary_size() > 0
-		{
-			let (block_idx, size) = self.get_split().unwrap();
+		let new_block = Self {
+			block: Block {
+				address: self.get_address(0, self.primary_size, true).unwrap(),
+				size: self.secondary_size(),
+			},
+			primary_size: self.secondary_size(),
+		};
 
-			let first_block = &self.blocks[block_idx];
-			let mut new_blocks = vec![Block {
-				address: first_block.address + (first_block.size - size),
-				size,
-			}];
-
-			self.blocks
-				.iter()
-				.skip(block_idx + 1)
-				.for_each(|b| new_blocks.push(b.clone()));
-
-			Self {
-				blocks: new_blocks,
-				primary_size: self.secondary_size(),
-			}
-		}
-		else
-		{
-			Self {
-				blocks: vec![],
-				primary_size: 0,
-			}
-		}
+		self.block.size -= self.secondary_size();
+		new_block
 	}
 
 	/// Updates this stack frame based on a return from the given stack frame.
 	pub fn frame_return(&mut self, callee_frame: StackFrame)
 	{
-		// First, drop the secondary frame blocks
-		if let Some((split_idx, secondary_size)) = self.get_split()
-		{
-			self.blocks.truncate(split_idx + 1);
-			self.blocks.last_mut().unwrap().size -= secondary_size;
-		}
-
-		// Now add the callee's primary frame blocks
-		if callee_frame.primary_size > 0
-		{
-			assert!(!callee_frame.blocks.is_empty());
-			let (split_idx, secondary_size) = callee_frame.get_split().unwrap_or((
-				callee_frame.blocks.len() - 1,
-				callee_frame.blocks.last().unwrap().size,
-			));
-
-			// Add all the full blocks
-			callee_frame
-				.blocks
-				.iter()
-				.take(split_idx)
-				.for_each(|b| self.blocks.push(b.clone()));
-			// Add the potentially partial last block
-			self.blocks.push(Block {
-				address: callee_frame.blocks[split_idx].address,
-				size: callee_frame.blocks[split_idx].size - secondary_size,
-			});
-		}
+		self.block.size += callee_frame.secondary_size();
 	}
 }
 
 /// References a block of memory with its base address and the size in bytes.
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, Default)]
 pub struct Block
 {
 	pub address: usize,
@@ -430,14 +293,14 @@ pub struct Block
 }
 impl Block
 {
-	pub fn validate(&self) -> Result<(), String>
+	pub fn validate<const ALLOW_EMPTY: bool>(&self) -> Result<(), String>
 	{
 		if self.address.checked_add(self.size).is_none()
 		{
 			return Err("Block size overflow".to_string());
 		}
 
-		if self.size == 0
+		if self.size == 0 && !ALLOW_EMPTY
 		{
 			return Err("Block size is 0".to_string());
 		}
@@ -671,8 +534,10 @@ pub struct ExecState
 	/// caller of the caller and so on. May be empty.
 	pub frame_stack: Vec<CallFrameState>,
 
-	/// Free blocks that may be used to reserve stack frames
-	pub stack_buffer: Vec<Block>,
+	/// Number of free bytes available for the program stack.
+	///
+	/// The base address of the whole stack is given in the base stack frame.
+	pub stack_buffer: usize,
 }
 impl ExecState
 {
@@ -695,14 +560,26 @@ impl ExecState
 		}
 
 		// Check no stack blocks overlap
-		if let Some((b1, b2)) = Block::any_overlaps(
-			frames
-				.flat_map(|f| f.stack.blocks.iter())
-				.chain(self.stack_buffer.iter()),
-		)
-		{
-			return Err(format!("Stack blocks overlap: {:?},  {:?}", b1, b2));
-		}
+		self.frame_stack.iter().fold(
+			Ok(self.frame.stack.block.address + self.frame.stack.block.size),
+			|addr: Result<_, String>, frame| {
+				if let Ok(addr) = addr
+				{
+					if addr != frame.stack.block.address
+					{
+						return Err("Non contiguous stack frame addresses".into());
+					}
+					else
+					{
+						Ok(frame.stack.block.address + frame.stack.block.size)
+					}
+				}
+				else
+				{
+					addr
+				}
+			},
+		)?;
 
 		// Check address alignment
 		if self.address % 2 != 0
