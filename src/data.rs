@@ -27,16 +27,16 @@ use std::{
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Operand
 {
-	op: Rc<RefCell<OperandState<(usize, usize, ValueType)>>>,
+	op: Rc<RefCell<OperandState<(bool, usize, usize, ValueType)>>>,
 }
 impl Operand
 {
 	/// Constructs an operand that needs to read from the given address the
 	/// given amount of scalars of the given type.
-	pub fn read_typed(address: usize, len: usize, typ: ValueType) -> Self
+	pub fn read_typed(stack_read: bool, address: usize, len: usize, typ: ValueType) -> Self
 	{
 		Self {
-			op: Rc::new(OperandState::MustRead((address, len, typ)).into()),
+			op: Rc::new(OperandState::MustRead((stack_read, address, len, typ)).into()),
 		}
 	}
 
@@ -46,7 +46,7 @@ impl Operand
 	/// and type to read from memory. The function performs the read and returns
 	/// the resulting value, which is saved in the operand and a reference to it
 	/// returned. If the function fails, the error is returned.
-	pub(crate) fn get_value_or<E, F: FnOnce(usize, usize, ValueType) -> Result<Value, E>>(
+	pub(crate) fn get_value_or<E, F: FnOnce(bool, usize, usize, ValueType) -> Result<Value, E>>(
 		&mut self,
 		f: F,
 	) -> Result<impl '_ + Deref<Target = Value>, E>
@@ -56,9 +56,9 @@ impl Operand
 			let mut ref_mut = (*self.op).borrow_mut();
 			match *ref_mut
 			{
-				OperandState::MustRead((addr, len, typ)) =>
+				OperandState::MustRead((stack_read, addr, len, typ)) =>
 				{
-					let new_value = f(addr, len, typ)?;
+					let new_value = f(stack_read, addr, len, typ)?;
 					*ref_mut = OperandState::Ready(new_value)
 				},
 				_ => (),
@@ -157,7 +157,7 @@ impl OperandStack
 				self.stack.ready.pop_front().and_then(|mut op: Operand| {
 					let mut err = None;
 					let val = op
-						.get_value_or::<(), _>(|addr, len, typ| {
+						.get_value_or::<(), _>(|stack_read, addr, len, typ| {
 							let mut v = Value::new_nar_typed(typ, 0);
 							err = self.mem.read_data(addr, &mut v, len, self.tracker).err();
 							Ok(v)
@@ -398,7 +398,7 @@ impl<'a> From<&'a ExecState> for OperandStack
 				.reads
 				.clone()
 				.into_iter()
-				.map(|(addr, len, typ)| Operand::read_typed(addr, len, typ))
+				.map(|(stack_read, addr, len, typ)| Operand::read_typed(stack_read, addr, len, typ))
 				.collect();
 			frame
 				.op_queue

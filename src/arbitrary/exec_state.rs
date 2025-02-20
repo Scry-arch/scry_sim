@@ -113,7 +113,7 @@ impl OperandState<usize>
 	///
 	/// Any generated MustRead operand will either refer to a read in the given
 	/// list, or add a new read to the list which is then referenced
-	pub fn arbitrary(g: &mut Gen, reads: &mut Vec<(usize, usize, ValueType)>) -> Self
+	pub fn arbitrary(g: &mut Gen, reads: &mut Vec<(bool, usize, usize, ValueType)>) -> Self
 	{
 		match u8::arbitrary(g) % 100
 		{
@@ -126,6 +126,7 @@ impl OperandState<usize>
 					{
 						// New int not dependent on others
 						reads.push((
+							Arbitrary::arbitrary(g),
 							Arbitrary::arbitrary(g),
 							SmallInt::<usize>::arbitrary(g).0 + 1,
 							Arbitrary::arbitrary(g),
@@ -461,9 +462,9 @@ impl Arbitrary for CallFrameState
 						}
 						duplicate!{[
 								variant		tuple_idx	shrunk_filter 	update_to;
-								[ReadsAddr]	[0]			[|_|true]		[ReadsLen(*read_idx)];
-								[ReadsLen]	[1]			[|s|*s>0]		[ReadsTyp(*read_idx)];
-								[ReadsTyp]	[2]			[|_|true]		[ReadsAddr(*read_idx+1)];
+								[ReadsAddr]	[1]			[|_|true]		[ReadsLen(*read_idx)];
+								[ReadsLen]	[2]			[|s|*s>0]		[ReadsTyp(*read_idx)];
+								[ReadsTyp]	[3]			[|_|true]		[ReadsAddr(*read_idx+1)];
 							]
 							variant(read_idx) => {
 								if let Some(read_tup) = self.original.reads.get(*read_idx) {
@@ -896,8 +897,8 @@ impl<T: Restriction> Restriction for SimpleOps<T>
 				OperandState::MustRead(idx) =>
 				{
 					(
-						inner.as_ref().frame.reads[*idx].1,
 						inner.as_ref().frame.reads[*idx].2,
+						inner.as_ref().frame.reads[*idx].3,
 					)
 				},
 				OperandState::Ready(v) => (v.len(), v.value_type()),
@@ -907,8 +908,8 @@ impl<T: Restriction> Restriction for SimpleOps<T>
 				{
 					OperandState::MustRead(idx) =>
 					{
-						inner.as_ref().frame.reads[*idx].1 == len
-							&& inner.as_ref().frame.reads[*idx].2 == typ
+						inner.as_ref().frame.reads[*idx].2 == len
+							&& inner.as_ref().frame.reads[*idx].3 == typ
 					},
 					OperandState::Ready(v) =>
 					{
@@ -934,8 +935,8 @@ impl<T: Restriction> Restriction for SimpleOps<T>
 				OperandState::MustRead(idx) =>
 				{
 					(
-						state.as_ref().frame.reads[*idx].1,
 						state.as_ref().frame.reads[*idx].2,
+						state.as_ref().frame.reads[*idx].3,
 					)
 				},
 				OperandState::Ready(v) => (v.len(), v.value_type()),
@@ -949,8 +950,8 @@ impl<T: Restriction> Restriction for SimpleOps<T>
 				{
 					OperandState::MustRead(idx) =>
 					{
-						frame.reads[*idx].1 = len;
-						frame.reads[*idx].2 = typ;
+						frame.reads[*idx].2 = len;
+						frame.reads[*idx].3 = typ;
 					},
 					OperandState::Ready(v) =>
 					{
@@ -977,7 +978,7 @@ impl<T: Restriction> Restriction for SimpleOps<T>
 		let typ = _state.as_ref().frame.op_queue.get(&0).map(|op_list| {
 			match &op_list.first
 			{
-				OperandState::MustRead(idx) => _state.as_ref().frame.reads[*idx].2,
+				OperandState::MustRead(idx) => _state.as_ref().frame.reads[*idx].3,
 				OperandState::Ready(v) => v.value_type(),
 			}
 		});
@@ -991,7 +992,7 @@ impl<T: Restriction> Restriction for SimpleOps<T>
 				{
 					match op
 					{
-						OperandState::MustRead(idx) => clone_frame.reads[*idx].2 = new_typ,
+						OperandState::MustRead(idx) => clone_frame.reads[*idx].3 = new_typ,
 						OperandState::Ready(v) =>
 						{
 							let mut new_scalars = Vec::with_capacity(new_typ.scale());

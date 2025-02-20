@@ -28,7 +28,7 @@ fn state_invalid_frame(
 	mut state: ExecState,
 	mut frame: CallFrameState,
 	idx: usize,
-	read: (usize, usize, ValueType),
+	read: (bool, usize, usize, ValueType),
 ) -> bool
 {
 	// Create invalid by adding a superfluous read

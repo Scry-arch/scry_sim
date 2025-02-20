@@ -371,10 +371,11 @@ pub struct CallFrameState
 
 	/// Read instructions that have been issued but still waiting.
 	///
-	/// First element is the address to read from.
-	/// Second is the number of scalars to read.
-	/// Third is the type of scalars to read.
-	pub reads: Vec<(usize, usize, ValueType)>,
+	/// 0. Whether it's a stack read or not (true is stack).
+	/// 0. element is the offset (stack) or address (non-stack) to read from.
+	/// 0. is the number of scalars to read.
+	/// 0. is the type of scalars to read.
+	pub reads: Vec<(bool, usize, usize, ValueType)>,
 
 	/// Stack frame
 	pub stack: StackFrame,
@@ -408,13 +409,17 @@ impl CallFrameState
 	/// * Any control flow trigger address is not 2-byte aligned
 	/// * Any control flow target address is not 2-byte aligned
 	/// * Any operand list has more than supported number of operands (4)
-	pub fn valid(&self) -> bool
+	pub fn validate(&self) -> Result<(), String>
 	{
-		let unreferenced = (0..self.reads.len()).any(|idx| self.count_read_refs(idx) == 0);
+		if (0..self.reads.len()).any(|idx| self.count_read_refs(idx) == 0) {
+			return Err("MustRead without operands referencing it".to_string());
+		}
 
-		let read_nothing = self.reads.iter().any(|(_, len, _)| *len == 0);
+		if self.reads.iter().any(|(_, _, len, _)| *len == 0) {
+			return Err("Read 0 bytes".to_string());
+		}
 
-		let wrong_ref = self.op_queue.iter().any(|(_, ops)| {
+		if self.op_queue.iter().any(|(_, ops)| {
 			for op in ops.iter()
 			{
 				match op
@@ -430,27 +435,30 @@ impl CallFrameState
 				}
 			}
 			false
-		});
+		}) {
+			return Err("Operand read reference out of bounds".to_string());
+		}
 
-		let ret_addr_aligned = self.ret_addr % 2 == 0;
+		if self.ret_addr % 2 != 0{
+			return Err("Unaligned return address".to_string());
+		}
 
-		let ctrl_unaligned = self.branches.iter().any(|(trig, ctrl)| {
+		if self.branches.iter().any(|(trig, ctrl)| {
 			trig % 2 != 0
 				|| match ctrl
 				{
 					ControlFlowType::Call(targ) | ControlFlowType::Branch(targ) => targ % 2 != 0,
 					_ => false,
 				}
-		});
+		}) {
+			return Err("Control flow target address unaligned".to_string());
+		}
 
-		let too_many_operands = self.op_queue.iter().any(|(_, ops)| ops.len() > 4);
+		if self.op_queue.iter().any(|(_, ops)| ops.len() > 4) {
+			return Err("Too many operands in queue".to_string());
+		}
 
-		!unreferenced
-			&& !wrong_ref
-			&& ret_addr_aligned
-			&& !ctrl_unaligned
-			&& !too_many_operands
-			&& !read_nothing
+		Ok(())
 	}
 
 	/// Remove the read with the given index if there is no references to it
@@ -553,9 +561,9 @@ impl ExecState
 		// Validate frames
 		for f in frames.clone()
 		{
-			if !f.valid()
+			if let Err(msg) = f.validate()
 			{
-				return Err("Invalid call frame".into());
+				return Err(format!("Invalid call frame: {}", msg));
 			}
 		}
 

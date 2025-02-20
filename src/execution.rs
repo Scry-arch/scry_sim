@@ -267,7 +267,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 					)
 					.unwrap();
 
-					let op = Operand::read_typed(address, 1, read_typ);
+					let op = Operand::read_typed(false, address, 1, read_typ);
 					self.operands.push_operand(0, op, tracker);
 				},
 				Pick(target) =>

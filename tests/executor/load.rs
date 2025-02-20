@@ -231,11 +231,11 @@ fn load_trigger(
 	// is in memory (if it needs loading)
 	let ready_or_load = |v: Value,
 	                     loading: Option<usize>,
-	                     read_list: &mut Vec<(usize, usize, ValueType)>,
+	                     read_list: &mut Vec<(bool, usize, usize, ValueType)>,
 	                     mems: &mut BlockedMemory| {
 		if let Some(addr) = loading
 		{
-			read_list.push((addr, 1, v.value_type()));
+			read_list.push((false, addr, 1, v.value_type()));
 			mems.add_block(v.get_first().bytes().unwrap().iter().cloned(), addr);
 			OperandState::MustRead(read_list.len() - 1)
 		}
@@ -330,7 +330,7 @@ fn test_issue_load(
 			.op_queue
 			.insert(0, OperandList::new(read_op, Vec::new()));
 	}
-	expected_state.frame.reads.push((addr, 1, loaded_typ));
+	expected_state.frame.reads.push((false, addr, 1, loaded_typ));
 	// Because executor equality depends on the order of the read list,
 	// put the expected state in an executor and extract it so that the order
 	// would be the same as the test executor

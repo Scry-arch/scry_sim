@@ -29,7 +29,7 @@ impl<T: Arbitrary + Debug + Clone> Arbitrary for NoShrink<T>
 #[ignore]
 fn frame_shrinks_valid(frame: NoShrink<CallFrameState>) -> bool
 {
-	frame.0.shrink().all(|f| f.valid())
+	frame.0.shrink().all(|f| f.validate().is_ok())
 }
 
 /// Tests that all shrinkage of states are valid

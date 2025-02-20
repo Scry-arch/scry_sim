@@ -30,7 +30,7 @@ fn return_trigger_impl(
 	// They should be following any operands that were already there from before the call.
 	mut expected_ready_ops: Option<OperandList>,
 	// The reads of the expected operands
-	expected_reads: Vec<(usize, usize, ValueType)>,
+	expected_reads: Vec<(bool, usize, usize, ValueType)>,
 	// The metrics expected after the execution step
 	expected_metrics: TrackReport,
 ) -> TestResult

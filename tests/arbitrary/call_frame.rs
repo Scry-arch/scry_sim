@@ -8,7 +8,7 @@ use scry_sim::{
 #[quickcheck]
 fn arb_valid(frame: CallFrameState) -> bool
 {
-	frame.valid()
+	frame.validate().is_ok()
 }
 
 /// Tests that any frame with the return address not 2-byte aligned is not
@@ -18,7 +18,7 @@ fn unaligned_return_invalid(mut frame: CallFrameState) -> bool
 {
 	// Assume address is already aligned, unalign it.
 	frame.ret_addr += 1;
-	!frame.valid()
+	frame.validate().is_err()
 }
 
 /// Tests that any frame with the return address not 2-byte aligned is invalid
@@ -31,7 +31,7 @@ fn unaligned_control_trigger_invalid(
 {
 	// Address is already aligned, unalign it.
 	frame.branches.insert(trigger + 1, typ);
-	!frame.valid()
+	frame.validate().is_err()
 }
 
 /// Tests that any frame with the control flow target address not 2-byte aligned
@@ -54,7 +54,7 @@ fn unaligned_control_target_invalid(
 			Return => return TestResult::discard(),
 		},
 	);
-	TestResult::from_bool(!frame.valid())
+	TestResult::from_bool(frame.validate().is_err())
 }
 
 /// Tests that any frame with an operand referencing a non-existent read is
@@ -103,7 +103,7 @@ fn reference_non_read_invalid(
 		}
 	}
 
-	!frame.valid()
+	frame.validate().is_err()
 }
 
 /// Tests that any frame with reads that aren't referenced by a MustRead operand
@@ -111,15 +111,15 @@ fn reference_non_read_invalid(
 #[quickcheck]
 fn read_without_ref_invalid(
 	mut frame: CallFrameState,
-	read: (usize, usize, ValueType),
-	extra_reads: Vec<(usize, usize, ValueType)>,
+	read: (bool, usize, usize, ValueType),
+	extra_reads: Vec<(bool, usize, usize, ValueType)>,
 ) -> bool
 {
 	// Add reads that can't possibly have references to them
 	frame.reads.push(read);
 	frame.reads.extend(extra_reads.into_iter());
 
-	!frame.valid()
+	frame.validate().is_err()
 }
 
 /// Tests that any frame with an operand list of more than 4 operands is
@@ -138,7 +138,7 @@ fn long_operand_list_invalid(mut frame: CallFrameState, list_idx: usize) -> Test
 	{
 		op_list.push(op_list.first.clone());
 	}
-	TestResult::from_bool(!frame.valid())
+	TestResult::from_bool(frame.validate().is_err())
 }
 
 /// Tests that any frame is equals to itself
