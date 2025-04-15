@@ -107,13 +107,13 @@ impl Scalar
 pub struct Value
 {
 	/// Scalar type of the value
-	typ: ValueType,
+	pub typ: ValueType,
 
 	/// First scalar (index 0)
-	first: Scalar,
+	pub first: Scalar,
 
 	/// Remaining scalars (index 1 and above)
-	rest: Box<[Scalar]>,
+	pub rest: Box<[Scalar]>,
 }
 impl Value
 {

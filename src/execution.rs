@@ -17,7 +17,7 @@ use std::{borrow::BorrowMut, fmt::Debug, marker::PhantomData, mem::size_of};
 pub enum ExecError
 {
 	/// The simulation triggered an exception
-	Exception,
+	Exception(String),
 
 	/// The execution caused a simulation error
 	Err,
@@ -87,7 +87,23 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 	/// Discard the current ready list
 	fn discard_ready_list(&mut self, tracker: &mut impl MetricTracker)
 	{
-		let _ = self.operands.ready_iter(self.memory.borrow_mut(), tracker);
+		let _ = self.get_ready_iter(tracker);
+	}
+
+	/// Get the address of the current stack frames base.
+	fn get_stack_base(&self) -> usize
+	{
+		self.stack.top().block.address
+	}
+
+	/// Get the current ready list
+	fn get_ready_iter<'a>(
+		&'a mut self,
+		tracker: &'a mut impl MetricTracker,
+	) -> impl 'a + Iterator<Item = (Value, Option<(MemError, usize)>)>
+	{
+		self.operands
+			.ready_iter(self.get_stack_base(), self.memory.borrow_mut(), tracker)
 	}
 
 	/// Perform one execution step.
@@ -111,11 +127,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 			{
 				Call(CallVariant::Call, offset) =>
 				{
-					let (addr, addr_error) = self
-						.operands
-						.ready_iter(self.memory.borrow_mut(), tracker)
-						.next()
-						.unwrap();
+					let (addr, addr_error) = self.get_ready_iter(tracker).next().unwrap();
 					assert!(addr_error.is_none());
 
 					let target_addr = Self::get_absolute_address(
@@ -223,10 +235,15 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 				Store(index) =>
 				{
 					assert_eq!(index.value, 255, "Stack stores not implemented yet");
-					let mut ready_iter =
-						self.operands.ready_iter(self.memory.borrow_mut(), tracker);
+					let mut ready_iter = self.operands.ready_iter(
+						self.get_stack_base(),
+						self.memory.borrow_mut(),
+						tracker,
+					);
 
-					let (to_store, to_store_err) = ready_iter.next().ok_or(ExecError::Exception)?;
+					let (to_store, to_store_err) = ready_iter.next().ok_or(
+						ExecError::Exception("Store instruction got no operands".into()),
+					)?;
 					assert!(to_store_err.is_none());
 					match (
 						to_store.get_first(),
@@ -243,9 +260,11 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 							self.memory
 								.borrow_mut()
 								.write(address, &to_store, tracker)
-								.map_err(|_| ExecError::Exception)
+								.map_err(|err| {
+									ExecError::Exception(format!("Memory write error: {:?}", err.0))
+								})
 						},
-						_ => Err(ExecError::Exception),
+						_ => Err(ExecError::Exception("Cannot store".into())),
 					}?;
 				},
 				Load(signed, size, index) =>
@@ -261,7 +280,11 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 					};
 
 					let address = Self::get_mem_instr_effective_addr(
-						self.operands.ready_iter(self.memory.borrow_mut(), tracker),
+						self.operands.ready_iter(
+							self.get_stack_base(),
+							self.memory.borrow_mut(),
+							tracker,
+						),
 						self.control.next_addr,
 						read_typ.scale(),
 					)
@@ -297,9 +320,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 					);
 
 					// Consume the condition, discard the remaining
-					self.operands
-						.ready_iter(self.memory.borrow_mut(), tracker)
-						.next();
+					self.get_ready_iter(tracker).next();
 				},
 				NoOp =>
 				{
@@ -387,7 +408,9 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 	{
 		ready_iter
 			.next()
-			.ok_or(Some(ExecError::Exception))
+			.ok_or(Some(ExecError::Exception(
+				"Memory instruction missing first operand".into(),
+			)))
 			.and_then(|(in1, err1)| {
 				assert!(err1.is_none());
 
@@ -411,12 +434,16 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 							(in1.value_type(), in1.get_first().bytes().unwrap()),
 							in2_extracted,
 						)
-						.ok_or(Some(ExecError::Exception))
+						.ok_or(Some(ExecError::Exception(
+							"Failed to calculate absolute address".into(),
+						)))
 					},
 					_ =>
 					{
 						// If any is NaR, exception
-						Err(Some(ExecError::Exception))
+						Err(Some(ExecError::Exception(
+							"Memory instruection got NaR operand".into(),
+						)))
 					},
 				}
 			})
@@ -492,7 +519,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 	)
 	{
 		let (op1, op2) = {
-			let mut ready_iter = self.operands.ready_iter(self.memory.borrow_mut(), tracker);
+			let mut ready_iter = self.get_ready_iter(tracker);
 			(ready_iter.next(), ready_iter.next())
 		};
 		assert!(op2.is_none()); // TODO: implement 2-operand jumps
@@ -530,7 +557,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 	{
 		match v.get_first()
 		{
-			Scalar::Nan | Scalar::Nar(_) => Err(ExecError::Exception),
+			Scalar::Nan | Scalar::Nar(_) => Err(ExecError::Exception("found Nan or Nar".into())),
 			_ => Ok(()),
 		}
 	}
@@ -539,7 +566,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 	{
 		if v1 != v2
 		{
-			Err(ExecError::Exception)
+			Err(ExecError::Exception("Mismatched types".into()))
 		}
 		else
 		{
@@ -564,7 +591,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 			use AluVariant::*;
 
 			// Extract operands
-			let mut ins = self.operands.ready_iter(self.memory.borrow_mut(), tracker);
+			let mut ins = self.get_ready_iter(tracker);
 			let mut result_scalars = Vec::new();
 			let in1 = ins.next();
 
@@ -574,8 +601,12 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 				{
 					// Variants with 2 inputs
 					let in2 = ins.next();
-					let in1 = in1.ok_or(ExecError::Exception)?;
-					let in2 = in2.ok_or(ExecError::Exception)?;
+					let in1 = in1.ok_or(ExecError::Exception(
+						"Alu instruction missing first operand".into(),
+					))?;
+					let in2 = in2.ok_or(ExecError::Exception(
+						"Alu instruction missing second operand".into(),
+					))?;
 					Self::fail_if_nan_nar(&in1.0)?;
 					Self::fail_if_nan_nar(&in2.0)?;
 					let typ = in1.0.value_type();
@@ -602,7 +633,9 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 				Inc | Dec | ShiftRight | RotateLeft | RotateRight =>
 				{
 					// Variants with 1 input
-					let in1 = in1.ok_or(ExecError::Exception)?;
+					let in1 = in1.ok_or(ExecError::Exception(
+						"Alu instruction missing operand".into(),
+					))?;
 					Self::fail_if_nan_nar(&in1.0)?;
 					let typ = in1.0.value_type();
 					let in1 = in1.0.iter();
@@ -654,11 +687,15 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 	{
 		let (typ, mut result_scalars_low, mut result_scalars_high) = {
 			// Extract operands
-			let mut ins = self.operands.ready_iter(self.memory.borrow_mut(), tracker);
+			let mut ins = self.get_ready_iter(tracker);
 			let in1 = ins.next();
 			let in2 = ins.next();
-			let in1 = in1.ok_or(ExecError::Exception)?;
-			let in2 = in2.ok_or(ExecError::Exception)?;
+			let in1 = in1.ok_or(ExecError::Exception(
+				"Alu2 instruction missing first operand".into(),
+			))?;
+			let in2 = in2.ok_or(ExecError::Exception(
+				"Alu2 instruction missing first operand".into(),
+			))?;
 			Self::fail_if_nan_nar(&in1.0)?;
 			Self::fail_if_nan_nar(&in2.0)?;
 			let typ = in1.0.value_type();

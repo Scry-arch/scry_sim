@@ -109,7 +109,14 @@ impl ControlFlow
 					self.next_addr = ret_addr;
 
 					op_stack.pop_queue();
-					prog_stack.perform_return();
+					if prog_stack.can_perform_return()
+					{
+						prog_stack.perform_return();
+					}
+					else
+					{
+						return false;
+					}
 
 					self.call_frame = if let Some(s) = self.call_stack.pop_front()
 					{

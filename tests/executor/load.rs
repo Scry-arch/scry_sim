@@ -32,14 +32,15 @@ fn overlap(addr1: usize, length1: usize, addr2: usize, length2: usize) -> bool
 }
 
 /// A list of at least 1 value and whether that value should be tested
-/// as a load from memory and if so, from what address.
+/// as a load from memory and if so, whether its a stack load and from what
+/// address/index.
 ///
 /// Guarantees:
 /// * Any loads will have non-Nan/Nar values
 /// * No two loads will overlap in the memory they load from
 /// * There is at least 1 load
 #[derive(Debug, Clone)]
-struct MaybeLoadValues(Vec<(Value, Option<usize>)>);
+struct MaybeLoadValues(Vec<(Value, Option<(bool, usize)>)>);
 impl Arbitrary for MaybeLoadValues
 {
 	fn arbitrary(g: &mut Gen) -> Self
@@ -61,6 +62,7 @@ impl Arbitrary for MaybeLoadValues
 
 		// Track used load address ranges
 		let mut taken_addresses = Vec::new();
+		let mut taken_indexes = Vec::new();
 
 		// Make at least one of the values need load
 		loop
@@ -71,23 +73,59 @@ impl Arbitrary for MaybeLoadValues
 			// Ensure the value isn't Nan/Nar
 			let v = arb_non_nan_nar(g);
 
+			let is_stack = bool::arbitrary(g);
+
+			// if stack, this is the index, else absolute address
 			let mut load_address = usize::arbitrary(g);
-			// Ensure that the address range doesn't overflow the address space
-			if load_address.checked_add(v.size()).is_none()
+			if is_stack
 			{
+				load_address %= g.size() * 1000; // Set limit to stack frame size
+			}
+			else if load_address.checked_add(v.size()).is_none()
+			{
+				// Ensure that the address range doesn't overflow the address space
 				load_address /= 2;
 			}
+
 			// Ensure that it doesn't overlap with another load
-			if taken_addresses
-				.iter()
-				.any(|(addr2, size2)| overlap(load_address, v.size(), *addr2, *size2))
+			if if is_stack
+			{
+				&taken_indexes
+			}
+			else
+			{
+				&taken_addresses
+			}
+			.iter()
+			.any(|(addr2, size2)| {
+				overlap(
+					if is_stack
+					{
+						load_address * v.size()
+					}
+					else
+					{
+						load_address
+					},
+					v.size(),
+					*addr2,
+					*size2,
+				)
+			})
 			{
 				// Try again
 				continue;
 			}
 
-			*addr = Some(load_address);
-			taken_addresses.push((load_address, v.size()));
+			*addr = Some((is_stack, load_address));
+			if is_stack
+			{
+				taken_indexes.push((load_address * v.size(), v.size()));
+			}
+			else
+			{
+				taken_addresses.push((load_address, v.size()));
+			}
 			*old_v = v;
 
 			if bool::arbitrary(g)
@@ -145,11 +183,13 @@ impl Arbitrary for MaybeLoadValues
 			let mut clone_idx_removed = self.clone();
 			clone_idx_removed.0.remove(idx);
 
-			v.shrink().for_each(|shrunk| {
-				let mut clone = clone_idx_removed.clone();
-				clone.0.insert(idx, (shrunk, addr.clone()));
-				result.push(clone);
-			});
+			v.shrink()
+				.filter(|shrunk| shrunk.iter().all(|scalar| scalar.bytes().is_some()))
+				.for_each(|shrunk| {
+					let mut clone = clone_idx_removed.clone();
+					clone.0.insert(idx, (shrunk, addr.clone()));
+					result.push(clone);
+				});
 			addr.shrink().for_each(|shrunk| {
 				let mut clone = clone_idx_removed.clone();
 				clone.0.insert(idx, (v.clone(), shrunk));
@@ -164,22 +204,58 @@ impl Arbitrary for MaybeLoadValues
 /// Tests the triggering of a previously issued load.
 #[quickcheck]
 fn load_trigger(
-	NoReads(state): NoReads<ExecState>,
+	NoReads(mut state): NoReads<ExecState>,
 	// Ready list of operands to test, at least 1 of which is an operand that needs to load
 	values: MaybeLoadValues,
 	instruction: ConsumingDiscarding,
 ) -> TestResult
 {
-	// Ensure no values overlap with the instruction's address
+	// Ensure no stack values overflow the address space
+	let stack_block = state.frame.stack.block.clone();
 	if values
 		.0
 		.iter()
-		.any(|(v, addr)| addr.map_or(false, |addr| overlap(addr, v.size(), state.address, 2)))
+		.filter(|(_, addr)| addr.map_or(false, |(is_stack, _)| is_stack))
+		.any(|(v, addr)| {
+			stack_block
+				.address
+				.checked_add((addr.unwrap().1 + 1) * v.size())
+				.is_none()
+		})
 	{
 		return TestResult::discard();
 	}
 
-	// Create a state where all the value aren't loaded
+	// Make the stack frame fit the stack reads
+	state.frame.stack.block.size = values.0.iter().fold(stack_block.size, |max, (v, addr)| {
+		if let Some((true, index)) = addr
+		{
+			std::cmp::max(max, (index + 1) * v.size())
+		}
+		else
+		{
+			max
+		}
+	});
+	// dbg!(&state);
+	// dbg!(&values);
+	if
+	// Ensure no non-stack read values overlap with the instruction's address or the stack
+	values
+		.0
+		.iter()
+		.filter(|(_, addr)| addr.map_or(false, |(is_stack, _)| !is_stack))
+		.any(|(v, addr)| overlap(addr.unwrap().1, v.size(), state.address, 2) ||
+			overlap(addr.unwrap().1, v.size(), stack_block.address, stack_block.size)
+		)
+		||
+		// Ensure the instruction does not overlap the stack
+		overlap(state.address, 2, stack_block.address, stack_block.size)
+	{
+		return TestResult::discard();
+	}
+
+	// Create a state where all the values aren't loaded
 	let mut pretest_state = state.clone();
 	// Regress the operand queue so we can add our values as the ready list
 	pretest_state.frame.op_queue = regress_queue(pretest_state.frame.op_queue);
@@ -218,25 +294,44 @@ fn load_trigger(
 		Metric::UnalignedReads,
 		load_operands
 			.clone()
+			// Ignore stack reads (cannot be unaligned)
+			.filter_map(|(v, (is_stack, addr))| if is_stack { None} else {Some((v, addr))})
 			.filter(|(v, addr)| (addr % v.scale()) != 0)
 			.count(),
 	);
+	let stack_loads = load_operands.clone().filter(|(_, (is_stack, _))| *is_stack);
 	expected_metrics.add_stat(Metric::DataReads, load_operands.clone().count());
+	expected_metrics.add_stat(Metric::StackReads, stack_loads.clone().count());
 	expected_metrics.add_stat(
 		Metric::DataReadBytes,
 		load_operands.clone().fold(0, |acc, (v, _)| acc + v.size()),
+	);
+	expected_metrics.add_stat(
+		Metric::StackReadBytes,
+		stack_loads.clone().fold(0, |acc, (v, _)| acc + v.size()),
 	);
 
 	// Then create state version using the loads, where each value's data
 	// is in memory (if it needs loading)
 	let ready_or_load = |v: Value,
-	                     loading: Option<usize>,
+	                     loading: Option<(bool, usize)>,
 	                     read_list: &mut Vec<(bool, usize, usize, ValueType)>,
 	                     mems: &mut BlockedMemory| {
-		if let Some(addr) = loading
+		if let Some((is_stack, addr)) = loading
 		{
-			read_list.push((false, addr, 1, v.value_type()));
-			mems.add_block(v.get_first().bytes().unwrap().iter().cloned(), addr);
+			read_list.push((is_stack, addr, 1, v.value_type()));
+			if is_stack
+			{
+				mems.add_block(
+					v.get_first().bytes().unwrap().iter().cloned(),
+					// Calculate the address of the load
+					((stack_block.address + v.size() - 1) & !(v.size() - 1)) + (addr * v.size()),
+				);
+			}
+			else
+			{
+				mems.add_block(v.get_first().bytes().unwrap().iter().cloned(), addr);
+			}
 			OperandState::MustRead(read_list.len() - 1)
 		}
 		else
@@ -272,7 +367,7 @@ fn load_trigger(
 				.collect(),
 		),
 	);
-
+	// dbg!(&test_mem);
 	// Execute state with loads
 	let mut actual_metrics = TrackReport::new();
 	let exec_result =
@@ -330,7 +425,10 @@ fn test_issue_load(
 			.op_queue
 			.insert(0, OperandList::new(read_op, Vec::new()));
 	}
-	expected_state.frame.reads.push((false, addr, 1, loaded_typ));
+	expected_state
+		.frame
+		.reads
+		.push((false, addr, 1, loaded_typ));
 	// Because executor equality depends on the order of the read list,
 	// put the expected state in an executor and extract it so that the order
 	// would be the same as the test executor

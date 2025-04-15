@@ -411,11 +411,13 @@ impl CallFrameState
 	/// * Any operand list has more than supported number of operands (4)
 	pub fn validate(&self) -> Result<(), String>
 	{
-		if (0..self.reads.len()).any(|idx| self.count_read_refs(idx) == 0) {
+		if (0..self.reads.len()).any(|idx| self.count_read_refs(idx) == 0)
+		{
 			return Err("MustRead without operands referencing it".to_string());
 		}
 
-		if self.reads.iter().any(|(_, _, len, _)| *len == 0) {
+		if self.reads.iter().any(|(_, _, len, _)| *len == 0)
+		{
 			return Err("Read 0 bytes".to_string());
 		}
 
@@ -435,11 +437,13 @@ impl CallFrameState
 				}
 			}
 			false
-		}) {
+		})
+		{
 			return Err("Operand read reference out of bounds".to_string());
 		}
 
-		if self.ret_addr % 2 != 0{
+		if self.ret_addr % 2 != 0
+		{
 			return Err("Unaligned return address".to_string());
 		}
 
@@ -450,11 +454,13 @@ impl CallFrameState
 					ControlFlowType::Call(targ) | ControlFlowType::Branch(targ) => targ % 2 != 0,
 					_ => false,
 				}
-		}) {
+		})
+		{
 			return Err("Control flow target address unaligned".to_string());
 		}
 
-		if self.op_queue.iter().any(|(_, ops)| ops.len() > 4) {
+		if self.op_queue.iter().any(|(_, ops)| ops.len() > 4)
+		{
 			return Err("Too many operands in queue".to_string());
 		}
 

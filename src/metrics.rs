@@ -46,6 +46,14 @@ pub enum Metric
 	StackFreeTotal,
 	/// Total bytes freed from the total stack frame
 	StackFreeTotalBytes,
+	/// Data reads from stack performed
+	StackReads,
+	/// Data bytes read from stack
+	StackReadBytes,
+	/// Data writes to stack
+	StackWrites,
+	/// Data bytes written to stack
+	StackBytesWritten,
 
 	// Memory
 	/// Instructions read from memory

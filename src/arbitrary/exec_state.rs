@@ -125,12 +125,15 @@ impl OperandState<usize>
 					0..=79 | _ if reads.len() == 0 =>
 					{
 						// New int not dependent on others
-						reads.push((
-							Arbitrary::arbitrary(g),
-							Arbitrary::arbitrary(g),
-							SmallInt::<usize>::arbitrary(g).0 + 1,
-							Arbitrary::arbitrary(g),
-						));
+						let is_stack = Arbitrary::arbitrary(g);
+						let size = SmallInt::<usize>::arbitrary(g).0 + 1;
+						let value_type = ValueType::arbitrary(g);
+						let mut addr = Arbitrary::arbitrary(g);
+						if is_stack
+						{
+							addr %= value_type.scale();
+						}
+						reads.push((is_stack, addr, size, value_type));
 						OperandState::MustRead(reads.len() - 1)
 					},
 					_ => OperandState::MustRead(usize::arbitrary(g) % reads.len()),

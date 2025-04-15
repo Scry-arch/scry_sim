@@ -171,7 +171,7 @@ pub fn test_execution_step_exceptions<M: Memory + Debug>(
 	let mut actual_metrics = TrackReport::new();
 	match Executor::from_state(start_state, start_memory).step(&mut actual_metrics)
 	{
-		Err(ExecError::Exception) => test_metrics(expected_metrics, &actual_metrics),
+		Err(ExecError::Exception(_)) => test_metrics(expected_metrics, &actual_metrics),
 		result =>
 		{
 			TestResult::error(format!(

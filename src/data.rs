@@ -42,10 +42,17 @@ impl Operand
 
 	/// Returns a reference to this operands value if available.
 	///
-	/// Otherwise, calls the given function with the address, number of scalars,
-	/// and type to read from memory. The function performs the read and returns
-	/// the resulting value, which is saved in the operand and a reference to it
-	/// returned. If the function fails, the error is returned.
+	/// Otherwise, calls the given function with the following about a required
+	/// data read:
+	///
+	/// 0. whether it's a read from stack
+	/// 0. the address or index
+	/// 0. number of scalars
+	/// 0. type to read
+	///
+	/// The function should perform the read and return the loaded value.
+	/// Which is saved in the operand and a reference to it returned.
+	/// If the function fails, the error is returned.
 	pub(crate) fn get_value_or<E, F: FnOnce(bool, usize, usize, ValueType) -> Result<Value, E>>(
 		&mut self,
 		f: F,
@@ -138,12 +145,14 @@ impl OperandStack
 	/// at the front of the queue, and moves the next operand list to the front.
 	pub fn ready_iter<'a, M: Memory, T: MetricTracker>(
 		&'a mut self,
+		stack_base: usize,
 		mem: &'a mut M,
 		tracker: &'a mut T,
 	) -> impl 'a + Iterator<Item = (Value, Option<(MemError, usize)>)>
 	{
 		struct RemoveIter<'b, M: Memory, Ti: MetricTracker>
 		{
+			stack_base: usize,
 			stack: &'b mut OperandStack,
 			mem: &'b mut M,
 			tracker: &'b mut Ti,
@@ -157,9 +166,35 @@ impl OperandStack
 				self.stack.ready.pop_front().and_then(|mut op: Operand| {
 					let mut err = None;
 					let val = op
-						.get_value_or::<(), _>(|stack_read, addr, len, typ| {
+						.get_value_or::<(), _>(|stack_read, addr_idx, len, typ| {
 							let mut v = Value::new_nar_typed(typ, 0);
+							let addr = if stack_read
+							{
+								let stack_offset = addr_idx * typ.scale();
+								let missing_align = typ.scale() - (self.stack_base % typ.scale());
+								stack_offset
+									+ if missing_align != typ.scale()
+									{
+										self.stack_base + missing_align
+									}
+									else
+									{
+										self.stack_base
+									}
+							}
+							else
+							{
+								addr_idx
+							};
+
 							err = self.mem.read_data(addr, &mut v, len, self.tracker).err();
+
+							if stack_read
+							{
+								self.tracker.add_stat(Metric::StackReads, 1);
+								self.tracker.add_stat(Metric::StackReadBytes, typ.scale());
+							}
+
 							Ok(v)
 						})
 						.unwrap()
@@ -178,6 +213,7 @@ impl OperandStack
 			}
 		}
 		RemoveIter {
+			stack_base,
 			stack: self,
 			mem,
 			tracker,
