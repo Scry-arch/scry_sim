@@ -269,7 +269,6 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 				},
 				Load(signed, size, index) =>
 				{
-					assert_eq!(index.value, 255, "Stack loads not implemented yet");
 					let read_typ = if signed
 					{
 						ValueType::Int(size.value as u8)
@@ -279,18 +278,31 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 						ValueType::Uint(size.value as u8)
 					};
 
-					let address = Self::get_mem_instr_effective_addr(
-						self.operands.ready_iter(
+					let op = {
+						let ready_list = self.operands.ready_iter(
 							self.get_stack_base(),
 							self.memory.borrow_mut(),
 							tracker,
-						),
-						self.control.next_addr,
-						read_typ.scale(),
-					)
-					.unwrap();
+						);
+						if index.value == 255
+						{
+							// Regular load
+							let address = Self::get_mem_instr_effective_addr(
+								ready_list,
+								self.control.next_addr,
+								read_typ.scale(),
+							)
+							.unwrap();
 
-					let op = Operand::read_typed(false, address, 1, read_typ);
+							Operand::read_typed(false, address, 1, read_typ)
+						}
+						else
+						{
+							// Stack load
+							Operand::read_typed(true, index.value as usize, 1, read_typ)
+						}
+					};
+
 					self.operands.push_operand(0, op, tracker);
 				},
 				Pick(target) =>

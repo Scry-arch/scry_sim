@@ -402,14 +402,24 @@ fn load_trigger(
 /// given load type and will load from the given address. Also tests metrics.
 fn test_issue_load(
 	NoCF(state): NoCF<ExecState>,
-	load_operands: OperandList,
+	load_operands: Vec<OperandState<usize>>,
 	loaded_typ: ValueType,
+	is_stack: bool,
 	addr: usize,
 ) -> TestResult
 {
 	let mut test_state = state.clone();
 	test_state.frame.op_queue = regress_queue(test_state.frame.op_queue);
-	test_state.frame.op_queue.insert(0, load_operands.clone());
+	if !load_operands.is_empty()
+	{
+		test_state.frame.op_queue.insert(
+			0,
+			OperandList::new(
+				load_operands.first().unwrap().clone(),
+				load_operands[1..].to_vec(),
+			),
+		);
+	}
 
 	let mut expected_state: ExecState = state.clone();
 	expected_state.address += 2;
@@ -428,7 +438,7 @@ fn test_issue_load(
 	expected_state
 		.frame
 		.reads
-		.push((false, addr, 1, loaded_typ));
+		.push((is_stack, addr, 1, loaded_typ));
 	// Because executor equality depends on the order of the read list,
 	// put the expected state in an executor and extract it so that the order
 	// would be the same as the test executor
@@ -446,7 +456,7 @@ fn test_issue_load(
 			Instruction::Load(
 				signed,
 				(size as i32).try_into().unwrap(),
-				255.try_into().unwrap(),
+				if is_stack { addr as i32 } else { 255 }.try_into().unwrap(),
 			)
 			.encode(),
 			0,
@@ -455,14 +465,12 @@ fn test_issue_load(
 		&[
 			(Metric::InstructionReads, 1),
 			(Metric::QueuedReads, 1),
-			(Metric::ConsumedOperands, 1 + load_operands.rest.len()),
+			(Metric::ConsumedOperands, load_operands.len()),
 			(
 				Metric::ConsumedBytes,
-				load_operands.first.get_value().unwrap().scale()
-					+ load_operands
-						.rest
-						.iter()
-						.fold(0, |sum, op| sum + op.get_value().unwrap().scale()),
+				load_operands
+					.iter()
+					.fold(0, |sum, op| sum + op.get_value().unwrap().scale()),
 			),
 		]
 		.into(),
@@ -479,14 +487,12 @@ fn load_issue_absolute_address(
 {
 	test_issue_load(
 		NoCF(state),
-		OperandList::new(
-			OperandState::Ready(Value::singleton_typed(
-				ValueType::Uint(addr_size_pow2),
-				addr_scalar.clone(),
-			)),
-			Vec::new(),
-		),
+		vec![OperandState::Ready(Value::singleton_typed(
+			ValueType::Uint(addr_size_pow2),
+			addr_scalar.clone(),
+		))],
 		typ,
+		false,
 		get_absolute_address(&addr_scalar),
 	)
 }
@@ -511,14 +517,12 @@ fn load_issue_relative_address(
 
 	test_issue_load(
 		NoCF(state),
-		OperandList::new(
-			OperandState::Ready(Value::singleton_typed(
-				ValueType::Int(offset_size_pow2),
-				offset_scalar,
-			)),
-			Vec::new(),
-		),
+		vec![OperandState::Ready(Value::singleton_typed(
+			ValueType::Int(offset_size_pow2),
+			offset_scalar,
+		))],
 		typ,
+		false,
 		absolute_addr,
 	)
 }
@@ -545,14 +549,22 @@ fn load_issue_indexed(
 
 	test_issue_load(
 		NoCF(state),
-		OperandList::new(
+		vec![
 			OperandState::Ready(base_addr.clone()),
-			vec![OperandState::Ready(Value::singleton_typed(
+			OperandState::Ready(Value::singleton_typed(
 				ValueType::Uint(index_size_pow2),
 				index_scalar,
-			))],
-		),
+			)),
+		],
 		loaded_typ,
+		false,
 		absolute_addr,
 	)
+}
+
+/// Test issuing a stack load
+#[quickcheck]
+fn load_stack(NoCF(state): NoCF<ExecState>, loaded_typ: ValueType, idx: usize) -> TestResult
+{
+	test_issue_load(NoCF(state), vec![], loaded_typ, true, idx % 255)
 }
