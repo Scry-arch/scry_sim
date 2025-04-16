@@ -510,6 +510,32 @@ fn jmp_unconditional_non_trigger(
 /// Test the triggering of a call that was previously issued.
 #[quickcheck]
 fn call_trigger(
+	state: NoCF<ExecState>,
+	instr: SupportedInstruction,
+	call_target: InstrAddr,
+) -> TestResult
+{
+	call_trigger_impl(state, instr, call_target)
+}
+
+/// Tests the triggering of a call when the preceding stack frame is empty
+#[test]
+fn call_trigger_empty_stack()
+{
+	assert!(!call_trigger_impl(
+		NoCF(ExecState {
+			address: 0,
+			frame: Default::default(),
+			frame_stack: vec![],
+			stack_buffer: 0,
+		}),
+		SupportedInstruction(Instruction::NoOp),
+		InstrAddr(0x1000)
+	)
+	.is_failure())
+}
+
+fn call_trigger_impl(
 	NoCF(state): NoCF<ExecState>,
 	instr: SupportedInstruction,
 	call_target: InstrAddr,

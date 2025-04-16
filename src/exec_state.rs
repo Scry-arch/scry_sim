@@ -265,9 +265,17 @@ impl StackFrame
 	/// this stack frame.
 	pub fn frame_call(&mut self) -> StackFrame
 	{
+		let new_stack_base = if self.block.size == 0
+		{
+			self.block.address
+		}
+		else
+		{
+			self.get_address(0, self.primary_size, true).unwrap()
+		};
 		let new_block = Self {
 			block: Block {
-				address: self.get_address(0, self.primary_size, true).unwrap(),
+				address: new_stack_base,
 				size: self.secondary_size(),
 			},
 			primary_size: self.secondary_size(),
