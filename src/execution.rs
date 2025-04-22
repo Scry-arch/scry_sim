@@ -234,25 +234,52 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 				},
 				Store(index) =>
 				{
-					assert_eq!(index.value, 255, "Stack stores not implemented yet");
-					let mut ready_iter = self.operands.ready_iter(
-						self.get_stack_base(),
-						self.memory.borrow_mut(),
-						tracker,
-					);
+					let is_stack = index.value != 255;
+					let (to_store, effective_address) = {
+						let stack_base = self.get_stack_base();
+						let mut ready_iter = self.operands.ready_iter(
+							self.get_stack_base(),
+							self.memory.borrow_mut(),
+							tracker,
+						);
 
-					let (to_store, to_store_err) = ready_iter.next().ok_or(
-						ExecError::Exception("Store instruction got no operands".into()),
-					)?;
-					assert!(to_store_err.is_none());
-					match (
-						to_store.get_first(),
-						Self::get_mem_instr_effective_addr(
-							ready_iter,
-							self.control.next_addr,
-							to_store.value_type().scale(),
-						),
-					)
+						let (to_store, to_store_err) = ready_iter.next().ok_or(
+							ExecError::Exception("Store instruction got no operands".into()),
+						)?;
+
+						if let Some((err, addr)) = to_store_err
+						{
+							return Err(ExecError::Exception(format!(
+								"Store operand errored while loaded: ({:?}, {:#X})",
+								err, addr
+							)));
+						}
+
+						let to_store_type = to_store.value_type();
+						(
+							to_store,
+							if !is_stack
+							{
+								// Regular store
+								Self::get_mem_instr_effective_addr(
+									ready_iter,
+									self.control.next_addr,
+									to_store_type.scale(),
+								)
+							}
+							else
+							{
+								// stack store
+								Ok(OperandStack::operand_stack_address(
+									stack_base,
+									to_store_type,
+									index.value as usize,
+								))
+							},
+						)
+					};
+
+					match (to_store.get_first(), effective_address)
 					{
 						(Scalar::Nan, _) | (_, Err(None)) => Ok(()), // Do nothing
 						(Scalar::Val(_), Ok(address)) =>
@@ -262,6 +289,15 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 								.write(address, &to_store, tracker)
 								.map_err(|err| {
 									ExecError::Exception(format!("Memory write error: {:?}", err.0))
+								})
+								.map(|result| {
+									if is_stack
+									{
+										tracker
+											.add_stat(Metric::StackBytesWritten, to_store.size());
+										tracker.add_stat(Metric::StackWrites, 1);
+									}
+									result
 								})
 						},
 						_ => Err(ExecError::Exception("Cannot store".into())),

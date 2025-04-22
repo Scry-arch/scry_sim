@@ -1,9 +1,10 @@
 use std::collections::HashMap;
+use strum::EnumIter;
 
 /// Various metrics about a given simulation run.
 ///
 /// All are assumed to be non-negative integers with the initial value of 0.
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, EnumIter)]
 pub enum Metric
 {
 	// Control flow

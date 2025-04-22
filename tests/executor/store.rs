@@ -1,5 +1,8 @@
 use crate::{
-	executor::{test_execution_step, test_execution_step_exceptions},
+	executor::{
+		load::{address_space_fits_stack, idx_address, min_stack_size},
+		test_execution_step, test_execution_step_exceptions,
+	},
 	misc::{
 		get_absolute_address, get_indexed_address, get_relative_address, regress_queue,
 		RepeatingMem,
@@ -13,26 +16,50 @@ use scry_sim::{
 	arbitrary::{ArbScalarVal, ArbValue, NoCF},
 	BlockedMemory, ExecState, Memory, Metric, OperandList, OperandState, Value, ValueType,
 };
+use std::cmp::max;
 
 /// Tests the store instruction.
 fn test_store_instruction<const ADDR_OPS: usize>(
 	// Start state
-	NoCF(state): NoCF<ExecState>,
+	NoCF(mut state): NoCF<ExecState>,
 	// Store address operand
 	address_operands: [Value; ADDR_OPS],
 	// Value to store
 	to_store: &Value,
 	// Initial value of all non-instruction memory bytes
 	init_mem_bytes: u8,
-	// The absolute address that should be the result of the given address operand
+	// The absolute address that should be the result of the given address operands.
+	// If stack store, this is the index
 	store_address: usize,
+	// If stack store
+	is_stack: bool,
 ) -> TestResult
 {
+	let idx = store_address;
+	// Don't allow the stored value to overflow the address space
+	let store_address = if is_stack
+	{
+		// Make sure the stack is big enough
+		if !address_space_fits_stack(state.frame.stack.block.address, to_store, idx)
+		{
+			return TestResult::discard();
+		}
+		state.frame.stack.block.size = max(
+			state.frame.stack.block.size,
+			min_stack_size(state.frame.stack.block.address, to_store, idx).unwrap(),
+		);
+		idx_address(state.frame.stack.block.address, to_store, idx)
+	}
+	else
+	{
+		store_address
+	};
+
 	if
 	// Don't allow the stored value to overflow the address space
 	store_address.checked_add(to_store.scale()).is_none() ||
 		// don't let instruction and data memory overlap
-		(state.address < store_address + to_store.scale() &&
+		(state.address < (store_address + to_store.scale()) &&
 			state.address+1 >= store_address)
 	{
 		return TestResult::discard();
@@ -47,7 +74,7 @@ fn test_store_instruction<const ADDR_OPS: usize>(
 	let mut encoded_bytes = [0u8; 2];
 	LittleEndian::write_u16(
 		&mut encoded_bytes,
-		Instruction::Store(255.try_into().unwrap()).encode(),
+		Instruction::Store(if is_stack { idx as i32 } else { 255 }.try_into().unwrap()).encode(),
 	);
 	mem.add_block(encoded_bytes.into_iter(), state.address);
 
@@ -71,6 +98,11 @@ fn test_store_instruction<const ADDR_OPS: usize>(
 			(
 				Metric::UnalignedWrites,
 				!((store_address % to_store.scale()) == 0) as usize,
+			),
+			(Metric::StackWrites, is_stack as usize),
+			(
+				Metric::StackBytesWritten,
+				is_stack as usize * to_store.size(),
 			),
 		]
 		.into(),
@@ -143,10 +175,11 @@ fn store_absolute(
 		&to_store,
 		init_mem_bytes,
 		store_address,
+		false,
 	)
 }
 
-/// Tests the store instruction when taking an signed address.
+/// Tests the store instruction when taking a signed address.
 #[quickcheck]
 fn store_relative(
 	NoCF(state): NoCF<ExecState>,
@@ -174,6 +207,7 @@ fn store_relative(
 		&to_store,
 		init_mem_bytes,
 		store_address,
+		false,
 	)
 }
 
@@ -211,6 +245,7 @@ fn store_indexed(
 		&to_store,
 		init_mem_bytes,
 		store_address,
+		false,
 	)
 }
 
@@ -364,4 +399,16 @@ fn store_missing_operands(NoCF(mut state): NoCF<ExecState>) -> TestResult
 		RepeatingMem::<false>(Instruction::Store(255.try_into().unwrap()).encode(), 0),
 		&[(Metric::InstructionReads, 1)].into(),
 	)
+}
+
+/// Tests the store stack without extra operands
+#[quickcheck]
+fn store_stack(
+	state: NoCF<ExecState>,
+	ArbValue(to_store): ArbValue<false, false>,
+	idx: usize,
+	init_mem_bytes: u8,
+) -> TestResult
+{
+	test_store_instruction(state, [], &to_store, init_mem_bytes, idx % 255, true)
 }

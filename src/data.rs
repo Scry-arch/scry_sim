@@ -170,17 +170,7 @@ impl OperandStack
 							let mut v = Value::new_nar_typed(typ, 0);
 							let addr = if stack_read
 							{
-								let stack_offset = addr_idx * typ.scale();
-								let missing_align = typ.scale() - (self.stack_base % typ.scale());
-								stack_offset
-									+ if missing_align != typ.scale()
-									{
-										self.stack_base + missing_align
-									}
-									else
-									{
-										self.stack_base
-									}
+								OperandStack::operand_stack_address(self.stack_base, typ, addr_idx)
 							}
 							else
 							{
@@ -422,6 +412,23 @@ impl OperandStack
 		to_set
 			.enumerate()
 			.for_each(|(idx, frame)| self.set_frame_state(idx, frame));
+	}
+
+	/// Calculates the effective address of a value with given type and index in
+	/// the stack with the given stack base. I.e. returns an absolute address
+	pub fn operand_stack_address(stack_base: usize, typ: ValueType, index: usize) -> usize
+	{
+		let stack_offset = index * typ.scale();
+		let missing_align = typ.scale() - (stack_base % typ.scale());
+		stack_offset
+			+ if missing_align != typ.scale()
+			{
+				stack_base + missing_align
+			}
+			else
+			{
+				stack_base
+			}
 	}
 }
 /// Constructs an OperandQueue equivalent to an execution state

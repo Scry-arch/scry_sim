@@ -201,6 +201,27 @@ impl Arbitrary for MaybeLoadValues
 	}
 }
 
+/// Returns the minimum stack end address to enable the given value to be store
+/// at the given stack index with the given stack base.
+pub fn min_stack_size(stack_base: usize, value: &Value, idx: usize) -> Option<usize>
+{
+	stack_base.checked_add((idx + 1) * value.size())
+}
+
+/// Returns whether the given value at the given stack index in the stack with
+/// given address does not overflow the address space.
+pub fn address_space_fits_stack(stack_base: usize, value: &Value, idx: usize) -> bool
+{
+	min_stack_size(stack_base, value, idx).is_some()
+}
+
+/// Returns the effective absolute address of the given value at the given index
+/// with the given stack base.
+pub fn idx_address(stack_base: usize, value: &Value, idx: usize) -> usize
+{
+	((stack_base + value.size() - 1) & !(value.size() - 1)) + (idx * value.size())
+}
+
 /// Tests the triggering of a previously issued load.
 #[quickcheck]
 fn load_trigger(
@@ -216,12 +237,7 @@ fn load_trigger(
 		.0
 		.iter()
 		.filter(|(_, addr)| addr.map_or(false, |(is_stack, _)| is_stack))
-		.any(|(v, addr)| {
-			stack_block
-				.address
-				.checked_add((addr.unwrap().1 + 1) * v.size())
-				.is_none()
-		})
+		.any(|(v, addr)| !address_space_fits_stack(stack_block.address, v, addr.unwrap().1))
 	{
 		return TestResult::discard();
 	}
@@ -237,8 +253,7 @@ fn load_trigger(
 			max
 		}
 	});
-	// dbg!(&state);
-	// dbg!(&values);
+
 	if
 	// Ensure no non-stack read values overlap with the instruction's address or the stack
 	values
@@ -324,8 +339,7 @@ fn load_trigger(
 			{
 				mems.add_block(
 					v.get_first().bytes().unwrap().iter().cloned(),
-					// Calculate the address of the load
-					((stack_block.address + v.size() - 1) & !(v.size() - 1)) + (addr * v.size()),
+					idx_address(stack_block.address, &v, addr),
 				);
 			}
 			else
@@ -367,7 +381,7 @@ fn load_trigger(
 				.collect(),
 		),
 	);
-	// dbg!(&test_mem);
+
 	// Execute state with loads
 	let mut actual_metrics = TrackReport::new();
 	let exec_result =
