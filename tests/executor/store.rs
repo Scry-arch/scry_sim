@@ -94,16 +94,13 @@ fn test_store_instruction<const ADDR_OPS: usize>(
 				Metric::ConsumedBytes,
 				to_store.scale() + address_operands.iter().fold(0, |sum, v| sum + v.scale()),
 			),
-			(Metric::DataBytesWritten, to_store.scale()),
+			(Metric::DataWriteBytes, to_store.scale()),
 			(
 				Metric::UnalignedWrites,
 				!((store_address % to_store.scale()) == 0) as usize,
 			),
 			(Metric::StackWrites, is_stack as usize),
-			(
-				Metric::StackBytesWritten,
-				is_stack as usize * to_store.size(),
-			),
+			(Metric::StackWriteBytes, is_stack as usize * to_store.size()),
 		]
 		.into(),
 	);

@@ -111,7 +111,7 @@ impl<'a, M: Memory> Memory for AllowWrite<'a, M>
 		tracker: &mut impl MetricTracker,
 	) -> Result<(), (MemError, usize)>
 	{
-		tracker.add_stat(Metric::DataBytesWritten, from.size());
+		tracker.add_stat(Metric::DataWriteBytes, from.size());
 		Ok(())
 	}
 }

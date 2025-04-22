@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use strum::EnumIter;
+use strum::{EnumIter, IntoEnumIterator};
 
 /// Various metrics about a given simulation run.
 ///
@@ -54,7 +54,7 @@ pub enum Metric
 	/// Data writes to stack
 	StackWrites,
 	/// Data bytes written to stack
-	StackBytesWritten,
+	StackWriteBytes,
 
 	// Memory
 	/// Instructions read from memory
@@ -64,7 +64,7 @@ pub enum Metric
 	/// Data bytes read from memory
 	DataReadBytes,
 	/// Data bytes written to memory
-	DataBytesWritten,
+	DataWriteBytes,
 	/// Unaligned data reads
 	///
 	/// Only counted once per vector read.
@@ -74,7 +74,14 @@ pub enum Metric
 	/// Only counted once per vector written.
 	UnalignedWrites,
 }
-
+impl Metric
+{
+	/// Return an iterator over all the metrics
+	pub fn all() -> impl Iterator<Item = Self>
+	{
+		Self::iter()
+	}
+}
 /// Track simulation metrics.
 ///
 /// Not all metrics are necessarily tracked.

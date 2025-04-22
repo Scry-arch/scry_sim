@@ -288,13 +288,12 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 								.borrow_mut()
 								.write(address, &to_store, tracker)
 								.map_err(|err| {
-									ExecError::Exception(format!("Memory write error: {:?}", err.0))
+									ExecError::Exception(format!("Memory write error: {:?}", err))
 								})
 								.map(|result| {
 									if is_stack
 									{
-										tracker
-											.add_stat(Metric::StackBytesWritten, to_store.size());
+										tracker.add_stat(Metric::StackWriteBytes, to_store.size());
 										tracker.add_stat(Metric::StackWrites, 1);
 									}
 									result

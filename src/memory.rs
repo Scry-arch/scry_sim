@@ -321,7 +321,7 @@ impl Memory for BlockedMemory
 			if let Scalar::Val(bytes) = val
 			{
 				mem.write(element_addr, bytes.as_ref())?;
-				tracker.add_stat(Metric::DataBytesWritten, bytes.len());
+				tracker.add_stat(Metric::DataWriteBytes, bytes.len());
 				if addr % from.scale() != 0
 				{
 					tracker.add_stat(Metric::UnalignedWrites, 1);
