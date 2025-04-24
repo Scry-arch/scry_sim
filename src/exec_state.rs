@@ -144,7 +144,7 @@ pub struct StackFrame
 	pub block: Block,
 
 	/// The size of the primary stack frame in bytes.
-	pub primary_size: usize,
+	pub base_size: usize,
 }
 impl StackFrame
 {
@@ -152,7 +152,7 @@ impl StackFrame
 	/// message
 	pub fn validate(&self) -> Result<(), &str>
 	{
-		if self.block.size < self.primary_size
+		if self.block.size < self.base_size
 		{
 			return Err("Primary stack frame is larger than the whole stack frame");
 		}
@@ -168,7 +168,7 @@ impl StackFrame
 	/// The size of the secondary stack frame.
 	pub fn secondary_size(&self) -> usize
 	{
-		self.block.size - self.primary_size
+		self.block.size - self.base_size
 	}
 
 	/// Returns whether the primary stack frame can be increased by the given
@@ -178,7 +178,7 @@ impl StackFrame
 	/// amount.
 	pub fn can_increase_primary(&self, amount: usize) -> bool
 	{
-		(self.primary_size + amount) >= self.block.size
+		(self.base_size + amount) >= self.block.size
 	}
 
 	/// Increases the size of the primary frame by the given amount.
@@ -188,7 +188,7 @@ impl StackFrame
 	pub fn increase_primary(&mut self, amount: usize)
 	{
 		assert!(self.can_increase_primary(amount));
-		self.primary_size += amount;
+		self.base_size += amount;
 	}
 
 	/// Increases the size of the primary frame by the given amount.
@@ -198,10 +198,10 @@ impl StackFrame
 	pub fn decrease_primary(&mut self, amount: usize)
 	{
 		assert!(
-			amount <= self.primary_size,
+			amount <= self.base_size,
 			"Cannot decrease primary stack by more than its size."
 		);
-		self.primary_size += amount;
+		self.base_size += amount;
 	}
 
 	/// Increases the size of the stack.
@@ -215,7 +215,7 @@ impl StackFrame
 
 		if primary
 		{
-			self.primary_size += amount;
+			self.base_size += amount;
 		}
 	}
 
@@ -230,9 +230,9 @@ impl StackFrame
 
 		self.block.size -= amount;
 
-		if self.primary_size < self.block.size
+		if self.base_size < self.block.size
 		{
-			self.primary_size = self.block.size;
+			self.base_size = self.block.size;
 		}
 	}
 
@@ -246,7 +246,7 @@ impl StackFrame
 	{
 		// We first find the relative address in the stack frame that we need (frame
 		// offset)
-		let base_offset = if primary_base { 0 } else { self.primary_size };
+		let base_offset = if primary_base { 0 } else { self.base_size };
 
 		let scalar_size = 1 << scalar_pow2;
 		let frame_offset = base_offset + (index * scalar_size);
@@ -265,20 +265,13 @@ impl StackFrame
 	/// this stack frame.
 	pub fn frame_call(&mut self) -> StackFrame
 	{
-		let new_stack_base = if self.block.size == 0
-		{
-			self.block.address
-		}
-		else
-		{
-			self.get_address(0, self.primary_size, true).unwrap()
-		};
+		let new_stack_base = self.block.address + self.base_size;
 		let new_block = Self {
 			block: Block {
 				address: new_stack_base,
 				size: self.secondary_size(),
 			},
-			primary_size: self.secondary_size(),
+			base_size: self.secondary_size(),
 		};
 
 		self.block.size -= self.secondary_size();
@@ -288,7 +281,7 @@ impl StackFrame
 	/// Updates this stack frame based on a return from the given stack frame.
 	pub fn frame_return(&mut self, callee_frame: StackFrame)
 	{
-		self.block.size += callee_frame.secondary_size();
+		self.block.size += callee_frame.base_size;
 	}
 }
 

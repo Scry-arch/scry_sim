@@ -194,13 +194,13 @@ impl Arbitrary for StackFrame
 	{
 		let mut frame = StackFrame {
 			block: Arbitrary::arbitrary(g),
-			primary_size: 0,
+			base_size: 0,
 		};
 
 		// decide on primary size
 		if frame.block.size > 0
 		{
-			frame.primary_size = usize::arbitrary(g) % frame.block.size;
+			frame.base_size = usize::arbitrary(g) % frame.block.size;
 		}
 
 		// make sure is valid frame
@@ -227,9 +227,9 @@ impl Arbitrary for StackFrame
 			.chain(
 				{
 					let clone = self.clone();
-					self.primary_size.shrink().map(move |new_size| {
+					self.base_size.shrink().map(move |new_size| {
 						let mut clone = clone.clone();
-						clone.primary_size = new_size;
+						clone.base_size = new_size;
 						clone.validate().unwrap();
 						clone
 					})

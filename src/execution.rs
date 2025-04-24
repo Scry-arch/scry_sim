@@ -388,7 +388,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 						let (base_increase, total_increase) = if base
 						{
 							let total_free =
-								self.stack.top().block.size - self.stack.top().primary_size;
+								self.stack.top().block.size - self.stack.top().base_size;
 							let total_missing = reserve_bytes.saturating_sub(total_free);
 							(reserve_bytes, total_missing)
 						}
@@ -404,7 +404,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 
 						self.stack_buffer -= total_increase;
 						self.stack.top_mut().block.size += total_increase;
-						self.stack.top_mut().primary_size += base_increase;
+						self.stack.top_mut().base_size += base_increase;
 
 						tracker.add_stat(Metric::StackReserveTotal, (!base) as usize);
 						tracker.add_stat(Metric::StackReserveBase, base as usize);
@@ -420,7 +420,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 						else
 						{
 							let total_free =
-								self.stack.top().block.size - self.stack.top().primary_size;
+								self.stack.top().block.size - self.stack.top().base_size;
 							let total_missing = reserve_bytes.saturating_sub(total_free);
 							(total_missing, reserve_bytes)
 						};
@@ -432,7 +432,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 
 						self.stack_buffer += total_decrease;
 						self.stack.top_mut().block.size -= total_decrease;
-						self.stack.top_mut().primary_size -= base_decrease;
+						self.stack.top_mut().base_size -= base_decrease;
 
 						tracker.add_stat(Metric::StackFreeTotal, (!base) as usize);
 						tracker.add_stat(Metric::StackFreeBase, base as usize);

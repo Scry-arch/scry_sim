@@ -9,9 +9,9 @@ use quickcheck_macros::quickcheck;
 use scry_isa::{BitValue, Bits, CallVariant, Instruction};
 use scry_sim::{
 	arbitrary::{ArbValue, InstrAddr, NoCF},
-	CallFrameState, ControlFlowType, ExecState, Executor, Metric,
+	Block, CallFrameState, ControlFlowType, ExecState, Executor, Metric,
 	Metric::{ConsumedBytes, ConsumedOperands, IssuedCalls},
-	MetricTracker, OperandList, OperandState, Scalar, TrackReport, ValueType,
+	MetricTracker, OperandList, OperandState, Scalar, StackFrame, TrackReport, ValueType,
 };
 use std::collections::HashMap;
 
@@ -73,7 +73,7 @@ fn return_trigger_impl(
 	// and extract it immediately, ensuring the order of reads will follow the
 	// implementation
 	expected_state = Executor::from_state(&expected_state, RepeatingMem::<true>(0, 0)).state();
-	expected_state.frame.stack.frame_return(frame.stack.clone());
+	expected_state.frame.stack.block.size += frame.stack.base_size;
 
 	// Construct test state
 	let mut test_state = state.clone();
@@ -569,14 +569,23 @@ fn call_trigger_impl(
 	expected_state.frame.op_queue = advance_queue(expected_state.frame.op_queue);
 	let reads = expected_state.frame.reads.clone();
 	// Create expected stack frame
-	let frame_blocks = expected_state.frame.stack.frame_call();
+	let block = Block {
+		address: expected_state.frame.stack.block.address + expected_state.frame.stack.base_size,
+		size: expected_state.frame.stack.block.size - expected_state.frame.stack.base_size,
+	};
+	let frame_block = StackFrame {
+		base_size: block.size,
+		block,
+	};
 	let new_frame = CallFrameState {
 		ret_addr: state.address + 2,
 		branches: Default::default(),
 		op_queue: HashMap::from_iter(ready_list.map(|list| (0, list)).into_iter()),
 		reads,
-		stack: frame_blocks,
+		stack: frame_block,
 	};
+	expected_state.frame.stack.block.size = expected_state.frame.stack.base_size;
+
 	expected_state
 		.frame_stack
 		.insert(0, std::mem::replace(&mut expected_state.frame, new_frame));

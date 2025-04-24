@@ -72,7 +72,7 @@ fn static_reserve_base(
 	}
 
 	let (mut expected_state, test_mem) = default_expected_state(&state, true, pow2, true);
-	let total_free = state.frame.stack.block.size - state.frame.stack.primary_size;
+	let total_free = state.frame.stack.block.size - state.frame.stack.base_size;
 	let total_res = if total_free < reserve_amount
 	{
 		reserve_amount - total_free
@@ -83,7 +83,7 @@ fn static_reserve_base(
 	};
 	expected_state.stack_buffer -= total_res;
 	expected_state.frame.stack.block.size += total_res;
-	expected_state.frame.stack.primary_size += reserve_amount;
+	expected_state.frame.stack.base_size += reserve_amount;
 
 	test_execution_step(
 		&state.clone(),
@@ -122,8 +122,8 @@ fn static_free_total(
 	expected_state.stack_buffer += free_amount;
 	expected_state.frame.stack.block.size -= free_amount;
 	let base_free =
-		free_amount.saturating_sub(state.frame.stack.block.size - state.frame.stack.primary_size);
-	expected_state.frame.stack.primary_size -= base_free;
+		free_amount.saturating_sub(state.frame.stack.block.size - state.frame.stack.base_size);
+	expected_state.frame.stack.base_size -= base_free;
 
 	test_execution_step(
 		&state.clone(),
@@ -148,14 +148,14 @@ fn static_free_base(
 {
 	let free_amount = 2usize.pow(pow2.value as u32);
 	// Ensure base stack has size to free
-	if state.frame.stack.primary_size < free_amount
+	if state.frame.stack.base_size < free_amount
 	{
 		state.frame.stack.block.size += free_amount;
-		state.frame.stack.primary_size += free_amount;
+		state.frame.stack.base_size += free_amount;
 	}
 
 	let (mut expected_state, test_mem) = default_expected_state(&state, false, pow2, true);
-	expected_state.frame.stack.primary_size -= free_amount;
+	expected_state.frame.stack.base_size -= free_amount;
 
 	test_execution_step(
 		&state.clone(),
