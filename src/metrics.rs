@@ -41,12 +41,26 @@ pub enum Metric
 	// Stack
 	/// Total number of total stack frame reserves executed
 	StackReserveTotal,
-	/// Total bytes reserved for the total stack frame
+	/// Total bytes reserved for the total stack frame.
+	///
+	/// A base stack frame reserve that also increases the total stack frame
+	/// will reflect the increased bytes in this metric.
 	StackReserveTotalBytes,
+	/// Total number of base stack frame reserves executed
+	StackReserveBase,
+	/// Total bytes reserved for the base stack frame
+	StackReserveBaseBytes,
 	/// Total number of total stack frame frees executed
 	StackFreeTotal,
 	/// Total bytes freed from the total stack frame
 	StackFreeTotalBytes,
+	/// Total number of base stack frame frees executed
+	StackFreeBase,
+	/// Total bytes freed from the base stack frame.
+	///
+	/// Freeing of total stack frame that forces the base frame to be freed will
+	/// reflect in this metric
+	StackFreeBaseBytes,
 	/// Data reads from stack performed
 	StackReads,
 	/// Data bytes read from stack

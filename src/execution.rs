@@ -373,47 +373,71 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 				{
 					self.discard_ready_list(tracker);
 				},
-				StackRes(reserving, primary, amount) =>
+				StackRes(reserving, amount, base) =>
 				{
-					assert!(!primary, "TODO: Missing primary support");
 					assert_eq!(
 						self.operands.ready_peek().count(),
 						0,
-						"TODO: reserve/free with operant"
+						"TODO: reserve/free with operand"
 					);
 
 					let reserve_bytes = 2usize.pow(amount.value as u32);
 
 					if reserving
 					{
-						assert!(self.stack_buffer > 0, "TODO: Reserve empty buffer");
+						let (base_increase, total_increase) = if base
+						{
+							let total_free =
+								self.stack.top().block.size - self.stack.top().primary_size;
+							let total_missing = reserve_bytes.saturating_sub(total_free);
+							(reserve_bytes, total_missing)
+						}
+						else
+						{
+							(0, reserve_bytes)
+						};
+
 						assert!(
-							self.stack_buffer >= reserve_bytes,
+							self.stack_buffer >= total_increase,
 							"TODO: Reserve inadequate buffer"
 						);
-						// Remove from buffer
-						self.stack_buffer -= reserve_bytes;
 
-						// Add reserved to stack frame
-						self.stack.top_mut().block.size += reserve_bytes;
+						self.stack_buffer -= total_increase;
+						self.stack.top_mut().block.size += total_increase;
+						self.stack.top_mut().primary_size += base_increase;
 
-						tracker.add_stat(Metric::StackReserveTotal, 1);
-						tracker.add_stat(Metric::StackReserveTotalBytes, reserve_bytes);
+						tracker.add_stat(Metric::StackReserveTotal, (!base) as usize);
+						tracker.add_stat(Metric::StackReserveBase, base as usize);
+						tracker.add_stat(Metric::StackReserveTotalBytes, total_increase);
+						tracker.add_stat(Metric::StackReserveBaseBytes, base_increase);
 					}
 					else
 					{
+						let (base_decrease, total_decrease) = if base
+						{
+							(reserve_bytes, 0)
+						}
+						else
+						{
+							let total_free =
+								self.stack.top().block.size - self.stack.top().primary_size;
+							let total_missing = reserve_bytes.saturating_sub(total_free);
+							(total_missing, reserve_bytes)
+						};
+
 						assert!(
-							self.stack.top().block.size >= reserve_bytes,
+							self.stack.top().block.size >= total_decrease,
 							"TODO: support stack free exception"
 						);
-						// Add to buffer
-						self.stack_buffer += reserve_bytes;
 
-						// Add reserved to stack frame
-						self.stack.top_mut().block.size -= reserve_bytes;
+						self.stack_buffer += total_decrease;
+						self.stack.top_mut().block.size -= total_decrease;
+						self.stack.top_mut().primary_size -= base_decrease;
 
-						tracker.add_stat(Metric::StackFreeTotal, 1);
-						tracker.add_stat(Metric::StackFreeTotalBytes, reserve_bytes);
+						tracker.add_stat(Metric::StackFreeTotal, (!base) as usize);
+						tracker.add_stat(Metric::StackFreeBase, base as usize);
+						tracker.add_stat(Metric::StackFreeTotalBytes, total_decrease);
+						tracker.add_stat(Metric::StackFreeBaseBytes, base_decrease);
 					}
 
 					self.discard_ready_list(tracker);
