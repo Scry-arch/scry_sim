@@ -36,9 +36,7 @@ impl Arbitrary for SupportedInstruction
 			match instr
 			{
 				Alu(AluVariant::Add, _)
-				| Alu(AluVariant::Inc, _)
 				| Alu(AluVariant::Sub, _)
-				| Alu(AluVariant::Dec, _)
 				| Alu2(Alu2Variant::Add, _, _)
 				| Alu2(Alu2Variant::Sub, _, _)
 				| Constant(..)
@@ -73,7 +71,6 @@ impl ConsumingDiscarding
 		idx >= match self.0
 		{
 			Capture(..) => 0,
-			Alu(AluVariant::Inc, _) | Alu(AluVariant::Dec, _) => 1,
 			Alu(AluVariant::Add, _)
 			| Alu(AluVariant::Sub, _)
 			| Alu2(Alu2Variant::Add, _, _)
@@ -94,9 +91,7 @@ impl Arbitrary for ConsumingDiscarding
 			match instr
 			{
 				Alu(AluVariant::Add, _)
-				| Alu(AluVariant::Inc, _)
 				| Alu(AluVariant::Sub, _)
-				| Alu(AluVariant::Dec, _)
 				| Alu2(Alu2Variant::Add, _, _)
 				| Alu2(Alu2Variant::Sub, _, _) => break,
 				_ => instr = Instruction::arbitrary(g),

@@ -8,7 +8,8 @@ use crate::{
 use byteorder::{ByteOrder, LittleEndian};
 use duplicate::substitute;
 use scry_isa::{
-	Alu2OutputVariant, Alu2Variant, AluVariant, BitValue, Bits, CallVariant, Instruction,
+	Alu2OutputVariant, Alu2Variant, Alu2Variant::Sub, AluVariant, BitValue, Bits, CallVariant,
+	Instruction,
 };
 use std::{borrow::BorrowMut, fmt::Debug, marker::PhantomData, mem::size_of};
 
@@ -20,7 +21,7 @@ pub enum ExecError
 	Exception(String),
 
 	/// The execution caused a simulation error
-	Err,
+	Err(String),
 }
 
 /// Used to execute instructions.
@@ -457,7 +458,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 		}
 		else
 		{
-			Err(ExecError::Err)
+			Err(ExecError::Err("Empty call stack".into()))
 		}
 	}
 
@@ -668,7 +669,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 
 			let typ = match variant
 			{
-				Add | Sub | Mul | BitAnd | BitOr =>
+				Add | Sub | BitAnd | BitOr =>
 				{
 					// Variants with 2 inputs
 					let in2 = ins.next();
@@ -689,7 +690,6 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 					{
 						Add => Self::alu_add_saturated,
 						Sub => Self::alu_sub_saturated,
-						Mul => Self::alu_multiply,
 						BitAnd => Self::alu_bitwise_and,
 						BitOr => Self::alu_bitwise_or,
 						_ => unreachable!(),
@@ -701,7 +701,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 					}
 					typ
 				},
-				Inc | Dec | ShiftRight | RotateLeft | RotateRight =>
+				ShiftRight | RotateLeft | RotateRight =>
 				{
 					// Variants with 1 input
 					let in1 = in1.ok_or(ExecError::Exception(
@@ -712,8 +712,6 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 					let in1 = in1.0.iter();
 					let func = match variant
 					{
-						Inc => Self::alu_increment_wrapping,
-						Dec => Self::alu_decrement_wrapping,
 						ShiftRight => Self::alu_shift_right_once,
 						RotateLeft => Self::alu_rotate_left_once,
 						RotateRight => Self::alu_rotate_right_once,
@@ -780,6 +778,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 			{
 				Add => Self::alu_add_overflowing,
 				Sub => Self::alu_sub_overflowing,
+				Multiply => Self::alu_multiply,
 				_ => unreachable!(),
 			};
 
@@ -1091,20 +1090,27 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 
 	/// Performs multiplication on the given scalars, returning the lower-order
 	/// result
-	fn alu_multiply(sc1: &Scalar, sc2: &Scalar, typ: ValueType) -> Vec<u8>
+	fn alu_multiply(sc1: &Scalar, sc2: &Scalar, typ: ValueType) -> (Scalar, Scalar)
 	{
 		use ValueType::*;
-		substitute! {
+		let result: Vec<u8> = substitute! {
 			[throw_away [];] // used just to allow duplicate! in match case position
 			match typ {
 				duplicate!{
 					[
-						Sign letter; [Uint] [u]; [Int] [i];
+						Sign	letter;
+						[Uint]	[u];
+						[Int]	[i];
 					]
 					Sign(0) => {
-						let v1 = sc1.bytes().unwrap()[0];
-						let v2 = sc2.bytes().unwrap()[0];
-						vec![v1.wrapping_mul(v2)]
+						paste::paste!{
+							let v1 = sc1.bytes().unwrap()[0] as [<letter 16>];
+							let v2 = sc2.bytes().unwrap()[0] as [<letter 16>];
+							let mut result = [0u8;2];
+							LittleEndian::[< write_ letter 16 >]
+										(&mut result, v1.wrapping_mul(v2));
+							result.into()
+						}
 					},
 					duplicate!{
 						[
@@ -1130,7 +1136,12 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 				}
 				_ => todo!()
 			}
-		}
+		};
+		let (low, high) = result.split_at((result.len() / 2) + 1);
+		(
+			Scalar::Val(low.iter().cloned().collect::<Vec<_>>().into_boxed_slice()),
+			Scalar::Val(high.iter().cloned().collect::<Vec<_>>().into_boxed_slice()),
+		)
 	}
 
 	/// Performs addition on the given scalars, returning the wrapping result

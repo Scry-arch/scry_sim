@@ -312,12 +312,11 @@ fn test_alu2_instruction<const OPS: usize>(
 /// Tests the Alu instruction variants that two inputs and have a std function
 /// doing the same thing
 #[duplicate_item(
-	test_name 	alu_var			std_fn;
-	[add]		[Add]			[saturating_add];
-	[sub]		[Sub]			[saturating_sub];
-	[bit_and]	[BitAnd]		[bitand];
-	[bit_or]	[BitOr]			[bitor];
-	[mul]		[Mul]			[wrapping_mul];
+	test_name 		alu_var			std_fn;
+	[add]			[Add]			[saturating_add];
+	[sub]			[Sub]			[saturating_sub];
+	[bit_and]		[BitAnd]		[bitand];
+	[bit_or]		[BitOr]			[bitor];
 )]
 #[quickcheck]
 fn test_name(state: AluTestState<2>, offset: Bits<5, false>) -> TestResult
@@ -344,8 +343,6 @@ fn test_name(state: AluTestState<2>, offset: Bits<5, false>) -> TestResult
 /// that does the same for all data types
 #[duplicate_item(
 	test_name 	alu_var			std_fn;
-	[inc]		[Inc]			[wrapping_add];
-	[dec]		[Dec]			[wrapping_sub];
 	[shr]		[ShiftRight]	[shr];
 	[rol_once]	[RotateLeft]	[rotate_left];
 	[ror_once]	[RotateRight]	[rotate_right];
@@ -427,3 +424,5 @@ fn sub_carry(
 		|x| conv(x, i128::overflowing_sub),
 	)
 }
+
+// todo: test multiply
