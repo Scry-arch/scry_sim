@@ -8,8 +8,7 @@ use crate::{
 use byteorder::{ByteOrder, LittleEndian};
 use duplicate::substitute;
 use scry_isa::{
-	Alu2OutputVariant, Alu2Variant, Alu2Variant::Sub, AluVariant, BitValue, Bits, CallVariant,
-	Instruction,
+	Alu2OutputVariant, Alu2Variant, AluVariant, BitValue, Bits, CallVariant, Instruction,
 };
 use std::{borrow::BorrowMut, fmt::Debug, marker::PhantomData, mem::size_of};
 
@@ -754,7 +753,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 		tracker: &mut impl MetricTracker,
 	) -> Result<(), ExecError>
 	{
-		let (typ, mut result_scalars_low, mut result_scalars_high) = {
+		let (out_typ_1, out_typ_2, mut result_scalars_low, mut result_scalars_high) = {
 			// Extract operands
 			let mut ins = self.get_ready_iter(tracker);
 			let in1 = ins.next();
@@ -781,6 +780,13 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 				Multiply => Self::alu_multiply,
 				_ => unreachable!(),
 			};
+			let (out_typ_1, out_typ_2) = match variant
+			{
+				Add => (typ, ValueType::new::<u8>()),
+				Sub => (typ, ValueType::new::<u8>()),
+				Multiply => (typ, typ),
+				_ => unreachable!(),
+			};
 
 			let mut result_scalars_low = Vec::new();
 			let mut result_scalars_high = Vec::new();
@@ -790,15 +796,24 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 				result_scalars_low.push(low);
 				result_scalars_high.push(high);
 			}
-			(typ, result_scalars_low, result_scalars_high)
+			(
+				out_typ_1,
+				out_typ_2,
+				result_scalars_low,
+				result_scalars_high,
+			)
 		};
 
-		let low = Value::new_typed(typ, result_scalars_low.remove(0), result_scalars_low)
+		let low = Value::new_typed(out_typ_1, result_scalars_low.remove(0), result_scalars_low)
 			.unwrap()
 			.into();
-		let high = Value::new::<u8>(result_scalars_high.remove(0), result_scalars_high)
-			.unwrap()
-			.into();
+		let high = Value::new_typed(
+			out_typ_2,
+			result_scalars_high.remove(0),
+			result_scalars_high,
+		)
+		.unwrap()
+		.into();
 		let offset = offset.value as usize;
 
 		// Propagate results according to output variant
@@ -1104,31 +1119,30 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 					]
 					Sign(0) => {
 						paste::paste!{
-							let v1 = sc1.bytes().unwrap()[0] as [<letter 16>];
-							let v2 = sc2.bytes().unwrap()[0] as [<letter 16>];
+							let v1 = (sc1.bytes().unwrap()[0] as [<letter 8>]) as [<letter 16>];
+							let v2 = (sc2.bytes().unwrap()[0] as [<letter 8>]) as [<letter 16>];
 							let mut result = [0u8;2];
 							LittleEndian::[< write_ letter 16 >]
-										(&mut result, v1.wrapping_mul(v2));
+										(&mut result, v1 * v2);
 							result.into()
 						}
 					},
 					duplicate!{
 						[
-							power size bits;
-							[1] [2] [16];
-							[2] [4] [32];
-							[3] [8] [64];
-							[4] [16] [128];
+							power size bits bits2;
+							[1] [2] [16] [32];
+							[2] [4] [32] [64];
+							[3] [8] [64] [128];
 						]
 						Sign(power) => {
 							paste::paste!{
 								let v1 = LittleEndian::
-									[< read_ letter bits >](sc1.bytes().unwrap());
+									[< read_ letter bits >](sc1.bytes().unwrap()) as [< letter bits2 >];
 								let v2 = LittleEndian::
-									[< read_ letter bits >](sc2.bytes().unwrap());
-								let mut result = [0u8;size];
-								LittleEndian::[< write_ letter bits >]
-									(&mut result, v1.wrapping_mul(v2));
+									[< read_ letter bits >](sc2.bytes().unwrap()) as [< letter bits2 >];
+								let mut result = [0u8;size*2];
+								LittleEndian::[< write_ letter bits2 >]
+									(&mut result, v1 * v2);
 								result.into()
 							}
 						},
@@ -1137,7 +1151,8 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 				_ => todo!()
 			}
 		};
-		let (low, high) = result.split_at((result.len() / 2) + 1);
+
+		let (low, high) = result.split_at(result.len() / 2);
 		(
 			Scalar::Val(low.iter().cloned().collect::<Vec<_>>().into_boxed_slice()),
 			Scalar::Val(high.iter().cloned().collect::<Vec<_>>().into_boxed_slice()),

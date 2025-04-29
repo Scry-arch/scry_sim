@@ -6,7 +6,9 @@ use byteorder::{ByteOrder, LittleEndian};
 use duplicate::{duplicate_item, substitute};
 use quickcheck::TestResult;
 use quickcheck_macros::quickcheck;
-use scry_isa::{Alu2OutputVariant, Alu2Variant, AluVariant, Bits, Instruction};
+use scry_isa::{
+	Alu2OutputVariant, Alu2Variant, Alu2Variant::Multiply, AluVariant, Bits, Instruction,
+};
 use scry_sim::{
 	arbitrary::{LimitedOps, NoCF, NoReads, SimpleOps},
 	ExecState, Metric, OperandList, OperandState, Scalar, TrackReport, Value,
@@ -68,12 +70,12 @@ fn test_arithmetic_instruction<const OPS_IN: usize, const OPS_OUT: usize>(
 	u16_sem: impl Fn([u16; OPS_IN]) -> [Value; OPS_OUT],
 	u32_sem: impl Fn([u32; OPS_IN]) -> [Value; OPS_OUT],
 	u64_sem: impl Fn([u64; OPS_IN]) -> [Value; OPS_OUT],
-	u128_sem: impl Fn([u128; OPS_IN]) -> [Value; OPS_OUT],
 	i8_sem: impl Fn([i8; OPS_IN]) -> [Value; OPS_OUT],
 	i16_sem: impl Fn([i16; OPS_IN]) -> [Value; OPS_OUT],
 	i32_sem: impl Fn([i32; OPS_IN]) -> [Value; OPS_OUT],
 	i64_sem: impl Fn([i64; OPS_IN]) -> [Value; OPS_OUT],
-	i128_sem: impl Fn([i128; OPS_IN]) -> [Value; OPS_OUT],
+	u128_sem: Option<impl Fn([u128; OPS_IN]) -> [Value; OPS_OUT]>,
+	i128_sem: Option<impl Fn([i128; OPS_IN]) -> [Value; OPS_OUT]>,
 ) -> TestResult
 {
 	let state = state.0 .0 .0 .0;
@@ -133,12 +135,32 @@ fn test_arithmetic_instruction<const OPS_IN: usize, const OPS_OUT: usize>(
 			Uint(1) => calculate_result(scalars, &u16_sem, LittleEndian::read_u16),
 			Uint(2) => calculate_result(scalars, &u32_sem, LittleEndian::read_u32),
 			Uint(3) => calculate_result(scalars, &u64_sem, LittleEndian::read_u64),
-			Uint(4) => calculate_result(scalars, &u128_sem, LittleEndian::read_u128),
 			Int(0) => calculate_result(scalars, &i8_sem, |b| b[0] as i8),
 			Int(1) => calculate_result(scalars, &i16_sem, LittleEndian::read_i16),
 			Int(2) => calculate_result(scalars, &i32_sem, LittleEndian::read_i32),
 			Int(3) => calculate_result(scalars, &i64_sem, LittleEndian::read_i64),
-			Int(4) => calculate_result(scalars, &i128_sem, LittleEndian::read_i128),
+			Uint(4) =>
+			{
+				if let Some(u128_sem) = &u128_sem
+				{
+					calculate_result(scalars, u128_sem, LittleEndian::read_u128)
+				}
+				else
+				{
+					return TestResult::discard();
+				}
+			},
+			Int(4) =>
+			{
+				if let Some(i128_sem) = &i128_sem
+				{
+					calculate_result(scalars, i128_sem, LittleEndian::read_i128)
+				}
+				else
+				{
+					return TestResult::discard();
+				}
+			},
 			Uint(_) | Int(_) => unreachable!(),
 		});
 	}
@@ -225,12 +247,12 @@ fn test_alu_instruction<const OPS: usize>(
 		|x| [u16_sem(x).into()],
 		|x| [u32_sem(x).into()],
 		|x| [u64_sem(x).into()],
-		|x| [u128_sem(x).into()],
 		|x| [i8_sem(x).into()],
 		|x| [i16_sem(x).into()],
 		|x| [i32_sem(x).into()],
 		|x| [i64_sem(x).into()],
-		|x| [i128_sem(x).into()],
+		Some(|x| [u128_sem(x).into()]),
+		Some(|x| [i128_sem(x).into()]),
 	)
 }
 
@@ -270,12 +292,12 @@ fn test_alu2_instruction<const OPS: usize>(
 					|x| [u16_sem(x).idx.into()],
 					|x| [u32_sem(x).idx.into()],
 					|x| [u64_sem(x).idx.into()],
-					|x| [u128_sem(x).idx.into()],
 					|x| [i8_sem(x).idx.into()],
 					|x| [i16_sem(x).idx.into()],
 					|x| [i32_sem(x).idx.into()],
 					|x| [i64_sem(x).idx.into()],
-					|x| [i128_sem(x).idx.into()],
+					Some(|x| [u128_sem(x).idx.into()]),
+					Some(|x| [i128_sem(x).idx.into()]),
 				),
 			}
 			duplicate!{
@@ -294,14 +316,26 @@ fn test_alu2_instruction<const OPS: usize>(
 						duplicate!(
 							[
 								sem_fn;
-								[u8_sem]; [u16_sem]; [u32_sem]; [u64_sem]; [u128_sem];
-								[i8_sem]; [i16_sem]; [i32_sem]; [i64_sem]; [i128_sem];
+								[u8_sem]; [u16_sem]; [u32_sem]; [u64_sem];
+								[i8_sem]; [i16_sem]; [i32_sem]; [i64_sem];
 							]
 							|x| {
 								let res = sem_fn(x);
 								[order]
 							},
 						)
+						Some(
+							|x| {
+								let res = u128_sem(x);
+								[order]
+							}
+						),
+						Some(
+							|x| {
+								let res = i128_sem(x);
+								[order]
+							}
+						),
 					)
 				},
 			}
@@ -425,4 +459,111 @@ fn sub_carry(
 	)
 }
 
-// todo: test multiply
+/// Test the Alu2 instruction variant `Sub`
+#[quickcheck]
+fn multiply_carry(
+	state: AluTestState<2>,
+	offset: Bits<5, false>,
+	out_var: Alu2OutputVariant,
+) -> TestResult
+{
+	use Alu2OutputVariant::*;
+	substitute! ( [
+		closure(typ1, typ) [
+			|x| {
+				paste::paste!{
+					let mut result = [0u8;2];
+					LittleEndian::[<write_ typ>](&mut result, (x[0] as typ) * (x[1] as typ));
+					order((result[0] as typ1).into(), (result[1] as typ1).into(), out_var)
+				}
+			}
+		];
+		closure2 [
+			|x| {
+				paste::paste!{
+					let mut result = [0u8;size_of::<typ2>()];
+					LittleEndian::[<write_ typ2>](&mut result, (x[0] as typ2) * (x[1] as typ2));
+					let (r1,r2) = result.split_at(result.len() / 2);
+					order(LittleEndian::[<read_ typ>](r1).into(), LittleEndian::[<read_ typ>](r2).into(), out_var)
+				}
+			},
+		]
+	]
+		if out_var == High || out_var == Low {
+			fn order<T>(out1: T, out2: T, var: Alu2OutputVariant) -> [T; 1] {
+				match var {
+					Low => [out1],
+					High => [out2],
+					_ => unreachable!()
+				}
+			}
+			test_arithmetic_instruction(
+				state,
+				Instruction::Alu2(Multiply, out_var, offset),
+				[offset.value as usize],
+				closure([u8],[u16]),
+				duplicate! (
+					[
+						typ typ2 ;
+						[u16] [u32];
+						[u32] [u64];
+						[u64] [u128];
+					]
+					closure2
+				)
+				closure([i8],[i16]),
+				duplicate! (
+					[
+						typ typ2 ;
+						[i16] [i32];
+						[i32] [i64];
+						[i64] [i128];
+					]
+					closure2
+				)
+				None::<fn([u128;2]) -> [Value;1]>,
+				None::<fn([i128;2]) -> [Value;1]>,
+			)
+		} else {
+			fn order<T>(out1: T, out2: T, var: Alu2OutputVariant) -> [T; 2] {
+				match var {
+					FirstLow => [out1, out2],
+					FirstHigh => [out2, out1],
+					NextLow => [out1, out2],
+					NextHigh => [out2, out1],
+					_ => unreachable!()
+				}
+			}
+			test_arithmetic_instruction(
+				state,
+				Instruction::Alu2(Multiply, out_var, offset),
+				[
+					if out_var == FirstLow || out_var == FirstHigh { offset.value as usize}else {0},
+					offset.value as usize
+				],
+				closure([u8],[u16]),
+				duplicate! (
+					[
+						typ typ2 ;
+						[u16] [u32];
+						[u32] [u64];
+						[u64] [u128];
+					]
+					closure2
+				)
+				closure([i8],[i16]),
+				duplicate! (
+					[
+						typ typ2 ;
+						[i16] [i32];
+						[i32] [i64];
+						[i64] [i128];
+					]
+					closure2
+				)
+				None::<fn([u128;2]) -> [Value;2]>,
+				None::<fn([i128;2]) -> [Value;2]>,
+			)
+		}
+	)
+}
