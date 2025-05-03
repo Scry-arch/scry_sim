@@ -15,7 +15,7 @@ use scry_sim::{
 };
 use std::{
 	cmp::min,
-	ops::{BitAnd, BitOr, Shr},
+	ops::{BitAnd, BitOr, Shl, Shr},
 };
 
 /// Manages the calculation of applying the given semantic function to the given
@@ -372,11 +372,37 @@ fn test_name(state: AluTestState<2>, offset: Bits<5, false>) -> TestResult
 	)
 }
 
+/// Tests the Alu comparison instructions
+#[duplicate_item(
+	test_name 		alu_var			std_fn;
+	[equal]			[Equal]			[eq];
+)]
+#[quickcheck]
+fn test_name(state: AluTestState<2>, offset: Bits<5, false>) -> TestResult
+{
+	test_arithmetic_instruction(
+		state,
+		Instruction::Alu(AluVariant::alu_var, offset),
+		[offset.value as usize],
+		|x| [(u8::std_fn(&x[0], &x[1]) as u8).into()],
+		|x| [(u16::std_fn(&x[0], &x[1]) as u8).into()],
+		|x| [(u32::std_fn(&x[0], &x[1]) as u8).into()],
+		|x| [(u64::std_fn(&x[0], &x[1]) as u8).into()],
+		|x| [(i8::std_fn(&x[0], &x[1]) as u8).into()],
+		|x| [(i16::std_fn(&x[0], &x[1]) as u8).into()],
+		|x| [(i32::std_fn(&x[0], &x[1]) as u8).into()],
+		|x| [(i64::std_fn(&x[0], &x[1]) as u8).into()],
+		Some(|x: [u128; 2]| [(u128::std_fn(&x[0], &x[1]) as u8).into()]),
+		Some(|x: [i128; 2]| [(i128::std_fn(&x[0], &x[1]) as u8).into()]),
+	)
+}
+
 /// Test the Alu instruction variants that take one input, whose
 /// second input is implicitly '1', and where there is a std function
 /// that does the same for all data types
 #[duplicate_item(
 	test_name 	alu_var			std_fn;
+	[shl]		[ShiftLeft]		[shl];
 	[shr]		[ShiftRight]	[shr];
 	[rol_once]	[RotateLeft]	[rotate_left];
 	[ror_once]	[RotateRight]	[rotate_right];
@@ -441,54 +467,29 @@ fn test_name(
 }
 
 /// Test the Alu2 instruction variant `Add`
+#[duplicate_item(
+	name			variant	func;
+	[add_carry]		[Add]	[overflowing_add];
+	[sub_carry]		[Sub]	[overflowing_sub];
+)]
 #[quickcheck]
-fn add_carry(
-	state: AluTestState<2>,
-	offset: Bits<5, false>,
-	out_var: Alu2OutputVariant,
-) -> TestResult
+fn name(state: AluTestState<2>, offset: Bits<5, false>, out_var: Alu2OutputVariant) -> TestResult
 {
 	test_alu2_instruction(
 		state,
 		offset,
-		Alu2Variant::Add,
+		Alu2Variant::variant,
 		out_var,
-		|x| conv(x, u8::overflowing_add),
-		|x| conv(x, u16::overflowing_add),
-		|x| conv(x, u32::overflowing_add),
-		|x| conv(x, u64::overflowing_add),
-		|x| conv(x, u128::overflowing_add),
-		|x| conv(x, i8::overflowing_add),
-		|x| conv(x, i16::overflowing_add),
-		|x| conv(x, i32::overflowing_add),
-		|x| conv(x, i64::overflowing_add),
-		|x| conv(x, i128::overflowing_add),
-	)
-}
-
-/// Test the Alu2 instruction variant `Sub`
-#[quickcheck]
-fn sub_carry(
-	state: AluTestState<2>,
-	offset: Bits<5, false>,
-	out_var: Alu2OutputVariant,
-) -> TestResult
-{
-	test_alu2_instruction(
-		state,
-		offset,
-		Alu2Variant::Sub,
-		out_var,
-		|x| conv(x, u8::overflowing_sub),
-		|x| conv(x, u16::overflowing_sub),
-		|x| conv(x, u32::overflowing_sub),
-		|x| conv(x, u64::overflowing_sub),
-		|x| conv(x, u128::overflowing_sub),
-		|x| conv(x, i8::overflowing_sub),
-		|x| conv(x, i16::overflowing_sub),
-		|x| conv(x, i32::overflowing_sub),
-		|x| conv(x, i64::overflowing_sub),
-		|x| conv(x, i128::overflowing_sub),
+		|x| conv(x, u8::func),
+		|x| conv(x, u16::func),
+		|x| conv(x, u32::func),
+		|x| conv(x, u64::func),
+		|x| conv(x, u128::func),
+		|x| conv(x, i8::func),
+		|x| conv(x, i16::func),
+		|x| conv(x, i32::func),
+		|x| conv(x, i64::func),
+		|x| conv(x, i128::func),
 	)
 }
 

@@ -668,7 +668,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 
 			let typ = match variant
 			{
-				Add | Sub | BitAnd | BitOr =>
+				Add | Sub | BitAnd | BitOr | Equal =>
 				{
 					// Variants with 2 inputs
 					let in2 = ins.next();
@@ -691,16 +691,34 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 						Sub => Self::alu_sub_saturated,
 						BitAnd => Self::alu_bitwise_and,
 						BitOr => Self::alu_bitwise_or,
-						_ => unreachable!(),
+						Equal => Self::alu_equal,
+						_ =>
+						{
+							return Err(ExecError::Err(
+								"Unsupported ALU (double input) instruction".into(),
+							))
+						},
+					};
+
+					let typ_out = match variant
+					{
+						Add | Sub | BitAnd | BitOr => typ,
+						Equal => ValueType::Uint(0),
+						_ =>
+						{
+							return Err(ExecError::Err(
+								"Unsupported ALU (double input) instruction".into(),
+							))
+						},
 					};
 
 					for (sc1, sc2) in in1.zip(in2)
 					{
 						result_scalars.push(Scalar::Val(func(sc1, sc2, typ).into_boxed_slice()));
 					}
-					typ
+					typ_out
 				},
-				ShiftRight | RotateLeft | RotateRight =>
+				ShiftLeft | ShiftRight | RotateLeft | RotateRight =>
 				{
 					// Variants with 1 input
 					let in1 = in1.ok_or(ExecError::Exception(
@@ -711,10 +729,16 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 					let in1 = in1.0.iter();
 					let func = match variant
 					{
+						ShiftLeft => Self::alu_shift_left_once,
 						ShiftRight => Self::alu_shift_right_once,
 						RotateLeft => Self::alu_rotate_left_once,
 						RotateRight => Self::alu_rotate_right_once,
-						_ => todo!(),
+						_ =>
+						{
+							return Err(ExecError::Err(
+								"Unsupported ALU (single input) instruction".into(),
+							))
+						},
 					};
 
 					for sc1 in in1
@@ -723,7 +747,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 					}
 					typ
 				},
-				_ => todo!(),
+				_ => return Err(ExecError::Err("Unsupported ALU instruction".into())),
 			};
 
 			(typ, result_scalars)
@@ -776,7 +800,6 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 							Alu2Variant::Add => bytes[0] = 1, // implicit 1
 							Alu2Variant::Sub => bytes[0] = 1, // implicit 1
 							Alu2Variant::Multiply => bytes.clone_from_slice(scal.bytes().unwrap()), // implicit in1
-							_ => unreachable!(),
 						}
 						Scalar::Val(bytes.into_boxed_slice())
 					})
@@ -797,14 +820,12 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 				Alu2Variant::Add => Self::alu_add_overflowing,
 				Alu2Variant::Sub => Self::alu_sub_overflowing,
 				Alu2Variant::Multiply => Self::alu_multiply,
-				_ => unreachable!(),
 			};
 			let (out_typ_1, out_typ_2) = match variant
 			{
 				Alu2Variant::Add => (typ, ValueType::new::<u8>()),
 				Alu2Variant::Sub => (typ, ValueType::new::<u8>()),
 				Alu2Variant::Multiply => (typ, typ),
-				_ => unreachable!(),
 			};
 
 			let mut result_scalars_low = Vec::new();
@@ -977,6 +998,23 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 		added
 	}
 
+	/// Performs equality comparison.
+	///
+	/// The bytes of the inputs are assumed to have the given type.
+	///
+	/// Returns the resulting bytes. Assumes the two given scalars are valid
+	/// values (not Nan or Nar) and have the same length. The result is a single
+	/// byte.
+	fn alu_equal(in1: &Scalar, in2: &Scalar, _: ValueType) -> Vec<u8>
+	{
+		vec![in1
+			.bytes()
+			.unwrap()
+			.iter()
+			.zip(in2.bytes().unwrap().iter())
+			.all(|(b1, b2)| *b1 == *b2) as u8]
+	}
+
 	/// Performs a wrapping addition of the given scalar and 1.
 	///
 	/// The bytes of the input are assumed to have the given type.
@@ -995,6 +1033,34 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 	fn alu_decrement_wrapping(in1: &Scalar, typ: ValueType) -> Vec<u8>
 	{
 		Self::alu_add_carry(in1, &Self::negate(Self::scalar_one(typ), typ)).0
+	}
+
+	/// Performs a shift left by 1 of the given scalar.
+	///
+	/// The bytes of the input are assumed to have the given type.
+	///
+	/// Returns the resulting bytes of the same length as the input.
+	fn alu_shift_left_once(in1: &Scalar, _: ValueType) -> Vec<u8>
+	{
+		let mut result_bytes = Vec::new();
+		let bytes = in1.bytes().unwrap();
+		let mut carry = false;
+		for i in 0..bytes.len()
+		{
+			let byte = bytes[i];
+			// capture the highest order bit
+			let new_carry = byte >= 0b10000000u8;
+			// shift
+			let mut shifted = byte << 1;
+			if carry
+			{
+				shifted += 1;
+			}
+			carry = new_carry;
+			result_bytes.push(shifted);
+		}
+
+		result_bytes
 	}
 
 	/// Performs a shift right by 1 of the given scalar.
