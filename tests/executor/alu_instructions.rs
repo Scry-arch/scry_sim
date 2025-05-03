@@ -407,6 +407,39 @@ fn conv<I: Copy>(inputs: [I; 2], semantic_fn: impl Fn(I, I) -> (I, bool)) -> (I,
 	(result.0, result.1 as u8)
 }
 
+/// Test the Alu2 instruction variants that take one input, whose
+/// second input is implicit, and where there is a std function
+/// that does the same for all data types
+#[duplicate_item(
+	test_name 		alu_var		std_fn				implicit;
+	[increment]		[Add]		[overflowing_add]	[1];
+	[decrement]		[Sub]		[overflowing_sub]	[1];
+)]
+#[quickcheck]
+fn test_name(
+	state: AluTestState<1>,
+	offset: Bits<5, false>,
+	out_var: Alu2OutputVariant,
+) -> TestResult
+{
+	test_alu2_instruction(
+		state,
+		offset,
+		Alu2Variant::alu_var,
+		out_var,
+		|x| conv([x[0], implicit], u8::std_fn),
+		|x| conv([x[0], implicit], u16::std_fn),
+		|x| conv([x[0], implicit], u32::std_fn),
+		|x| conv([x[0], implicit], u64::std_fn),
+		|x| conv([x[0], implicit], u128::std_fn),
+		|x| conv([x[0], implicit], i8::std_fn),
+		|x| conv([x[0], implicit], i16::std_fn),
+		|x| conv([x[0], implicit], i32::std_fn),
+		|x| conv([x[0], implicit], i64::std_fn),
+		|x| conv([x[0], implicit], i128::std_fn),
+	)
+}
+
 /// Test the Alu2 instruction variant `Add`
 #[quickcheck]
 fn add_carry(
@@ -459,7 +492,7 @@ fn sub_carry(
 	)
 }
 
-/// Test the Alu2 instruction variant `Sub`
+/// Test the Alu2 instruction variant `Multiply`
 #[quickcheck]
 fn multiply_carry(
 	state: AluTestState<2>,
@@ -563,6 +596,115 @@ fn multiply_carry(
 				)
 				None::<fn([u128;2]) -> [Value;2]>,
 				None::<fn([i128;2]) -> [Value;2]>,
+			)
+		}
+	)
+}
+
+/// Test the Alu2 instruction variant `Multiply` with 1 input
+#[quickcheck]
+fn multiply_implicit(
+	state: AluTestState<1>,
+	offset: Bits<5, false>,
+	out_var: Alu2OutputVariant,
+) -> TestResult
+{
+	use Alu2OutputVariant::*;
+	substitute! ( [
+		closure(typ1, typ) [
+			|x| {
+				paste::paste!{
+					let mut result = [0u8;2];
+					LittleEndian::[<write_ typ>](&mut result, (x[0] as typ) * (x[0] as typ));
+					order((result[0] as typ1).into(), (result[1] as typ1).into(), out_var)
+				}
+			}
+		];
+		closure2 [
+			|x| {
+				paste::paste!{
+					let mut result = [0u8;size_of::<typ2>()];
+					LittleEndian::[<write_ typ2>](&mut result, (x[0] as typ2) * (x[0] as typ2));
+					let (r1,r2) = result.split_at(result.len() / 2);
+					order(LittleEndian::[<read_ typ>](r1).into(), LittleEndian::[<read_ typ>](r2).into(), out_var)
+				}
+			},
+		]
+	]
+		if out_var == High || out_var == Low {
+			fn order<T>(out1: T, out2: T, var: Alu2OutputVariant) -> [T; 1] {
+				match var {
+					Low => [out1],
+					High => [out2],
+					_ => unreachable!()
+				}
+			}
+			test_arithmetic_instruction(
+				state,
+				Instruction::Alu2(Multiply, out_var, offset),
+				[offset.value as usize],
+				closure([u8],[u16]),
+				duplicate! (
+					[
+						typ typ2 ;
+						[u16] [u32];
+						[u32] [u64];
+						[u64] [u128];
+					]
+					closure2
+				)
+				closure([i8],[i16]),
+				duplicate! (
+					[
+						typ typ2 ;
+						[i16] [i32];
+						[i32] [i64];
+						[i64] [i128];
+					]
+					closure2
+				)
+				None::<fn([u128;1]) -> [Value;1]>,
+				None::<fn([i128;1]) -> [Value;1]>,
+			)
+		} else {
+			fn order<T>(out1: T, out2: T, var: Alu2OutputVariant) -> [T; 2] {
+				match var {
+					FirstLow => [out1, out2],
+					FirstHigh => [out2, out1],
+					NextLow => [out1, out2],
+					NextHigh => [out2, out1],
+					_ => unreachable!()
+				}
+			}
+			test_arithmetic_instruction(
+				state,
+				Instruction::Alu2(Multiply, out_var, offset),
+				[
+					if out_var == FirstLow || out_var == FirstHigh { offset.value as usize}else {0},
+					offset.value as usize
+				],
+				closure([u8],[u16]),
+				duplicate! (
+					[
+						typ typ2 ;
+						[u16] [u32];
+						[u32] [u64];
+						[u64] [u128];
+					]
+					closure2
+				)
+				closure([i8],[i16]),
+				duplicate! (
+					[
+						typ typ2 ;
+						[i16] [i32];
+						[i32] [i64];
+						[i64] [i128];
+					]
+					closure2
+				)
+				None::<fn([u128;1]) -> [Value;2]>,
+				None::<fn([i128;1]) -> [Value;2]>,
 			)
 		}
 	)

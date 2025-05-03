@@ -757,34 +757,53 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 			// Extract operands
 			let mut ins = self.get_ready_iter(tracker);
 			let in1 = ins.next();
-			let in2 = ins.next();
 			let in1 = in1.ok_or(ExecError::Exception(
 				"Alu2 instruction missing first operand".into(),
 			))?;
-			let in2 = in2.ok_or(ExecError::Exception(
-				"Alu2 instruction missing first operand".into(),
-			))?;
 			Self::fail_if_nan_nar(&in1.0)?;
-			Self::fail_if_nan_nar(&in2.0)?;
 			let typ = in1.0.value_type();
+
+			let in2 = ins.next();
+			let in2 = in2.unwrap_or({
+				let mut scalars: Vec<_> = in1
+					.0
+					.iter()
+					.map(|scal| {
+						let mut bytes = Vec::new();
+						bytes.resize(typ.scale(), 0);
+						match variant
+						{
+							Alu2Variant::Add => bytes[0] = 1, // implicit 1
+							Alu2Variant::Sub => bytes[0] = 1, // implicit 1
+							Alu2Variant::Multiply => bytes.clone_from_slice(scal.bytes().unwrap()), // implicit in1
+							_ => unreachable!(),
+						}
+						Scalar::Val(bytes.into_boxed_slice())
+					})
+					.collect();
+				(
+					Value::new_typed(typ, scalars.remove(0), scalars).unwrap(),
+					None,
+				)
+			});
+			Self::fail_if_nan_nar(&in2.0)?;
 			Self::fail_if_diff_types(typ, in2.0.value_type())?;
 
 			let in1 = in1.0.iter();
 			let in2 = in2.0.iter();
 
-			use Alu2Variant::*;
 			let func = match variant
 			{
-				Add => Self::alu_add_overflowing,
-				Sub => Self::alu_sub_overflowing,
-				Multiply => Self::alu_multiply,
+				Alu2Variant::Add => Self::alu_add_overflowing,
+				Alu2Variant::Sub => Self::alu_sub_overflowing,
+				Alu2Variant::Multiply => Self::alu_multiply,
 				_ => unreachable!(),
 			};
 			let (out_typ_1, out_typ_2) = match variant
 			{
-				Add => (typ, ValueType::new::<u8>()),
-				Sub => (typ, ValueType::new::<u8>()),
-				Multiply => (typ, typ),
+				Alu2Variant::Add => (typ, ValueType::new::<u8>()),
+				Alu2Variant::Sub => (typ, ValueType::new::<u8>()),
+				Alu2Variant::Multiply => (typ, typ),
 				_ => unreachable!(),
 			};
 
