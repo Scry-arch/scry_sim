@@ -668,7 +668,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 
 			let typ = match variant
 			{
-				Add | Sub | BitAnd | BitOr | Equal =>
+				Add | Sub | BitAnd | BitOr | Equal | LessThan | GreaterThan =>
 				{
 					// Variants with 2 inputs
 					let in2 = ins.next();
@@ -692,6 +692,8 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 						BitAnd => Self::alu_bitwise_and,
 						BitOr => Self::alu_bitwise_or,
 						Equal => Self::alu_equal,
+						LessThan => Self::alu_less_than,
+						GreaterThan => Self::alu_greater_than,
 						_ =>
 						{
 							return Err(ExecError::Err(
@@ -703,7 +705,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 					let typ_out = match variant
 					{
 						Add | Sub | BitAnd | BitOr => typ,
-						Equal => ValueType::Uint(0),
+						Equal | LessThan | GreaterThan => ValueType::Uint(0),
 						_ =>
 						{
 							return Err(ExecError::Err(
@@ -747,7 +749,6 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 					}
 					typ
 				},
-				_ => return Err(ExecError::Err("Unsupported ALU instruction".into())),
 			};
 
 			(typ, result_scalars)
@@ -1013,6 +1014,94 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 			.iter()
 			.zip(in2.bytes().unwrap().iter())
 			.all(|(b1, b2)| *b1 == *b2) as u8]
+	}
+
+	/// Performs less than comparison.
+	///
+	/// The bytes of the inputs are assumed to have the given type.
+	///
+	/// Returns the resulting bytes. Assumes the two given scalars are valid
+	/// values (not Nan or Nar) and have the same length. The result is a single
+	/// byte.
+	fn alu_less_than(in1: &Scalar, in2: &Scalar, typ: ValueType) -> Vec<u8>
+	{
+		if let ValueType::Int(_) = typ
+		{
+			let neg1 = in1.bytes().unwrap().last().unwrap() >= &0b10000000u8;
+			let neg2 = in2.bytes().unwrap().last().unwrap() >= &0b10000000u8;
+			if neg1 && !neg2
+			{
+				return vec![true as u8];
+			}
+			else if !neg1 && neg2
+			{
+				return vec![false as u8];
+			}
+		}
+
+		for (b1, b2) in in1
+			.bytes()
+			.unwrap()
+			.iter()
+			.rev()
+			.zip(in2.bytes().unwrap().iter().rev())
+		{
+			if *b1 < *b2
+			{
+				return vec![true as u8];
+			}
+			else if *b1 > *b2
+			{
+				return vec![false as u8];
+			}
+			// if equal, check next byte
+		}
+		// all equal
+		vec![false as u8]
+	}
+
+	/// Performs greater than comparison.
+	///
+	/// The bytes of the inputs are assumed to have the given type.
+	///
+	/// Returns the resulting bytes. Assumes the two given scalars are valid
+	/// values (not Nan or Nar) and have the same length. The result is a single
+	/// byte.
+	fn alu_greater_than(in1: &Scalar, in2: &Scalar, typ: ValueType) -> Vec<u8>
+	{
+		if let ValueType::Int(_) = typ
+		{
+			let neg1 = in1.bytes().unwrap().last().unwrap() >= &0b10000000u8;
+			let neg2 = in2.bytes().unwrap().last().unwrap() >= &0b10000000u8;
+			if neg1 && !neg2
+			{
+				return vec![false as u8];
+			}
+			else if !neg1 && neg2
+			{
+				return vec![true as u8];
+			}
+		}
+
+		for (b1, b2) in in1
+			.bytes()
+			.unwrap()
+			.iter()
+			.rev()
+			.zip(in2.bytes().unwrap().iter().rev())
+		{
+			if *b1 < *b2
+			{
+				return vec![false as u8];
+			}
+			else if *b1 > *b2
+			{
+				return vec![true as u8];
+			}
+			// if equal, check next byte
+		}
+		// all equal
+		vec![false as u8]
 	}
 
 	/// Performs a wrapping addition of the given scalar and 1.

@@ -376,6 +376,8 @@ fn test_name(state: AluTestState<2>, offset: Bits<5, false>) -> TestResult
 #[duplicate_item(
 	test_name 		alu_var			std_fn;
 	[equal]			[Equal]			[eq];
+	[less_than]		[LessThan]		[lt];
+	[greater_than]	[GreaterThan]	[gt];
 )]
 #[quickcheck]
 fn test_name(state: AluTestState<2>, offset: Bits<5, false>) -> TestResult
