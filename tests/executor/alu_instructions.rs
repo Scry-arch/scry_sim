@@ -343,59 +343,64 @@ fn test_alu2_instruction<const OPS: usize>(
 	}
 }
 
-/// Tests the Alu instruction variants that two inputs and have a std function
-/// doing the same thing
+/// Tests the Alu instruction variants that have a std function doing the same
+/// thing.
 #[duplicate_item(
-	test_name 		alu_var			std_fn;
-	[add]			[Add]			[saturating_add];
-	[sub]			[Sub]			[saturating_sub];
-	[bit_and]		[BitAnd]		[bitand];
-	[bit_or]		[BitOr]			[bitor];
+	test_name 		alu_var		std_fn				inputs	second;
+	[add]			[Add]		[saturating_add]	[2]		[sc[1]];
+	[sub]			[Sub]		[saturating_sub]	[2]		[sc[1]];
+	[bit_and]		[BitAnd]	[bitand]			[2]		[sc[1]];
+	[bit_or]		[BitOr]		[bitor]				[2]		[sc[1]];
+	[inc_sat]		[Add]		[saturating_add]	[1]		[1];
+	[dec_sat]		[Sub]		[saturating_sub]	[1]		[1];
 )]
 #[quickcheck]
-fn test_name(state: AluTestState<2>, offset: Bits<5, false>) -> TestResult
+fn test_name(state: AluTestState<inputs>, offset: Bits<5, false>) -> TestResult
 {
 	test_alu_instruction(
 		state,
 		offset,
 		AluVariant::alu_var,
-		|sc| u8::std_fn(sc[0], sc[1]),
-		|sc| u16::std_fn(sc[0], sc[1]),
-		|sc| u32::std_fn(sc[0], sc[1]),
-		|sc| u64::std_fn(sc[0], sc[1]),
-		|sc| u128::std_fn(sc[0], sc[1]),
-		|sc| i8::std_fn(sc[0], sc[1]),
-		|sc| i16::std_fn(sc[0], sc[1]),
-		|sc| i32::std_fn(sc[0], sc[1]),
-		|sc| i64::std_fn(sc[0], sc[1]),
-		|sc| i128::std_fn(sc[0], sc[1]),
+		|sc| u8::std_fn(sc[0], second),
+		|sc| u16::std_fn(sc[0], second),
+		|sc| u32::std_fn(sc[0], second),
+		|sc| u64::std_fn(sc[0], second),
+		|sc| u128::std_fn(sc[0], second),
+		|sc| i8::std_fn(sc[0], second),
+		|sc| i16::std_fn(sc[0], second),
+		|sc| i32::std_fn(sc[0], second),
+		|sc| i64::std_fn(sc[0], second),
+		|sc| i128::std_fn(sc[0], second),
 	)
 }
 
-/// Tests the Alu comparison instructions
+/// Tests the Alu comparison instructions with either 1 or 2 inputs
 #[duplicate_item(
-	test_name 		alu_var			std_fn;
-	[equal]			[Equal]			[eq];
-	[less_than]		[LessThan]		[lt];
-	[greater_than]	[GreaterThan]	[gt];
+	test_name 			alu_var			std_fn	inputs	second;
+	[equal]				[Equal]			[eq]	[2]		[x[1]];
+	[less_than]			[LessThan]		[lt]	[2]		[x[1]];
+	[greater_than]		[GreaterThan]	[gt]	[2]		[x[1]];
+	[equal_0]			[Equal]			[eq]	[1]		[0];
+	[less_than_0]		[LessThan]		[lt]	[1]		[0];
+	[greater_than_0]	[GreaterThan]	[gt]	[1]		[0];
 )]
 #[quickcheck]
-fn test_name(state: AluTestState<2>, offset: Bits<5, false>) -> TestResult
+fn test_name(state: AluTestState<inputs>, offset: Bits<5, false>) -> TestResult
 {
 	test_arithmetic_instruction(
 		state,
 		Instruction::Alu(AluVariant::alu_var, offset),
 		[offset.value as usize],
-		|x| [(u8::std_fn(&x[0], &x[1]) as u8).into()],
-		|x| [(u16::std_fn(&x[0], &x[1]) as u8).into()],
-		|x| [(u32::std_fn(&x[0], &x[1]) as u8).into()],
-		|x| [(u64::std_fn(&x[0], &x[1]) as u8).into()],
-		|x| [(i8::std_fn(&x[0], &x[1]) as u8).into()],
-		|x| [(i16::std_fn(&x[0], &x[1]) as u8).into()],
-		|x| [(i32::std_fn(&x[0], &x[1]) as u8).into()],
-		|x| [(i64::std_fn(&x[0], &x[1]) as u8).into()],
-		Some(|x: [u128; 2]| [(u128::std_fn(&x[0], &x[1]) as u8).into()]),
-		Some(|x: [i128; 2]| [(i128::std_fn(&x[0], &x[1]) as u8).into()]),
+		|x| [(u8::std_fn(&x[0], &second) as u8).into()],
+		|x| [(u16::std_fn(&x[0], &second) as u8).into()],
+		|x| [(u32::std_fn(&x[0], &second) as u8).into()],
+		|x| [(u64::std_fn(&x[0], &second) as u8).into()],
+		|x| [(i8::std_fn(&x[0], &second) as u8).into()],
+		|x| [(i16::std_fn(&x[0], &second) as u8).into()],
+		|x| [(i32::std_fn(&x[0], &second) as u8).into()],
+		|x| [(i64::std_fn(&x[0], &second) as u8).into()],
+		Some(|x: [u128; inputs]| [(u128::std_fn(&x[0], &second) as u8).into()]),
+		Some(|x: [i128; inputs]| [(i128::std_fn(&x[0], &second) as u8).into()]),
 	)
 }
 

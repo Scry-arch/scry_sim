@@ -675,13 +675,34 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 					let in1 = in1.ok_or(ExecError::Exception(
 						"Alu instruction missing first operand".into(),
 					))?;
-					let in2 = in2.ok_or(ExecError::Exception(
-						"Alu instruction missing second operand".into(),
-					))?;
 					Self::fail_if_nan_nar(&in1.0)?;
-					Self::fail_if_nan_nar(&in2.0)?;
 					let typ = in1.0.value_type();
+
+					let in2 = in2.unwrap_or_else(|| {
+						let mut scalars: Vec<_> = in1
+							.0
+							.iter()
+							.map(|_| {
+								let mut bytes = Vec::new();
+								bytes.resize(typ.scale(), 0);
+								match variant
+								{
+									Add | Sub => bytes[0] = 1,                      // implicit 1
+									Equal | LessThan | GreaterThan => bytes[0] = 0, // implicit 0
+									_ => todo!(),
+								}
+								Scalar::Val(bytes.into_boxed_slice())
+							})
+							.collect();
+						(
+							Value::new_typed(typ, scalars.remove(0), scalars).unwrap(),
+							None,
+						)
+					});
+
+					Self::fail_if_nan_nar(&in2.0)?;
 					Self::fail_if_diff_types(typ, in2.0.value_type())?;
+
 					let in1 = in1.0.iter();
 					let in2 = in2.0.iter();
 
@@ -1112,16 +1133,6 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 	fn alu_increment_wrapping(in1: &Scalar, typ: ValueType) -> Vec<u8>
 	{
 		Self::alu_add_carry(in1, &Self::scalar_one(typ)).0
-	}
-
-	/// Performs a wrapping subtraction of the given scalar and 1.
-	///
-	/// The bytes of the input are assumed to have the given type.
-	///
-	/// Returns the resulting bytes of the same length as the input.
-	fn alu_decrement_wrapping(in1: &Scalar, typ: ValueType) -> Vec<u8>
-	{
-		Self::alu_add_carry(in1, &Self::negate(Self::scalar_one(typ), typ)).0
 	}
 
 	/// Performs a shift left by 1 of the given scalar.
