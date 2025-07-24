@@ -451,7 +451,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 		}
 		if self
 			.control
-			.next_addr(&mut self.operands, &mut self.stack, tracker)
+			.next_addr(&mut self.operands, &mut self.stack, tracker)?
 		{
 			Ok(self)
 		}
@@ -689,7 +689,11 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 								{
 									Add | Sub => bytes[0] = 1,                      // implicit 1
 									Equal | LessThan | GreaterThan => bytes[0] = 0, // implicit 0
-									_ => todo!(),
+									x =>
+									{
+										dbg!(x);
+										todo!()
+									},
 								}
 								Scalar::Val(bytes.into_boxed_slice())
 							})

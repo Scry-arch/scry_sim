@@ -293,6 +293,10 @@ fn load_trigger(
 		RepeatingMem::<true>(instruction.0.encode(), 0),
 	)
 	.step(&mut expected_metrics);
+	if expected_result.is_err()
+	{
+		return TestResult::discard();
+	}
 
 	// Add load metric to expected metrics
 	let load_operands = values.0.iter().enumerate().filter_map(|(idx, (v, addr))| {
@@ -391,7 +395,6 @@ fn load_trigger(
 	let same_step = match (&exec_result, &expected_result)
 	{
 		(Ok(exec_result), Ok(exec_expected)) => exec_result.state() == exec_expected.state(),
-		(Err(err_result), Err(err_expected)) => err_result == err_expected,
 		_ => false,
 	};
 

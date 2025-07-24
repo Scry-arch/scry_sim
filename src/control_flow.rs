@@ -1,7 +1,7 @@
 use crate::{
 	data::{OperandStack, ProgramStack},
 	metrics::MetricTracker,
-	CallFrameState, ControlFlowType, ExecState, Metric,
+	CallFrameState, ControlFlowType, ExecError, ExecState, Metric,
 };
 use std::collections::{HashMap, VecDeque};
 
@@ -75,7 +75,7 @@ impl ControlFlow
 		op_stack: &mut OperandStack,
 		prog_stack: &mut ProgramStack,
 		tracker: &mut impl MetricTracker,
-	) -> bool
+	) -> Result<bool, ExecError>
 	{
 		if let Some(cft) = self.call_frame.branches.remove(&self.next_addr)
 		{
@@ -84,6 +84,15 @@ impl ControlFlow
 			{
 				Branch(tar) =>
 				{
+					if let Some(earlier_trigger) =
+						self.call_frame.branches.iter().find(|(k, _)| **k < tar)
+					{
+						return Err(ExecError::Exception(format!(
+							"Branching past control flow trigger. Current: {:?}, trigger: {:?}, \
+							 target: {:?}",
+							self.next_addr, earlier_trigger.0, tar
+						)));
+					}
 					self.next_addr = tar;
 					tracker.add_stat(Metric::TriggeredBranches, 1);
 				},
@@ -115,7 +124,7 @@ impl ControlFlow
 					}
 					else
 					{
-						return false;
+						return Ok(false);
 					}
 
 					self.call_frame = if let Some(s) = self.call_stack.pop_front()
@@ -124,7 +133,7 @@ impl ControlFlow
 					}
 					else
 					{
-						return false;
+						return Ok(false);
 					};
 					tracker.add_stat(Metric::TriggeredReturns, 1);
 				},
@@ -135,7 +144,7 @@ impl ControlFlow
 			// No flow change
 			self.next_addr += 2;
 		}
-		true
+		Ok(true)
 	}
 
 	/// Issue a branch to trigger at the given location targeting the given

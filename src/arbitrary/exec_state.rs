@@ -268,6 +268,7 @@ impl Arbitrary for CallFrameState
 			ret_addr,
 			branches: branches
 				.into_iter()
+				.filter(|(addr, _)| addr.0 != 0) // disallow branch triggers at 0
 				.map(|(trig, ctrl)| (trig.0, ctrl))
 				.collect(),
 			op_queue,
@@ -519,11 +520,24 @@ impl Arbitrary for ExecState
 {
 	fn arbitrary(g: &mut Gen) -> Self
 	{
+		let frame = CallFrameState::arbitrary(g);
+		let earliest_trigger = frame.branches.iter().fold(usize::MAX, |earliest, (k, _)| {
+			if earliest > *k
+			{
+				*k
+			}
+			else
+			{
+				earliest
+			}
+		});
+
 		let mut result = Self {
 			// Ensure that the address may be increased by 2 (after executing an instruction)
-			// without causing overflow
-			address: InstrAddr::arbitrary(g).0 % (usize::MAX - 3),
-			frame: Arbitrary::arbitrary(g),
+			// without causing overflow.
+			// Also ensure address precedes all branch trigger locations
+			address: InstrAddr::arbitrary(g).0 % (std::cmp::min(earliest_trigger, usize::MAX - 3)),
+			frame,
 			frame_stack: vec![],
 			stack_buffer: usize::arbitrary(g),
 		};

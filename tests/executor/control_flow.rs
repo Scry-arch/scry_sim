@@ -248,14 +248,32 @@ fn jmp_trigger(
 	branch_target: InstrAddr,
 ) -> TestResult
 {
-	// Skip any test with immediate control flow triggering
-	// or where the instruction is a branch
+	// Skip any test with immediate control flow triggering or trigger before the
+	// target address or where the instruction is a branch
 	match instr.0
 	{
-		Instruction::Call(_, offset) if offset.value == 0 => return TestResult::discard(),
+		Instruction::Call(_, offset) =>
+		{
+			if offset.value == 0
+				|| ((offset.value() * 2) as usize + state.address) < branch_target.0
+			{
+				return TestResult::discard();
+			}
+		},
 		Instruction::Jump(..) => return TestResult::discard(),
 		_ => (),
 	}
+	// Discard test if jumping past trigger location
+	if state
+		.frame
+		.branches
+		.iter()
+		.find(|(k, _)| **k < branch_target.0)
+		.is_some()
+	{
+		return TestResult::discard();
+	}
+
 	let instr_encoded = Instruction::encode(&instr.0);
 
 	// Execute one step on the frame to get the expected result of the next
@@ -285,6 +303,60 @@ fn jmp_trigger(
 		RepeatingMem::<true>(instr_encoded, 0),
 		&expected_state,
 		&expected_metrics,
+	)
+}
+
+/// Test the triggering of a jump that was previously issued.
+#[quickcheck]
+fn jmp_trigger_past_trigger(
+	NoCF(state): NoCF<ExecState>,
+	instr: SupportedInstruction,
+	branch_target: InstrAddr,
+	trigger_offset: usize,
+) -> TestResult
+{
+	// Skip any test with immediate control flow triggering
+	// or where the instruction is a branch
+	match instr.0
+	{
+		Instruction::Call(_, offset) if offset.value == 0 => return TestResult::discard(),
+		Instruction::Jump(..) => return TestResult::discard(),
+		_ => (),
+	}
+	let instr_encoded = Instruction::encode(&instr.0);
+
+	// Construct trigger address earlier than the target but after current address
+	let range = if state.address < branch_target.0
+	{
+		branch_target.0 - state.address
+	}
+	else
+	{
+		branch_target.0
+	};
+	if range <= 1
+	{
+		return TestResult::discard();
+	}
+	let trig = branch_target.0 - (((trigger_offset % (range / 2)) + 1) * 2);
+
+	// Construct test state
+	let mut test_state = state.clone();
+	test_state
+		.frame
+		.branches
+		.insert(trig, ControlFlowType::Branch(0)); // target doesnt matter
+
+	// Add the new branch trigger that jumps past the previous trigger
+	test_state
+		.frame
+		.branches
+		.insert(state.address, ControlFlowType::Branch(branch_target.0));
+
+	TestResult::from_bool(
+		Executor::from_state(&test_state, RepeatingMem::<true>(instr_encoded, 0))
+			.step(&mut ())
+			.is_err(),
 	)
 }
 
@@ -376,6 +448,17 @@ fn test_jump_immediate(
 			.address
 			.checked_add(((target.value + location.value + 1) * 2) as usize)
 		{
+			// Discard test if jumping past trigger location
+			if test_state
+				.frame
+				.branches
+				.iter()
+				.find(|(k, _)| **k < target_addr)
+				.is_some()
+			{
+				return TestResult::discard();
+			}
+
 			expect_jump(&mut expected_state, target_addr, location_addr);
 			true
 		}
