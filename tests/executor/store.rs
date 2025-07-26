@@ -74,7 +74,15 @@ fn test_store_instruction<const ADDR_OPS: usize>(
 	let mut encoded_bytes = [0u8; 2];
 	LittleEndian::write_u16(
 		&mut encoded_bytes,
-		Instruction::Store(if is_stack { idx as i32 } else { 255 }.try_into().unwrap()).encode(),
+		if is_stack
+		{
+			Instruction::StoreStack((idx as i32).try_into().unwrap())
+		}
+		else
+		{
+			Instruction::Store
+		}
+		.encode(),
 	);
 	mem.add_block(encoded_bytes.into_iter(), state.address);
 
@@ -265,7 +273,7 @@ fn store_nan_addr(
 
 	test_execution_step(
 		&test_state,
-		RepeatingMem::<false>(Instruction::Store(255.try_into().unwrap()).encode(), 0),
+		RepeatingMem::<false>(Instruction::Store.encode(), 0),
 		&expected_state,
 		&[
 			(Metric::InstructionReads, 1),
@@ -292,7 +300,7 @@ fn store_nan_value(NoCF(state): NoCF<ExecState>, address: Value, to_store: Value
 
 	test_execution_step(
 		&test_state,
-		RepeatingMem::<false>(Instruction::Store(255.try_into().unwrap()).encode(), 0),
+		RepeatingMem::<false>(Instruction::Store.encode(), 0),
 		&expected_state,
 		&[
 			(Metric::InstructionReads, 1),
@@ -320,7 +328,7 @@ fn store_nar_addr(
 
 	test_execution_step_exceptions(
 		&test_state,
-		RepeatingMem::<false>(Instruction::Store(255.try_into().unwrap()).encode(), 0),
+		RepeatingMem::<false>(Instruction::Store.encode(), 0),
 		&[
 			(Metric::InstructionReads, 1),
 			(Metric::ConsumedOperands, 2),
@@ -350,7 +358,7 @@ fn store_nar_value(
 
 	test_execution_step_exceptions(
 		&test_state,
-		RepeatingMem::<false>(Instruction::Store(255.try_into().unwrap()).encode(), 0),
+		RepeatingMem::<false>(Instruction::Store.encode(), 0),
 		&[
 			(Metric::InstructionReads, 1),
 			(Metric::ConsumedOperands, 2),
@@ -374,7 +382,7 @@ fn store_missing_addr(
 
 	test_execution_step_exceptions(
 		&test_state,
-		RepeatingMem::<false>(Instruction::Store(255.try_into().unwrap()).encode(), 0),
+		RepeatingMem::<false>(Instruction::Store.encode(), 0),
 		&[
 			(Metric::InstructionReads, 1),
 			(Metric::ConsumedOperands, 1),
@@ -393,7 +401,7 @@ fn store_missing_operands(NoCF(mut state): NoCF<ExecState>) -> TestResult
 
 	test_execution_step_exceptions(
 		&state,
-		RepeatingMem::<false>(Instruction::Store(255.try_into().unwrap()).encode(), 0),
+		RepeatingMem::<false>(Instruction::Store.encode(), 0),
 		&[(Metric::InstructionReads, 1)].into(),
 	)
 }
@@ -407,5 +415,5 @@ fn store_stack(
 	init_mem_bytes: u8,
 ) -> TestResult
 {
-	test_store_instruction(state, [], &to_store, init_mem_bytes, idx % 255, true)
+	test_store_instruction(state, [], &to_store, init_mem_bytes, idx % 32, true)
 }

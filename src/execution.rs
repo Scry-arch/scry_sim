@@ -7,7 +7,9 @@ use crate::{
 };
 use byteorder::{ByteOrder, LittleEndian};
 use duplicate::substitute;
-use scry_isa::{Alu2OutputVariant, Alu2Variant, AluVariant, BitValue, Bits, CallVariant, Instruction, Type};
+use scry_isa::{
+	Alu2OutputVariant, Alu2Variant, AluVariant, BitValue, Bits, CallVariant, Instruction, Type,
+};
 use std::{borrow::BorrowMut, fmt::Debug, marker::PhantomData, mem::size_of};
 
 /// The result of performing one execution step
@@ -201,13 +203,23 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 				{
 					let typ: Type = typ_bits.try_into().unwrap();
 					// Create operand from immediate and add to next list
-					let mut bytes = vec!(bits.value as u8);
+					let mut bytes = vec![bits.value as u8];
 					// The remaining bytes are sign extended if needed.
-					bytes.resize(typ.size(), if typ.is_signed_int() && bits.value>=128 {u8::MAX} else {0});
-					
-					
-					let new_val = Value::singleton_typed(typ.into(), Scalar::Val(bytes.into_boxed_slice()));
-					
+					bytes.resize(
+						typ.size(),
+						if typ.is_signed_int() && bits.value >= 128
+						{
+							u8::MAX
+						}
+						else
+						{
+							0
+						},
+					);
+
+					let new_val =
+						Value::singleton_typed(typ.into(), Scalar::Val(bytes.into_boxed_slice()));
+
 					self.operands.push_operand(1, new_val.into(), tracker);
 
 					// Forward any ready operands to the next list
@@ -220,75 +232,28 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 				{
 					self.handle_jump(target, location, tracker);
 				},
-				Store(index) =>
+				Store =>
 				{
-					let is_stack = index.value != 255;
-					let (to_store, effective_address) = {
-						let stack_base = self.get_stack_base();
-						let mut ready_iter = self.operands.ready_iter(
-							self.get_stack_base(),
-							self.memory.borrow_mut(),
-							tracker,
-						);
+					let next_addr = self.control.next_addr;
+					let (to_store, ready_iter) = self.get_store_val(tracker)?;
+					let effective_address = Self::get_mem_instr_effective_addr(
+						ready_iter,
+						next_addr,
+						to_store.value_type().scale(),
+					);
 
-						let (to_store, to_store_err) = ready_iter.next().ok_or(
-							ExecError::Exception("Store instruction got no operands".into()),
-						)?;
+					self.store_val(tracker, &to_store, effective_address, false)?;
+				},
+				StoreStack(index) =>
+				{
+					let to_store = self.get_store_val(tracker)?.0;
+					let effective_address = OperandStack::operand_stack_address(
+						self.get_stack_base(),
+						to_store.value_type(),
+						index.value as usize,
+					);
 
-						if let Some((err, addr)) = to_store_err
-						{
-							return Err(ExecError::Exception(format!(
-								"Store operand errored while loaded: ({:?}, {:#X})",
-								err, addr
-							)));
-						}
-
-						let to_store_type = to_store.value_type();
-						(
-							to_store,
-							if !is_stack
-							{
-								// Regular store
-								Self::get_mem_instr_effective_addr(
-									ready_iter,
-									self.control.next_addr,
-									to_store_type.scale(),
-								)
-							}
-							else
-							{
-								// stack store
-								Ok(OperandStack::operand_stack_address(
-									stack_base,
-									to_store_type,
-									index.value as usize,
-								))
-							},
-						)
-					};
-
-					match (to_store.get_first(), effective_address)
-					{
-						(Scalar::Nan, _) | (_, Err(None)) => Ok(()), // Do nothing
-						(Scalar::Val(_), Ok(address)) =>
-						{
-							self.memory
-								.borrow_mut()
-								.write(address, &to_store, tracker)
-								.map_err(|err| {
-									ExecError::Exception(format!("Memory write error: {:?}", err))
-								})
-								.map(|result| {
-									if is_stack
-									{
-										tracker.add_stat(Metric::StackWriteBytes, to_store.size());
-										tracker.add_stat(Metric::StackWrites, 1);
-									}
-									result
-								})
-						},
-						_ => Err(ExecError::Exception("Cannot store".into())),
-					}?;
+					self.store_val(tracker, &to_store, Ok(effective_address), true)?;
 				},
 				Load(signed, size, index) =>
 				{
@@ -449,6 +414,69 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 		}
 	}
 
+	/// Stores the given value at the given address (if available)
+	/// If the address is a None error, will store nothing, if its an error with
+	/// a messge, will return that as an error
+	fn store_val(
+		&mut self,
+		tracker: &mut impl MetricTracker,
+		to_store: &Value,
+		effective_address: Result<usize, Option<ExecError>>,
+		is_stack: bool,
+	) -> Result<(), ExecError>
+	{
+		match (to_store.get_first(), effective_address)
+		{
+			(Scalar::Nan, _) | (_, Err(None)) => Ok(()), // Do nothing
+			(Scalar::Val(_), Ok(address)) =>
+			{
+				self.memory
+					.borrow_mut()
+					.write(address, &to_store, tracker)
+					.map_err(|err| ExecError::Exception(format!("Memory write error: {:?}", err)))
+					.map(|result| {
+						if is_stack
+						{
+							tracker.add_stat(Metric::StackWriteBytes, to_store.size());
+							tracker.add_stat(Metric::StackWrites, 1);
+						}
+						result
+					})
+			},
+			_ => Err(ExecError::Exception("Cannot store".into())),
+		}
+	}
+
+	/// Gets the operand to store from the ready queue, returning the operand
+	/// and the rest of the ready queue.
+	fn get_store_val<'a>(
+		&'a mut self,
+		tracker: &'a mut impl MetricTracker,
+	) -> Result<
+		(
+			Value,
+			impl 'a + Iterator<Item = (Value, Option<(MemError, usize)>)>,
+		),
+		ExecError,
+	>
+	{
+		let mut ready_iter = self.get_ready_iter(tracker);
+
+		let (to_store, to_store_err) = ready_iter.next().ok_or(ExecError::Exception(
+			"Store instruction got no operands".into(),
+		))?;
+
+		if let Some((err, addr)) = to_store_err
+		{
+			return Err(ExecError::Exception(format!(
+				"Store operand errored while loaded: ({:?}, {:#X})",
+				err, addr
+			)));
+		}
+
+		Ok((to_store, ready_iter))
+	}
+
 	/// Returns the effective address of a memory instruction (load, store).
 	///
 	/// Extracts address resolution operands from the given ready queue
@@ -501,7 +529,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 					{
 						// If any is NaR, exception
 						Err(Some(ExecError::Exception(
-							"Memory instruection got NaR operand".into(),
+							"Memory instruction got NaR operand".into(),
 						)))
 					},
 				}

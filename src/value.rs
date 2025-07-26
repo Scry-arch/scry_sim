@@ -1,6 +1,6 @@
 use num_traits::PrimInt;
-use std::iter::once;
 use scry_isa::Type;
+use std::iter::once;
 
 /// The type of a value
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -51,11 +51,14 @@ impl ValueType
 }
 impl From<Type> for ValueType
 {
-	fn from(t: Type) -> Self {
-		if t.is_signed_int() {
+	fn from(t: Type) -> Self
+	{
+		if t.is_signed_int()
+		{
 			Self::Int(t.size_pow2())
-		} else {
-			
+		}
+		else
+		{
 			Self::Uint(t.size_pow2())
 		}
 	}

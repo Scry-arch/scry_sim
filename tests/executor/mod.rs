@@ -2,7 +2,10 @@ use crate::misc::{advance_queue, RepeatingMem};
 use quickcheck::{Arbitrary, Gen, TestResult};
 use quickcheck_macros::quickcheck;
 use scry_isa::{Alu2Variant, AluVariant, Bits, CallVariant, Instruction, Type};
-use scry_sim::{arbitrary::NoCF, ExecError, ExecState, Executor, Memory, Metric, MetricReporter, MetricTracker, OperandList, OperandQueue, OperandState, Scalar, TrackReport, Value};
+use scry_sim::{
+	arbitrary::NoCF, ExecError, ExecState, Executor, Memory, Metric, MetricReporter, MetricTracker,
+	OperandList, OperandQueue, OperandState, Scalar, TrackReport, Value,
+};
 use std::{borrow::BorrowMut, fmt::Debug};
 
 mod alu_instructions;
@@ -252,24 +255,44 @@ fn instruction_nop(state: NoCF<ExecState>) -> TestResult
 
 /// Tests the Constant instruction
 #[quickcheck]
-fn instruction_constant(state: NoCF<ExecState>, typ_bits: Bits<3, false>, immediate: u8) -> TestResult
+fn instruction_constant(
+	state: NoCF<ExecState>,
+	typ_bits: Bits<3, false>,
+	immediate: u8,
+) -> TestResult
 {
 	let typ: Type = typ_bits.try_into().unwrap();
-	let mut bytes = vec!(immediate);
+	let mut bytes = vec![immediate];
 	// The remaining bytes are sign extended if needed.
-	bytes.resize(typ.size(), if typ.is_signed_int() && immediate>=128 {u8::MAX} else {0});
-	
+	bytes.resize(
+		typ.size(),
+		if typ.is_signed_int() && immediate >= 128
+		{
+			u8::MAX
+		}
+		else
+		{
+			0
+		},
+	);
+
 	test_simple_instruction(
 		state,
-		Instruction::Constant(typ_bits, Bits{value: immediate as i32} ),
+		Instruction::Constant(
+			typ_bits,
+			Bits {
+				value: immediate as i32,
+			},
+		),
 		|old_op_queue| {
 			let mut new_op_q = old_op_queue.clone();
 
 			// The produced operand should go first in the next operand list
 			let old_operands = new_op_q.remove(&0);
-			let new_const = OperandState::Ready(
-				Value::singleton_typed(typ.clone().into(), Scalar::Val(bytes.into_boxed_slice()))
-			);
+			let new_const = OperandState::Ready(Value::singleton_typed(
+				typ.clone().into(),
+				Scalar::Val(bytes.into_boxed_slice()),
+			));
 
 			let ops_rest = if let Some(ops) = new_op_q.get_mut(&1)
 			{
