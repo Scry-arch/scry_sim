@@ -185,54 +185,6 @@ fn echo_long(state: NoCF<ExecState>, target: Bits<10, false>) -> TestResult
 	)
 }
 
-/// Test the "Capture" instruction
-#[quickcheck]
-fn capture(state: NoCF<ExecState>, cap: Bits<5, false>, target: Bits<5, false>) -> TestResult
-{
-	let cap_idx = cap.value as usize + 1;
-	test_simple_instruction(
-		state,
-		Instruction::Capture(cap, target),
-		|old_op_queue| {
-			let mut new_op_q = old_op_queue.clone();
-
-			if let Some(old_ops) = new_op_q.remove(&cap_idx)
-			{
-				let mut iter = old_ops.into_iter();
-
-				let tar_idx = target.value as usize + 1;
-				if let Some(list) = new_op_q.get_mut(&tar_idx)
-				{
-					list.extend(iter);
-				}
-				else if let Some(first) = iter.next()
-				{
-					new_op_q.insert(tar_idx, OperandList::new(first, iter.collect()));
-				}
-			}
-			// discard ready list
-			let _ = new_op_q.remove(&0);
-
-			new_op_q
-		},
-		|old_op_queue| {
-			let reordered = old_op_queue.get(&cap_idx).map_or(0, OperandList::len);
-			[(
-				Metric::ReorderedOperands,
-				if cap.value != target.value
-				{
-					reordered
-				}
-				else
-				{
-					0
-				},
-			)]
-			.into()
-		},
-	)
-}
-
 /// Test the "NoOp" instruction
 #[quickcheck]
 fn noop(state: NoCF<ExecState>) -> TestResult

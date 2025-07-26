@@ -1,11 +1,8 @@
 use crate::misc::{advance_queue, RepeatingMem};
 use quickcheck::{Arbitrary, Gen, TestResult};
 use quickcheck_macros::quickcheck;
-use scry_isa::{Alu2Variant, AluVariant, Bits, BitsDyn, CallVariant, Instruction};
-use scry_sim::{
-	arbitrary::NoCF, ExecError, ExecState, Executor, Memory, Metric, MetricReporter, MetricTracker,
-	OperandList, OperandQueue, OperandState, TrackReport,
-};
+use scry_isa::{Alu2Variant, AluVariant, Bits, CallVariant, Instruction, Type};
+use scry_sim::{arbitrary::NoCF, ExecError, ExecState, Executor, Memory, Metric, MetricReporter, MetricTracker, OperandList, OperandQueue, OperandState, Scalar, TrackReport, Value};
 use std::{borrow::BorrowMut, fmt::Debug};
 
 mod alu_instructions;
@@ -44,7 +41,7 @@ impl Arbitrary for SupportedInstruction
 				| Duplicate(..)
 				| Echo(..)
 				| EchoLong(..)
-				| Capture(..) => break,
+				| NoOp => break,
 				_ => instr = Instruction::arbitrary(g),
 			}
 		}
@@ -70,7 +67,7 @@ impl ConsumingDiscarding
 		use Instruction::*;
 		idx >= match self.0
 		{
-			Capture(..) => 0,
+			NoOp => 0,
 			Alu(AluVariant::Add, _)
 			| Alu(AluVariant::Sub, _)
 			| Alu2(Alu2Variant::Add, _, _)
@@ -242,7 +239,7 @@ fn instruction_nop(state: NoCF<ExecState>) -> TestResult
 {
 	test_simple_instruction(
 		state,
-		Instruction::nop(),
+		Instruction::NoOp,
 		|old_op_queue| {
 			let mut new_op_q = old_op_queue.clone();
 			// Discard ready list if present
@@ -255,25 +252,23 @@ fn instruction_nop(state: NoCF<ExecState>) -> TestResult
 
 /// Tests the Constant instruction
 #[quickcheck]
-fn instruction_constant(state: NoCF<ExecState>, immediate: BitsDyn<8>) -> TestResult
+fn instruction_constant(state: NoCF<ExecState>, typ_bits: Bits<3, false>, immediate: u8) -> TestResult
 {
+	let typ: Type = typ_bits.try_into().unwrap();
+	let mut bytes = vec!(immediate);
+	// The remaining bytes are sign extended if needed.
+	bytes.resize(typ.size(), if typ.is_signed_int() && immediate>=128 {u8::MAX} else {0});
+	
 	test_simple_instruction(
 		state,
-		Instruction::Constant(immediate.clone()),
+		Instruction::Constant(typ_bits, Bits{value: immediate as i32} ),
 		|old_op_queue| {
 			let mut new_op_q = old_op_queue.clone();
 
 			// The produced operand should go first in the next operand list
 			let old_operands = new_op_q.remove(&0);
 			let new_const = OperandState::Ready(
-				if immediate.is_signed()
-				{
-					(Bits::<8, true>::try_from(immediate).unwrap().value as i8).into()
-				}
-				else
-				{
-					(Bits::<8, false>::try_from(immediate).unwrap().value as u8).into()
-				},
+				Value::singleton_typed(typ.clone().into(), Scalar::Val(bytes.into_boxed_slice()))
 			);
 
 			let ops_rest = if let Some(ops) = new_op_q.get_mut(&1)
@@ -296,7 +291,7 @@ fn instruction_constant(state: NoCF<ExecState>, immediate: BitsDyn<8>) -> TestRe
 			let old_op_count = old_op_queue.get(&0).map_or(0, |ops| ops.len());
 			[
 				(Metric::QueuedValues, 1),
-				(Metric::QueuedValueBytes, 1),
+				(Metric::QueuedValueBytes, typ.size()),
 				(Metric::ReorderedOperands, old_op_count),
 			]
 			.into()

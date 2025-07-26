@@ -7,9 +7,7 @@ use crate::{
 };
 use byteorder::{ByteOrder, LittleEndian};
 use duplicate::substitute;
-use scry_isa::{
-	Alu2OutputVariant, Alu2Variant, AluVariant, BitValue, Bits, CallVariant, Instruction,
-};
+use scry_isa::{Alu2OutputVariant, Alu2Variant, AluVariant, BitValue, Bits, CallVariant, Instruction, Type};
 use std::{borrow::BorrowMut, fmt::Debug, marker::PhantomData, mem::size_of};
 
 /// The result of performing one execution step
@@ -191,16 +189,6 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 					// Discard (maybe empty) ready list
 					self.discard_ready_list(tracker);
 				},
-				Capture(cap, target) =>
-				{
-					self.operands.reorder_list(
-						cap.value as usize + 1,
-						target.value as usize + 1,
-						tracker,
-					);
-
-					self.discard_ready_list(tracker);
-				},
 				Alu(variant, offset) =>
 				{
 					self.perform_alu(variant, offset, tracker)?;
@@ -209,17 +197,17 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 				{
 					self.perform_alu2(variant, out, offset, tracker)?;
 				},
-				Constant(bits) =>
+				Constant(typ_bits, bits) =>
 				{
+					let typ: Type = typ_bits.try_into().unwrap();
 					// Create operand from immediate and add to next list
-					let new_val: Value = if bits.is_signed()
-					{
-						(Bits::<8, true>::try_from(bits).unwrap().value as i8).into()
-					}
-					else
-					{
-						(Bits::<8, false>::try_from(bits).unwrap().value as u8).into()
-					};
+					let mut bytes = vec!(bits.value as u8);
+					// The remaining bytes are sign extended if needed.
+					bytes.resize(typ.size(), if typ.is_signed_int() && bits.value>=128 {u8::MAX} else {0});
+					
+					
+					let new_val = Value::singleton_typed(typ.into(), Scalar::Val(bytes.into_boxed_slice()));
+					
 					self.operands.push_operand(1, new_val.into(), tracker);
 
 					// Forward any ready operands to the next list

@@ -730,7 +730,7 @@ fn call_trigger_immediately(
 	let mut expected_metrics = TrackReport::new();
 	let expected_state = match Executor::from_state(
 		&nop_call_state,
-		RepeatingMem::<true>(Instruction::nop().encode(), 0),
+		RepeatingMem::<true>(Instruction::NoOp.encode(), 0),
 	)
 	.step(&mut expected_metrics)
 	{
