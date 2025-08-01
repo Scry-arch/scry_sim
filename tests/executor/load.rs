@@ -1,17 +1,13 @@
 use crate::{
-	executor::{test_execution_step, test_metrics, ConsumingDiscarding},
-	misc::{
-		get_absolute_address, get_indexed_address, get_relative_address, regress_queue, AllowWrite,
-		RepeatingMem,
-	},
+	executor::test_execution_step,
+	misc::{get_absolute_address, get_indexed_address, get_relative_address, regress_queue},
 };
 use quickcheck::{Arbitrary, Gen, TestResult};
 use quickcheck_macros::quickcheck;
-use scry_isa::Instruction;
+use scry_isa::{Bits, Instruction, Type};
 use scry_sim::{
-	arbitrary::{ArbScalarVal, ArbValue, NoCF, NoReads},
-	BlockedMemory, ExecState, Executor, Metric, MetricTracker, OperandList, OperandState,
-	TrackReport, Value, ValueType,
+	arbitrary::{ArbScalarVal, ArbValue, NoCF},
+	BlockedMemory, ExecState, Metric, OperandList, OperandState, Value, ValueType,
 };
 
 /// Returns whether the two address range given overlap in memory.
@@ -222,209 +218,41 @@ pub fn idx_address(stack_base: usize, value: &Value, idx: usize) -> usize
 	((stack_base + value.size() - 1) & !(value.size() - 1)) + (idx * value.size())
 }
 
-/// Tests the triggering of a previously issued load.
-#[quickcheck]
-fn load_trigger(
-	NoReads(mut state): NoReads<ExecState>,
-	// Ready list of operands to test, at least 1 of which is an operand that needs to load
-	values: MaybeLoadValues,
-	instruction: ConsumingDiscarding,
-) -> TestResult
-{
-	// Ensure no stack values overflow the address space
-	let stack_block = state.frame.stack.block.clone();
-	if values
-		.0
-		.iter()
-		.filter(|(_, addr)| addr.map_or(false, |(is_stack, _)| is_stack))
-		.any(|(v, addr)| !address_space_fits_stack(stack_block.address, v, addr.unwrap().1))
-	{
-		return TestResult::discard();
-	}
-
-	// Make the stack frame fit the stack reads
-	state.frame.stack.block.size = values.0.iter().fold(stack_block.size, |max, (v, addr)| {
-		if let Some((true, index)) = addr
-		{
-			std::cmp::max(max, (index + 1) * v.size())
-		}
-		else
-		{
-			max
-		}
-	});
-
-	if
-	// Ensure no non-stack read values overlap with the instruction's address or the stack
-	values
-		.0
-		.iter()
-		.filter(|(_, addr)| addr.map_or(false, |(is_stack, _)| !is_stack))
-		.any(|(v, addr)| overlap(addr.unwrap().1, v.size(), state.address, 2) ||
-			overlap(addr.unwrap().1, v.size(), stack_block.address, stack_block.size)
-		)
-		||
-		// Ensure the instruction does not overlap the stack
-		overlap(state.address, 2, stack_block.address, stack_block.size)
-	{
-		return TestResult::discard();
-	}
-
-	// Create a state where all the values aren't loaded
-	let mut pretest_state = state.clone();
-	// Regress the operand queue so we can add our values as the ready list
-	pretest_state.frame.op_queue = regress_queue(pretest_state.frame.op_queue);
-	// We add all the values as not needing loading
-	pretest_state.frame.op_queue.insert(
-		0,
-		OperandList::new(
-			OperandState::Ready(values.0[0].0.clone()),
-			values.0[1..]
-				.iter()
-				.map(|(v, _)| OperandState::Ready(v.clone()))
-				.collect(),
-		),
-	);
-
-	// Execute our non-loading state to find the expected result
-	let mut expected_metrics = TrackReport::new();
-	let expected_result = Executor::from_state(
-		&pretest_state,
-		RepeatingMem::<true>(instruction.0.encode(), 0),
-	)
-	.step(&mut expected_metrics);
-	if expected_result.is_err()
-	{
-		return TestResult::discard();
-	}
-
-	// Add load metric to expected metrics
-	let load_operands = values.0.iter().enumerate().filter_map(|(idx, (v, addr))| {
-		if let Some(addr) = addr
-		{
-			if !instruction.discards(idx)
-			{
-				return Some((v, *addr));
-			}
-		}
-		None
-	});
-	expected_metrics.add_stat(
-		Metric::UnalignedReads,
-		load_operands
-			.clone()
-			// Ignore stack reads (cannot be unaligned)
-			.filter_map(|(v, (is_stack, addr))| if is_stack { None} else {Some((v, addr))})
-			.filter(|(v, addr)| (addr % v.scale()) != 0)
-			.count(),
-	);
-	let stack_loads = load_operands.clone().filter(|(_, (is_stack, _))| *is_stack);
-	expected_metrics.add_stat(Metric::DataReads, load_operands.clone().count());
-	expected_metrics.add_stat(Metric::StackReads, stack_loads.clone().count());
-	expected_metrics.add_stat(
-		Metric::DataReadBytes,
-		load_operands.clone().fold(0, |acc, (v, _)| acc + v.size()),
-	);
-	expected_metrics.add_stat(
-		Metric::StackReadBytes,
-		stack_loads.clone().fold(0, |acc, (v, _)| acc + v.size()),
-	);
-
-	// Then create state version using the loads, where each value's data
-	// is in memory (if it needs loading)
-	let ready_or_load = |v: Value,
-	                     loading: Option<(bool, usize)>,
-	                     read_list: &mut Vec<(bool, usize, usize, ValueType)>,
-	                     mems: &mut BlockedMemory| {
-		if let Some((is_stack, addr)) = loading
-		{
-			read_list.push((is_stack, addr, 1, v.value_type()));
-			if is_stack
-			{
-				mems.add_block(
-					v.get_first().bytes().unwrap().iter().cloned(),
-					idx_address(stack_block.address, &v, addr),
-				);
-			}
-			else
-			{
-				mems.add_block(v.get_first().bytes().unwrap().iter().cloned(), addr);
-			}
-			OperandState::MustRead(read_list.len() - 1)
-		}
-		else
-		{
-			OperandState::Ready(v)
-		}
-	};
-	let mut test_mem = BlockedMemory::new(
-		instruction.0.encode().to_le_bytes().into_iter(),
-		state.address,
-	);
-	let mut test_state: ExecState = state.clone();
-	test_state.frame.op_queue = regress_queue(test_state.frame.op_queue);
-	test_state.frame.op_queue.insert(
-		0,
-		OperandList::new(
-			ready_or_load(
-				values.0[0].0.clone(),
-				values.0[0].1,
-				&mut test_state.frame.reads,
-				&mut test_mem,
-			),
-			values.0[1..]
-				.iter()
-				.map(|(v, addr)| {
-					ready_or_load(
-						v.clone(),
-						addr.clone(),
-						&mut test_state.frame.reads,
-						&mut test_mem,
-					)
-				})
-				.collect(),
-		),
-	);
-
-	// Execute state with loads
-	let mut actual_metrics = TrackReport::new();
-	let exec_result =
-		Executor::from_state(&test_state, AllowWrite(&mut test_mem)).step(&mut actual_metrics);
-
-	// Check that state with loads behaves like state without loads
-	let same_step = match (&exec_result, &expected_result)
-	{
-		(Ok(exec_result), Ok(exec_expected)) => exec_result.state() == exec_expected.state(),
-		_ => false,
-	};
-
-	if !same_step
-	{
-		TestResult::error(format!(
-			"Unexpected execution step result (actual != expected):\n{:?}\n !=\n {:?}",
-			exec_result, expected_result
-		))
-	}
-	else
-	{
-		test_metrics(&expected_metrics, &actual_metrics)
-	}
-}
-
 /// Tests executing load instructions.
 ///
 /// Given the initial state, regresses the operand queue and puts the given
 /// operand queue as the ready queue.
 /// Then tests that when the next instruction is a load the issued load has the
 /// given load type and will load from the given address. Also tests metrics.
+///
+/// If `output_offset` is `None`, then this is a stack load and `addr` is the
+/// encoded index.
 fn test_issue_load(
 	NoCF(state): NoCF<ExecState>,
 	load_operands: Vec<OperandState<usize>>,
-	loaded_typ: ValueType,
-	is_stack: bool,
+	loaded_val: ArbValue<false, false>,
+	output_offset: Option<Bits<5, false>>,
 	addr: usize,
 ) -> TestResult
 {
+	let effective_address = if output_offset.is_none()
+	{
+		idx_address(state.frame.stack.get_base_addres(), &loaded_val.0, addr)
+	}
+	else
+	{
+		addr
+	};
+
+	// Discard test if instruction and data overlap or overflow
+	if effective_address
+		.checked_add(loaded_val.0.scale())
+		.is_none()
+		|| overlap(state.address, 2, effective_address, loaded_val.0.scale())
+	{
+		return TestResult::discard();
+	}
+
 	let mut test_state = state.clone();
 	test_state.frame.op_queue = regress_queue(test_state.frame.op_queue);
 	if !load_operands.is_empty()
@@ -440,48 +268,71 @@ fn test_issue_load(
 
 	let mut expected_state: ExecState = state.clone();
 	expected_state.address += 2;
-	let read_op = OperandState::MustRead(expected_state.frame.reads.len());
-	if let Some(list) = expected_state.frame.op_queue.get_mut(&0)
+	let loaded_op = OperandState::Ready(loaded_val.0.clone());
+	let target_offset = if let Some(off) = output_offset
 	{
-		list.push(read_op);
+		off.value as usize
+	}
+	else
+	{
+		0
+	};
+	if let Some(list) = expected_state.frame.op_queue.get_mut(&target_offset)
+	{
+		list.push(loaded_op);
 	}
 	else
 	{
 		expected_state
 			.frame
 			.op_queue
-			.insert(0, OperandList::new(read_op, Vec::new()));
+			.insert(target_offset, OperandList::new(loaded_op, Vec::new()));
 	}
-	expected_state
-		.frame
-		.reads
-		.push((is_stack, addr, 1, loaded_typ));
-	// Because executor equality depends on the order of the read list,
-	// put the expected state in an executor and extract it so that the order
-	// would be the same as the test executor
-	expected_state = Executor::from_state(&expected_state, RepeatingMem::<true>(0, 0)).state();
 
-	let (signed, size) = match loaded_typ
+	let type_bits: Bits<4, false> = Into::<Type>::into(loaded_val.0.typ.clone())
+		.try_into()
+		.unwrap();
+
+	let instruction = if let Some(r) = output_offset
 	{
-		ValueType::Int(x) => (true, x),
-		ValueType::Uint(x) => (false, x),
+		Instruction::Load(type_bits, r)
+	}
+	else
+	{
+		Instruction::LoadStack(type_bits, (addr as i32).try_into().unwrap())
 	};
+	let mut test_mem = BlockedMemory::new(
+		instruction.encode().to_le_bytes().into_iter(),
+		state.address,
+	);
+	test_mem.add_block(
+		loaded_val.0.get_first().bytes().unwrap().iter().cloned(),
+		effective_address,
+	);
 
+	let is_stack = output_offset.is_none();
 	test_execution_step(
 		&test_state,
-		RepeatingMem::<false>(
-			Instruction::Load(
-				signed,
-				(size as i32).try_into().unwrap(),
-				if is_stack { addr as i32 } else { 255 }.try_into().unwrap(),
-			)
-			.encode(),
-			0,
-		),
+		test_mem,
 		&expected_state,
 		&[
 			(Metric::InstructionReads, 1),
-			(Metric::QueuedReads, 1),
+			(Metric::DataReads, 1),
+			(Metric::DataReadBytes, loaded_val.0.typ.scale()),
+			(Metric::StackReads, if !is_stack { 0 } else { 1 }),
+			(
+				Metric::StackReadBytes,
+				if !is_stack
+				{
+					0
+				}
+				else
+				{
+					loaded_val.0.typ.scale()
+				},
+			),
+			(Metric::QueuedValues, 1),
+			(Metric::QueuedValueBytes, loaded_val.0.typ.scale()),
 			(Metric::ConsumedOperands, load_operands.len()),
 			(
 				Metric::ConsumedBytes,
@@ -489,17 +340,22 @@ fn test_issue_load(
 					.iter()
 					.fold(0, |sum, op| sum + op.get_value().unwrap().scale()),
 			),
+			(
+				Metric::UnalignedReads,
+				((effective_address % loaded_val.0.typ.scale()) != 0) as usize,
+			),
 		]
 		.into(),
 	)
 }
 
-/// Test issuing a load with an absolute address
+// Test issuing a load with an absolute address
 #[quickcheck]
-fn load_issue_absolute_address(
+fn load_absolute_address(
 	NoCF(state): NoCF<ExecState>,
-	typ: ValueType,
+	loaded: ArbValue<false, false>,
 	ArbScalarVal(addr_size_pow2, addr_scalar): ArbScalarVal,
+	output: Bits<5, false>,
 ) -> TestResult
 {
 	test_issue_load(
@@ -508,18 +364,19 @@ fn load_issue_absolute_address(
 			ValueType::Uint(addr_size_pow2),
 			addr_scalar.clone(),
 		))],
-		typ,
-		false,
+		loaded,
+		Some(output),
 		get_absolute_address(&addr_scalar),
 	)
 }
 
-/// Test issuing a load with an relative address
+// Test issuing a load with an relative address
 #[quickcheck]
-fn load_issue_relative_address(
+fn load_relative_address(
 	NoCF(state): NoCF<ExecState>,
-	typ: ValueType,
+	loaded: ArbValue<false, false>,
 	ArbScalarVal(offset_size_pow2, offset_scalar): ArbScalarVal,
+	output: Bits<5, false>,
 ) -> TestResult
 {
 	// Ignore address calculation overflow
@@ -538,23 +395,28 @@ fn load_issue_relative_address(
 			ValueType::Int(offset_size_pow2),
 			offset_scalar,
 		))],
-		typ,
-		false,
+		loaded,
+		Some(output),
 		absolute_addr,
 	)
 }
 
-/// Test issuing a load with an relative address
+// Test issuing a load with an relative address
 #[quickcheck]
-fn load_issue_indexed(
+fn load_indexed(
 	NoCF(state): NoCF<ExecState>,
-	loaded_typ: ValueType,
+	loaded: ArbValue<false, false>,
 	ArbValue(base_addr): ArbValue<false, false>,
 	ArbScalarVal(index_size_pow2, index_scalar): ArbScalarVal,
+	output: Bits<5, false>,
 ) -> TestResult
 {
-	let absolute_addr = if let Some(addr) =
-		get_indexed_address(state.address, &base_addr, &index_scalar, loaded_typ.scale())
+	let absolute_addr = if let Some(addr) = get_indexed_address(
+		state.address,
+		&base_addr,
+		&index_scalar,
+		loaded.0.typ.scale(),
+	)
 	{
 		addr
 	}
@@ -573,15 +435,19 @@ fn load_issue_indexed(
 				index_scalar,
 			)),
 		],
-		loaded_typ,
-		false,
+		loaded,
+		Some(output),
 		absolute_addr,
 	)
 }
 
 /// Test issuing a stack load
 #[quickcheck]
-fn load_stack(NoCF(state): NoCF<ExecState>, loaded_typ: ValueType, idx: usize) -> TestResult
+fn load_stack(
+	NoCF(state): NoCF<ExecState>,
+	loaded: ArbValue<false, false>,
+	idx: Bits<5, false>,
+) -> TestResult
 {
-	test_issue_load(NoCF(state), vec![], loaded_typ, true, idx % 255)
+	test_issue_load(NoCF(state), vec![], loaded, None, idx.value as usize)
 }

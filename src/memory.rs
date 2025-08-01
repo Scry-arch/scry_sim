@@ -32,6 +32,9 @@ pub trait Memory
 	/// the given length.
 	///
 	/// Updates the report as a data read.
+	///
+	/// If an error is thrown, the first element describes it and the second is
+	/// the relevant address.
 	fn read_data(
 		&mut self,
 		addr: usize,

@@ -255,48 +255,37 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 
 					self.store_val(tracker, &to_store, Ok(effective_address), true)?;
 				},
-				Load(signed, size, index) =>
+				Load(typ, offset) =>
 				{
-					let read_typ = if signed
-					{
-						ValueType::Int(size.value as u8)
-					}
-					else
-					{
-						ValueType::Uint(size.value as u8)
+					let typ: ValueType = typ.try_into().unwrap();
+					let next_addr = self.control.next_addr;
+					let effective_address = {
+						Self::get_mem_instr_effective_addr(
+							self.get_ready_iter(tracker),
+							next_addr,
+							typ.scale(),
+						)
+						.unwrap()
 					};
 
-					let op = {
-						let ready_list = self.operands.ready_iter(
-							self.get_stack_base(),
-							self.memory.borrow_mut(),
-							tracker,
-						);
-						if index.value == 255
-						{
-							// Regular load
-							let address = Self::get_mem_instr_effective_addr(
-								ready_list,
-								self.control.next_addr,
-								read_typ.scale(),
-							)
-							.unwrap();
+					self.perform_load(typ, effective_address, offset.value as usize, tracker);
+				},
+				LoadStack(typ, index) =>
+				{
+					self.discard_ready_list(tracker);
+					let read_typ: ValueType = typ.try_into().unwrap();
+					let effective_address = OperandStack::operand_stack_address(
+						self.get_stack_base(),
+						read_typ,
+						index.value as usize,
+					);
 
-							Operand::read_typed(false, address, 1, read_typ)
-						}
-						else
-						{
-							// Stack load
-							Operand::read_typed(true, index.value as usize, 1, read_typ)
-						}
-					};
-
-					self.operands.push_operand(0, op, tracker);
+					self.perform_load(read_typ, effective_address, 0, tracker);
+					tracker.add_stat(Metric::StackReads, 1);
+					tracker.add_stat(Metric::StackReadBytes, read_typ.scale());
 				},
 				Pick(target) =>
 				{
-					// let mut ready_iter = self.operands.ready_iter(self.memory.borrow_mut(),
-					// tracker);
 					let choose_first = {
 						let mut ready_peek = self.operands.ready_peek();
 						let condition = ready_peek.next().unwrap();
@@ -411,6 +400,32 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 		else
 		{
 			Err(ExecError::Err("Empty call stack".into()))
+		}
+	}
+
+	/// Loads a value of the given type from memory at the given address.
+	///
+	/// Outputs the loaded value to the operand queue at the given offset.
+	fn perform_load(
+		&mut self,
+		typ: ValueType,
+		effective_address: usize,
+		offset: usize,
+		tracker: &mut impl MetricTracker,
+	)
+	{
+		let mut loaded = Value::new_nar_typed(typ, 0);
+		if let Err((_err, _addr)) =
+			self.memory
+				.borrow_mut()
+				.read_data(effective_address, &mut loaded, 1, tracker)
+		{
+			todo!()
+		}
+		else
+		{
+			self.operands
+				.push_operand(offset, Operand::from(loaded), tracker);
 		}
 	}
 

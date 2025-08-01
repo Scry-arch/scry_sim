@@ -44,6 +44,7 @@ impl<const MAY_STORE: bool> Memory for RepeatingMem<MAY_STORE>
 		scalars.resize_with(len, || scalar.clone());
 		let result = Value::new_typed(into.value_type(), scalars.remove(0), scalars).unwrap();
 
+		tracker.add_stat(Metric::DataReads, 1);
 		tracker.add_stat(Metric::DataReadBytes, result.size());
 
 		*into = result;

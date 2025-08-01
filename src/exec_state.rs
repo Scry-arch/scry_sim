@@ -261,6 +261,12 @@ impl StackFrame
 		}
 	}
 
+	/// Returns the base address of the stack frame
+	pub fn get_base_addres(&self) -> usize
+	{
+		self.get_address(0, 0, true).unwrap()
+	}
+
 	/// Returns the stack frame that would result from performing a call from
 	/// this stack frame.
 	pub fn frame_call(&mut self) -> StackFrame

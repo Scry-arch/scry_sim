@@ -57,55 +57,6 @@ impl Arbitrary for SupportedInstruction
 	}
 }
 
-/// Used to generate arbitrary instruction that are supported by the
-/// executor and consume or discard all their inputs
-#[derive(Debug, Clone)]
-struct ConsumingDiscarding(Instruction);
-impl ConsumingDiscarding
-{
-	/// Returns whether an operand with the given index in the ready list
-	/// is discarded by this instruction.
-	fn discards(&self, idx: usize) -> bool
-	{
-		use Instruction::*;
-		idx >= match self.0
-		{
-			NoOp => 0,
-			Alu(AluVariant::Add, _)
-			| Alu(AluVariant::Sub, _)
-			| Alu2(Alu2Variant::Add, _, _)
-			| Alu2(Alu2Variant::Sub, _, _) => 2,
-			_ => panic!("Other instructions aren't guaranteed to consume or discard their inputs."),
-		}
-	}
-}
-impl Arbitrary for ConsumingDiscarding
-{
-	fn arbitrary(g: &mut Gen) -> Self
-	{
-		let mut instr: Instruction = Instruction::arbitrary(g);
-
-		loop
-		{
-			use Instruction::*;
-			match instr
-			{
-				Alu(AluVariant::Add, _)
-				| Alu(AluVariant::Sub, _)
-				| Alu2(Alu2Variant::Add, _, _)
-				| Alu2(Alu2Variant::Sub, _, _) => break,
-				_ => instr = Instruction::arbitrary(g),
-			}
-		}
-		Self(instr)
-	}
-
-	fn shrink(&self) -> Box<dyn Iterator<Item = Self>>
-	{
-		Box::new(self.0.shrink().map(|shrunk| Self(shrunk)))
-	}
-}
-
 /// Checks that the expected metrics are equal to the actual ones.
 /// If not, prints relevant error
 pub fn test_metrics(expected: &TrackReport, actual: &TrackReport) -> TestResult

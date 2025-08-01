@@ -1,5 +1,5 @@
 use num_traits::PrimInt;
-use scry_isa::Type;
+use scry_isa::{Bits, Type};
 use std::iter::once;
 
 /// The type of a value
@@ -61,6 +61,26 @@ impl From<Type> for ValueType
 		{
 			Self::Uint(t.size_pow2())
 		}
+	}
+}
+impl From<ValueType> for Type
+{
+	fn from(t: ValueType) -> Self
+	{
+		match t
+		{
+			ValueType::Uint(size) => Type::Uint(size),
+			ValueType::Int(size) => Type::Int(size),
+		}
+	}
+}
+impl TryFrom<Bits<4, false>> for ValueType
+{
+	type Error = ();
+
+	fn try_from(value: Bits<4, false>) -> Result<Self, Self::Error>
+	{
+		Ok(TryInto::<Type>::try_into(value)?.into())
 	}
 }
 
