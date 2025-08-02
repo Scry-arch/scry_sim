@@ -14,7 +14,7 @@ use quickcheck_macros::quickcheck;
 use scry_isa::Instruction;
 use scry_sim::{
 	arbitrary::{ArbScalarVal, ArbValue, NoCF},
-	BlockedMemory, ExecState, Memory, Metric, OperandList, OperandState, Value, ValueType,
+	BlockedMemory, ExecState, Memory, Metric, OperandList, Value, ValueType,
 };
 use std::cmp::max;
 
@@ -152,10 +152,7 @@ fn clone_with_front_operands<const N: usize>(
 	// Initialize test state with the right operands in the ready list
 	let mut test_state = state.clone();
 	test_state.frame.op_queue = regress_queue(test_state.frame.op_queue);
-	let new_ready_list = OperandList::new(
-		OperandState::Ready(first),
-		rest.into_iter().map(|v| OperandState::Ready(v)).collect(),
-	);
+	let new_ready_list = OperandList::new(first, rest.into_iter().collect());
 	test_state.frame.op_queue.insert(0, new_ready_list);
 	test_state
 }

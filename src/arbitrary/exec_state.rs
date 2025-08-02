@@ -1,8 +1,7 @@
 use crate::{
-	Block, CallFrameState, ControlFlowType, ExecState, OperandList, OperandState, Scalar,
-	StackFrame, Value, ValueType,
+	Block, CallFrameState, ControlFlowType, ExecState, OperandList, Scalar, StackFrame, Value,
 };
-use duplicate::{duplicate_item, substitute};
+use duplicate::duplicate_item;
 use num_traits::{PrimInt, Unsigned};
 use quickcheck::{Arbitrary, Gen};
 use std::{
@@ -103,42 +102,6 @@ impl Arbitrary for ControlFlowType
 			Self::Branch(t) => Box::new(InstrAddr(*t).shrink().map(|v| Self::Branch(v.0))),
 			Self::Call(t) => Box::new(InstrAddr(*t).shrink().map(|v| Self::Call(v.0))),
 			Self::Return => Box::new(std::iter::empty()),
-		}
-	}
-}
-
-impl OperandState<usize>
-{
-	/// Generates an arbitrary operand state.
-	///
-	/// Any generated MustRead operand will either refer to a read in the given
-	/// list, or add a new read to the list which is then referenced
-	pub fn arbitrary(g: &mut Gen, reads: &mut Vec<(bool, usize, usize, ValueType)>) -> Self
-	{
-		match u8::arbitrary(g) % 100
-		{
-			0..=79 => OperandState::Ready(Arbitrary::arbitrary(g)),
-			_ =>
-			{
-				match u8::arbitrary(g) % 100
-				{
-					0..=79 | _ if reads.len() == 0 =>
-					{
-						// New int not dependent on others
-						let is_stack = Arbitrary::arbitrary(g);
-						let size = SmallInt::<usize>::arbitrary(g).0 + 1;
-						let value_type = ValueType::arbitrary(g);
-						let mut addr = Arbitrary::arbitrary(g);
-						if is_stack
-						{
-							addr %= value_type.scale();
-						}
-						reads.push((is_stack, addr, size, value_type));
-						OperandState::MustRead(reads.len() - 1)
-					},
-					_ => OperandState::MustRead(usize::arbitrary(g) % reads.len()),
-				}
-			},
 		}
 	}
 }
@@ -247,7 +210,6 @@ impl Arbitrary for CallFrameState
 		let branches: Vec<(InstrAddr, ControlFlowType)> = Arbitrary::arbitrary(g);
 
 		let mut op_queue = HashMap::new();
-		let mut reads = Vec::new();
 
 		// How many operand lists
 		for i in 0..SmallInt::<usize>::arbitrary(g).0
@@ -258,7 +220,7 @@ impl Arbitrary for CallFrameState
 				let mut ops = Vec::new();
 				for _ in 0..op_count
 				{
-					ops.push(OperandState::arbitrary(g, &mut reads));
+					ops.push(Arbitrary::arbitrary(g));
 				}
 				op_queue.insert(i, OperandList::new(ops.remove(0), ops));
 			}
@@ -272,7 +234,6 @@ impl Arbitrary for CallFrameState
 				.map(|(trig, ctrl)| (trig.0, ctrl))
 				.collect(),
 			op_queue,
-			reads,
 			stack: Arbitrary::arbitrary(g),
 		}
 	}
@@ -286,9 +247,6 @@ impl Arbitrary for CallFrameState
 			BranchTyp(usize),
 			BranchRem(usize, VecDeque<usize>),
 			Operand(VecDeque<usize>, usize),
-			ReadsAddr(usize),
-			ReadsLen(usize),
-			ReadsTyp(usize),
 			Stack,
 			Done,
 		}
@@ -311,199 +269,165 @@ impl Arbitrary for CallFrameState
 				}
 
 				use ShrinkState::*;
-				// We wrap the match in duplicate to allow use to duplicate enum variant matches
-				substitute! {[throwaway [];]
-					match &mut self.state {
-						Start => {
-							// Shrink return address
-							let clone = self.original.clone();
-							self.other = Box::new(InstrAddr(self.original.ret_addr).shrink().map(move|ret| {
+				match &mut self.state
+				{
+					Start =>
+					{
+						// Shrink return address
+						let clone = self.original.clone();
+						self.other =
+							Box::new(InstrAddr(self.original.ret_addr).shrink().map(move |ret| {
 								let mut clone = clone.clone();
 								clone.ret_addr = ret.0;
 								clone
 							}));
-							self.state = BranchTrig(0);
-							self.next()
-						}
-						BranchTrig(idx) => {
-							// Shrink branch trigger address
-							if let Some((addr, _)) = self.original.branches.iter().nth(*idx) {
-
-								let clone = self.original.clone();
-								let addr = *addr;
-								self.other = Box::new(
-									InstrAddr(addr).shrink().map(move|new_addr| {
-										let mut clone = clone.clone();
-										let typ = clone.branches.remove(&addr).unwrap();
-										clone.branches.insert(new_addr.0, typ);
-										clone
-									})
-								);
-								self.state = BranchTyp(*idx);
-							} else {
-								self.state = Operand(self.original.op_queue.keys().cloned().collect(),0);
-							}
-							self.next()
-						}
-						BranchTyp(idx) => {
-							// Shrink branch type
-							let (addr, typ) = self.original.branches.iter().nth(*idx).unwrap();
-
+						self.state = BranchTrig(0);
+						self.next()
+					},
+					BranchTrig(idx) =>
+					{
+						// Shrink branch trigger address
+						if let Some((addr, _)) = self.original.branches.iter().nth(*idx)
+						{
 							let clone = self.original.clone();
 							let addr = *addr;
-							let typ = *typ;
-
-							self.other = Box::new(
-								typ.shrink().map(move|new_typ| {
-									let mut clone = clone.clone();
-									*clone.branches.get_mut(&addr).unwrap() = new_typ;
-									clone
-								}));
-							self.state = BranchRem(*idx, self.original.branches.keys().cloned().collect());
-							self.next()
-						}
-						BranchRem(idx, addrs) => {
-							// Remove a branch
-							if let Some(addr) = addrs.pop_front()
-							{
-								let mut clone = self.original.clone();
-								clone.branches.remove(&addr).unwrap();
-								Some(clone)
-							} else {
-								self.state = BranchTrig(*idx +1);
-								self.next()
-							}
-						}
-						Operand(list_idxs,op_idx) => {
-							if let Some(list_idx) = list_idxs.front() {
-								// Reduce the index of operand lists where possible
-								let q_clone = if *list_idx>0 && !self.original.op_queue.contains_key(&(list_idx-1)) {
-									let mut q_clone = self.original.clone();
-									let q = q_clone.op_queue.remove(list_idx).unwrap();
-									q_clone.op_queue.insert(list_idx-1, q);
-									Some(q_clone)
-								} else {
-									None
-								};
-
-								let op_list = self.original.op_queue.get(&list_idx).unwrap();
-								if let Some(op) = op_list.iter().nth(*op_idx) {
-									// Remove operand
-									let mut rem_clone = self.original.clone();
-									let rem_from = rem_clone.op_queue.get_mut(list_idx).unwrap();
-									if *op_idx == 0 {
-										if rem_from.rest.len() > 0{
-											rem_from.first = rem_from.rest.remove(0);
-										} else {
-											// Only one operand in list, remove whole list
-											rem_clone.op_queue.remove(list_idx).unwrap();
-										}
-									} else {
-										rem_from.rest.remove(*op_idx-1);
-									}
-									rem_clone.clean_reads();
-
-									match op {
-										OperandState::Ready(v) => {
-											// Shrink value operand
-											let clone = self.original.clone();
-											let list_idx = *list_idx;
-											let op_idx2 = *op_idx;
-											self.other = Box::new(once(rem_clone).chain(v.shrink().map(move|v| {
-												let mut clone = clone.clone();
-												*clone
-													.op_queue
-													.get_mut(&list_idx)
-													.unwrap().iter_mut()
-													.nth(op_idx2)
-													.unwrap() = OperandState::Ready(v);
-												clone
-											})).chain(q_clone.into_iter()));
-										}
-										OperandState::MustRead(read_idx) => {
-											// Disconnect from other MustReads by cloning the read and referencing it instead
-											let clone1 = if self.original.count_read_refs(*read_idx) > 1 {
-												let mut clone = self.original.clone();
-												*clone
-													.op_queue
-													.get_mut(list_idx)
-													.unwrap()
-													.iter_mut()
-													.nth(*op_idx)
-													.unwrap() = OperandState::MustRead(read_idx+1);
-												clone.reads.push(self.original.reads.get(*read_idx).unwrap().clone());
-												Some(clone)
-											} else {
-												None
-											};
-
-											// Convert to simple ready value
-											let mut clone2 = self.original.clone();
-											*clone2
-												.op_queue
-												.get_mut(list_idx)
-												.unwrap()
-												.iter_mut()
-												.nth(*op_idx)
-												.unwrap() = OperandState::Ready(Value::new_nan::<u8>());
-											clone2.clean_reads();
-
-											self.other = Box::new([rem_clone, clone2].into_iter().chain(clone1.into_iter()).chain(q_clone.into_iter()));
-										}
-									}
-
-									*op_idx += 1;
-								} else {
-									// No more operands, next list
-									list_idxs.pop_front().unwrap();
-									*op_idx = 0;
-								}
-								self.next()
-							} else {
-								self.state = ReadsAddr(0);
-								self.next()
-							}
-						}
-						duplicate!{[
-								variant		tuple_idx	shrunk_filter 	update_to;
-								[ReadsAddr]	[1]			[|_|true]		[ReadsLen(*read_idx)];
-								[ReadsLen]	[2]			[|s|*s>0]		[ReadsTyp(*read_idx)];
-								[ReadsTyp]	[3]			[|_|true]		[ReadsAddr(*read_idx+1)];
-							]
-							variant(read_idx) => {
-								if let Some(read_tup) = self.original.reads.get(*read_idx) {
-									let clone = self.original.clone();
-									let read_idx2 = *read_idx;
-									let shrunks = read_tup.tuple_idx.shrink()
-										.filter(shrunk_filter)
-										.map(move |shrunk| {
-											let mut clone = clone.clone();
-											clone.reads.get_mut(read_idx2).unwrap().tuple_idx = shrunk;
-											clone
-										});
-									self.other = Box::new(shrunks);
-									self.state = update_to;
-									self.next()
-								} else {
-									// No more reads
-									self.state = Stack;
-									self.next()
-								}
-							}
-						}
-						Stack => {
-							// Shrink stack frame
-							let clone = self.original.clone();
-							self.other = Box::new(self.original.stack.shrink().map(move|shrunk| {
+							self.other = Box::new(InstrAddr(addr).shrink().map(move |new_addr| {
 								let mut clone = clone.clone();
-								clone.stack = shrunk;
+								let typ = clone.branches.remove(&addr).unwrap();
+								clone.branches.insert(new_addr.0, typ);
 								clone
 							}));
-							self.state = Done;
+							self.state = BranchTyp(*idx);
+						}
+						else
+						{
+							self.state =
+								Operand(self.original.op_queue.keys().cloned().collect(), 0);
+						}
+						self.next()
+					},
+					BranchTyp(idx) =>
+					{
+						// Shrink branch type
+						let (addr, typ) = self.original.branches.iter().nth(*idx).unwrap();
+
+						let clone = self.original.clone();
+						let addr = *addr;
+						let typ = *typ;
+
+						self.other = Box::new(typ.shrink().map(move |new_typ| {
+							let mut clone = clone.clone();
+							*clone.branches.get_mut(&addr).unwrap() = new_typ;
+							clone
+						}));
+						self.state =
+							BranchRem(*idx, self.original.branches.keys().cloned().collect());
+						self.next()
+					},
+					BranchRem(idx, addrs) =>
+					{
+						// Remove a branch
+						if let Some(addr) = addrs.pop_front()
+						{
+							let mut clone = self.original.clone();
+							clone.branches.remove(&addr).unwrap();
+							Some(clone)
+						}
+						else
+						{
+							self.state = BranchTrig(*idx + 1);
 							self.next()
 						}
-						_ => None
-					}
+					},
+					Operand(list_idxs, op_idx) =>
+					{
+						if let Some(list_idx) = list_idxs.front()
+						{
+							// Reduce the index of operand lists where possible
+							let q_clone = if *list_idx > 0
+								&& !self.original.op_queue.contains_key(&(list_idx - 1))
+							{
+								let mut q_clone = self.original.clone();
+								let q = q_clone.op_queue.remove(list_idx).unwrap();
+								q_clone.op_queue.insert(list_idx - 1, q);
+								Some(q_clone)
+							}
+							else
+							{
+								None
+							};
+
+							let op_list = self.original.op_queue.get(&list_idx).unwrap();
+							if let Some(v) = op_list.iter().nth(*op_idx)
+							{
+								// Remove operand
+								let mut rem_clone = self.original.clone();
+								let rem_from = rem_clone.op_queue.get_mut(list_idx).unwrap();
+								if *op_idx == 0
+								{
+									if rem_from.rest.len() > 0
+									{
+										rem_from.first = rem_from.rest.remove(0);
+									}
+									else
+									{
+										// Only one operand in list, remove whole list
+										rem_clone.op_queue.remove(list_idx).unwrap();
+									}
+								}
+								else
+								{
+									rem_from.rest.remove(*op_idx - 1);
+								}
+								// Shrink value operand
+								let clone = self.original.clone();
+								let list_idx = *list_idx;
+								let op_idx2 = *op_idx;
+								self.other = Box::new(
+									once(rem_clone)
+										.chain(v.shrink().map(move |v| {
+											let mut clone = clone.clone();
+											*clone
+												.op_queue
+												.get_mut(&list_idx)
+												.unwrap()
+												.iter_mut()
+												.nth(op_idx2)
+												.unwrap() = v;
+											clone
+										}))
+										.chain(q_clone.into_iter()),
+								);
+
+								*op_idx += 1;
+							}
+							else
+							{
+								// No more operands, next list
+								list_idxs.pop_front().unwrap();
+								*op_idx = 0;
+							}
+							self.next()
+						}
+						else
+						{
+							self.state = Stack;
+							self.next()
+						}
+					},
+					Stack =>
+					{
+						// Shrink stack frame
+						let clone = self.original.clone();
+						self.other = Box::new(self.original.stack.shrink().map(move |shrunk| {
+							let mut clone = clone.clone();
+							clone.stack = shrunk;
+							clone
+						}));
+						self.state = Done;
+						self.next()
+					},
+					_ => None,
 				}
 			}
 		}
@@ -676,16 +600,6 @@ impl AsMut<Self> for ExecState
 		extra_generics_pass []
 	]
 	[
-		mod_name [no_reads]
-		name [NoReads]
-		desc [
-			"Use to generate arbitrary states without any MustRead operands going to the next
-			instruction"
-		]
-		extra_generics []
-		extra_generics_pass []
-	]
-	[
 		mod_name [limited_ops]
 		name [LimitedOps]
 		desc [
@@ -765,7 +679,7 @@ mod mod_name
 		}
 	}
 }
-pub use self::{limited_ops::*, no_cf::*, no_reads::*, simple_ops::*};
+pub use self::{limited_ops::*, no_cf::*, simple_ops::*};
 
 impl<T: Restriction> Restriction for NoCF<T>
 {
@@ -785,43 +699,6 @@ impl<T: Restriction> Restriction for NoCF<T>
 		// Remove any control flow that would trigger after next instructions
 		let addr = state.as_ref().address;
 		let _ = state.as_mut().frame.branches.remove(&addr);
-	}
-}
-impl<T: Restriction> Restriction for NoReads<T>
-{
-	type Inner = T;
-
-	fn restriction_holds(inner: &Self::Inner) -> bool
-	{
-		!inner
-			.as_ref()
-			.frame
-			.op_queue
-			.get(&0)
-			.map_or(false, |op_list| {
-				op_list.iter().any(|op| {
-					match op
-					{
-						OperandState::MustRead(_) => true,
-						_ => false,
-					}
-				})
-			})
-	}
-
-	fn conform(state: &mut Self::Inner, g: &mut Gen)
-	{
-		// Convert any MustRead operand to simple value
-		if let Some(op_list) = state.as_mut().frame.op_queue.get_mut(&0)
-		{
-			op_list.iter_mut().for_each(|op| {
-				if let OperandState::MustRead(_) = op
-				{
-					*op = OperandState::Ready(Arbitrary::arbitrary(g));
-				}
-			});
-		}
-		state.as_mut().clean_reads();
 	}
 }
 impl<T: Restriction, const NEXT_OP_MIN: usize, const NEXT_OP_MAX: usize> Restriction
@@ -861,7 +738,7 @@ impl<T: Restriction, const NEXT_OP_MIN: usize, const NEXT_OP_MAX: usize> Restric
 			{
 				if state.as_ref().frame.op_queue.get(&0).is_none()
 				{
-					let op1 = OperandState::arbitrary(g, &mut state.as_mut().frame.reads);
+					let op1 = Value::arbitrary(g);
 					state
 						.as_mut()
 						.frame
@@ -873,7 +750,7 @@ impl<T: Restriction, const NEXT_OP_MIN: usize, const NEXT_OP_MAX: usize> Restric
 				{
 					for _ in 0..ops_to_add
 					{
-						let op = OperandState::arbitrary(g, &mut state.as_mut().frame.reads);
+						let op = Value::arbitrary(g);
 						state.as_mut().frame.op_queue.get_mut(&0).unwrap().push(op);
 					}
 				}
@@ -897,7 +774,6 @@ impl<T: Restriction, const NEXT_OP_MIN: usize, const NEXT_OP_MAX: usize> Restric
 					.resize_with(NEXT_OP_MAX - 1, || unreachable!());
 			}
 		}
-		state.as_mut().clean_reads()
 	}
 }
 impl<T: Restriction> Restriction for SimpleOps<T>
@@ -909,32 +785,10 @@ impl<T: Restriction> Restriction for SimpleOps<T>
 		if inner.as_ref().frame.op_queue.contains_key(&0)
 		{
 			let op_list = inner.as_ref().frame.op_queue.get(&0).unwrap();
-			let (len, typ) = match &op_list.first
-			{
-				OperandState::MustRead(idx) =>
-				{
-					(
-						inner.as_ref().frame.reads[*idx].2,
-						inner.as_ref().frame.reads[*idx].3,
-					)
-				},
-				OperandState::Ready(v) => (v.len(), v.value_type()),
-			};
-			op_list.iter().all(|op| {
-				match op
-				{
-					OperandState::MustRead(idx) =>
-					{
-						inner.as_ref().frame.reads[*idx].2 == len
-							&& inner.as_ref().frame.reads[*idx].3 == typ
-					},
-					OperandState::Ready(v) =>
-					{
-						v.len() == len
-							&& v.value_type() == typ
-							&& v.iter().all(|sc| sc.bytes().is_some())
-					},
-				}
+			let len = op_list.first.len();
+			let typ = op_list.first.value_type();
+			op_list.iter().all(|v| {
+				v.len() == len && v.value_type() == typ && v.iter().all(|sc| sc.bytes().is_some())
 			})
 		}
 		else
@@ -947,91 +801,61 @@ impl<T: Restriction> Restriction for SimpleOps<T>
 	{
 		if state.as_ref().frame.op_queue.contains_key(&0)
 		{
-			let (len, typ) = match &state.as_ref().frame.op_queue.get(&0).unwrap().first
-			{
-				OperandState::MustRead(idx) =>
-				{
-					(
-						state.as_ref().frame.reads[*idx].2,
-						state.as_ref().frame.reads[*idx].3,
-					)
-				},
-				OperandState::Ready(v) => (v.len(), v.value_type()),
-			};
+			let v = &state.as_ref().frame.op_queue.get(&0).unwrap().first;
+			let (len, typ) = (v.len(), v.value_type());
 			let frame = &mut state.as_mut().frame;
 			let op_list = frame.op_queue.get_mut(&0).unwrap();
 			// Convert all operands to the same type/length of the first
-			for op in op_list.iter_mut()
+			for v in op_list.iter_mut()
 			{
-				match op
+				let mut scalars = Vec::new();
+				for _ in 0..len
 				{
-					OperandState::MustRead(idx) =>
+					let mut bytes = Vec::new();
+					for _ in 0..typ.scale()
 					{
-						frame.reads[*idx].2 = len;
-						frame.reads[*idx].3 = typ;
-					},
-					OperandState::Ready(v) =>
-					{
-						let mut scalars = Vec::new();
-						for _ in 0..len
-						{
-							let mut bytes = Vec::new();
-							for _ in 0..typ.scale()
-							{
-								bytes.push(Arbitrary::arbitrary(g));
-							}
-							scalars.push(Scalar::Val(bytes.into_boxed_slice()));
-						}
-						*v = Value::new_typed(typ, scalars.remove(0), scalars).unwrap();
-					},
+						bytes.push(Arbitrary::arbitrary(g));
+					}
+					scalars.push(Scalar::Val(bytes.into_boxed_slice()));
 				}
+				*v = Value::new_typed(typ, scalars.remove(0), scalars).unwrap();
 			}
 		}
-		state.as_mut().clean_reads();
 	}
 
 	fn add_shrink(_state: &Self::Inner) -> Box<dyn Iterator<Item = Self>>
 	{
-		let typ = _state.as_ref().frame.op_queue.get(&0).map(|op_list| {
-			match &op_list.first
-			{
-				OperandState::MustRead(idx) => _state.as_ref().frame.reads[*idx].3,
-				OperandState::Ready(v) => v.value_type(),
-			}
-		});
+		let typ = _state
+			.as_ref()
+			.frame
+			.op_queue
+			.get(&0)
+			.map(|op_list| op_list.first.value_type());
 		let self_clone = _state.clone();
 		Box::new(typ.into_iter().flat_map(move |typ| {
 			let self_clone = self_clone.clone();
 			typ.shrink().map(move |new_typ| {
 				let mut clone = self_clone.clone();
 				let clone_frame = &mut clone.as_mut().frame;
-				for op in clone_frame.op_queue.get_mut(&0).unwrap().iter_mut()
+				for v in clone_frame.op_queue.get_mut(&0).unwrap().iter_mut()
 				{
-					match op
+					let mut new_scalars = Vec::with_capacity(new_typ.scale());
+					if new_typ.scale() < typ.scale()
 					{
-						OperandState::MustRead(idx) => clone_frame.reads[*idx].3 = new_typ,
-						OperandState::Ready(v) =>
+						for sc in v.iter()
 						{
-							let mut new_scalars = Vec::with_capacity(new_typ.scale());
-							if new_typ.scale() < typ.scale()
-							{
-								for sc in v.iter()
-								{
-									let new_bytes: Vec<_> = sc.bytes().unwrap()[0..new_typ.scale()]
-										.iter()
-										.cloned()
-										.collect();
-									new_scalars.push(Scalar::Val(new_bytes.into_boxed_slice()));
-								}
-							}
-							else
-							{
-								new_scalars.extend(v.iter().cloned());
-							}
-							*v = Value::new_typed(new_typ, new_scalars.remove(0), new_scalars)
-								.unwrap();
-						},
+							let new_bytes: Vec<_> = sc.bytes().unwrap()[0..new_typ.scale()]
+								.iter()
+								.cloned()
+								.collect();
+							new_scalars.push(Scalar::Val(new_bytes.into_boxed_slice()));
+						}
 					}
+					else
+					{
+						new_scalars.extend(v.iter().cloned());
+					}
+					*v = Value::new_typed(new_typ, new_scalars.remove(0), new_scalars).unwrap();
 				}
 				Self(clone)
 			})

@@ -7,7 +7,7 @@ use quickcheck_macros::quickcheck;
 use scry_isa::{Bits, Instruction, Type};
 use scry_sim::{
 	arbitrary::{ArbScalarVal, ArbValue, NoCF},
-	BlockedMemory, ExecState, Metric, OperandList, OperandState, Value, ValueType,
+	BlockedMemory, ExecState, Metric, OperandList, Value, ValueType,
 };
 
 /// Returns whether the two address range given overlap in memory.
@@ -229,7 +229,7 @@ pub fn idx_address(stack_base: usize, value: &Value, idx: usize) -> usize
 /// encoded index.
 fn test_issue_load(
 	NoCF(state): NoCF<ExecState>,
-	load_operands: Vec<OperandState<usize>>,
+	load_operands: Vec<Value>,
 	loaded_val: ArbValue<false, false>,
 	output_offset: Option<Bits<5, false>>,
 	addr: usize,
@@ -268,7 +268,7 @@ fn test_issue_load(
 
 	let mut expected_state: ExecState = state.clone();
 	expected_state.address += 2;
-	let loaded_op = OperandState::Ready(loaded_val.0.clone());
+	let loaded_op = loaded_val.0.clone();
 	let target_offset = if let Some(off) = output_offset
 	{
 		off.value as usize
@@ -336,9 +336,7 @@ fn test_issue_load(
 			(Metric::ConsumedOperands, load_operands.len()),
 			(
 				Metric::ConsumedBytes,
-				load_operands
-					.iter()
-					.fold(0, |sum, op| sum + op.get_value().unwrap().scale()),
+				load_operands.iter().fold(0, |sum, op| sum + op.scale()),
 			),
 			(
 				Metric::UnalignedReads,
@@ -360,10 +358,10 @@ fn load_absolute_address(
 {
 	test_issue_load(
 		NoCF(state),
-		vec![OperandState::Ready(Value::singleton_typed(
+		vec![Value::singleton_typed(
 			ValueType::Uint(addr_size_pow2),
 			addr_scalar.clone(),
-		))],
+		)],
 		loaded,
 		Some(output),
 		get_absolute_address(&addr_scalar),
@@ -391,10 +389,10 @@ fn load_relative_address(
 
 	test_issue_load(
 		NoCF(state),
-		vec![OperandState::Ready(Value::singleton_typed(
+		vec![Value::singleton_typed(
 			ValueType::Int(offset_size_pow2),
 			offset_scalar,
-		))],
+		)],
 		loaded,
 		Some(output),
 		absolute_addr,
@@ -429,11 +427,8 @@ fn load_indexed(
 	test_issue_load(
 		NoCF(state),
 		vec![
-			OperandState::Ready(base_addr.clone()),
-			OperandState::Ready(Value::singleton_typed(
-				ValueType::Uint(index_size_pow2),
-				index_scalar,
-			)),
+			base_addr.clone(),
+			Value::singleton_typed(ValueType::Uint(index_size_pow2), index_scalar),
 		],
 		loaded,
 		Some(output),

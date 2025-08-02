@@ -2,7 +2,7 @@ use duplicate::duplicate_item;
 use quickcheck::{Arbitrary, Gen};
 use quickcheck_macros::quickcheck;
 use scry_sim::{
-	arbitrary::{LimitedOps, NoCF, NoReads, Restriction, SimpleOps},
+	arbitrary::{LimitedOps, NoCF, Restriction, SimpleOps},
 	CallFrameState, ExecState,
 };
 use std::{fmt::Debug, iter::empty};
@@ -45,7 +45,6 @@ fn state_shrinks_valid(state: NoShrink<ExecState>) -> bool
 #[duplicate_item(
 	restricter 		generics	test_name;
 	[NoCF] 			[]			[shrink_no_cf];
-	[NoReads] 		[]			[shrink_no_reads];
 	[LimitedOps] 	[2,2]		[shrink_limited_ops_2_2];
 	[SimpleOps] 	[]			[shrink_simple_ops];
 )]
@@ -60,15 +59,14 @@ fn test_name(state: NoShrink<restricter<ExecState, generics>>) -> bool
 
 #[quickcheck]
 #[ignore]
-fn shrink_no_cf_simple_ops_no_reads_limited_ops_2_2(
-	state: NoShrink<NoCF<SimpleOps<NoReads<LimitedOps<ExecState, 2, 2>>>>>,
+fn shrink_no_cf_simple_ops_limited_ops_2_2(
+	state: NoShrink<NoCF<SimpleOps<LimitedOps<ExecState, 2, 2>>>>,
 ) -> bool
 {
 	state.0.shrink().all(|state| {
 		state.as_ref().validate().is_ok()
 			&& NoCF::restriction_holds(&state)
 			&& SimpleOps::restriction_holds(&state)
-			&& NoReads::restriction_holds(&state)
 			&& LimitedOps::<_, 2, 2>::restriction_holds(&state)
 	})
 }

@@ -11,7 +11,7 @@ use scry_sim::{
 	arbitrary::{ArbValue, InstrAddr, NoCF},
 	Block, CallFrameState, ControlFlowType, ExecState, Executor, Metric,
 	Metric::{ConsumedBytes, ConsumedOperands, IssuedCalls},
-	MetricTracker, OperandList, OperandState, Scalar, StackFrame, TrackReport, ValueType,
+	MetricTracker, OperandList, Scalar, StackFrame, TrackReport, ValueType,
 };
 use std::collections::HashMap;
 
@@ -28,9 +28,7 @@ fn return_trigger_impl(
 	instr: Instruction,
 	// Operands expected to be at the end of the ready list after the return trigger.
 	// They should be following any operands that were already there from before the call.
-	mut expected_ready_ops: Option<OperandList>,
-	// The reads of the expected operands
-	expected_reads: Vec<(bool, usize, usize, ValueType)>,
+	expected_ready_ops: Option<OperandList>,
 	// The metrics expected after the execution step
 	expected_metrics: TrackReport,
 ) -> TestResult
@@ -40,16 +38,6 @@ fn return_trigger_impl(
 	// Construct the expected end state
 	let mut expected_state: ExecState = state.clone();
 	expected_state.address = frame.ret_addr;
-
-	// First, offset the expected operand's MustReads by the existing reads
-	expected_ready_ops.iter_mut().for_each(|ops| {
-		ops.iter_mut().for_each(|op| {
-			if let OperandState::MustRead(idx) = op
-			{
-				*idx += expected_state.frame.reads.len();
-			}
-		});
-	});
 
 	// Add operands and reads to expected state
 	if let Some(expected_ops) = expected_ready_ops
@@ -62,10 +50,6 @@ fn return_trigger_impl(
 		{
 			expected_state.frame.op_queue.insert(0, expected_ops);
 		}
-		expected_state
-			.frame
-			.reads
-			.extend(expected_reads.into_iter());
 	}
 
 	// Because the order of pending reads affects equality, but we don't
@@ -112,7 +96,7 @@ fn return_trigger(
 	// Execute one step on the frame to get the expected result of the next
 	// instruction
 	let mut expected_metrics = TrackReport::new();
-	let (expected_ready_ops, expected_reads) = match Executor::from_state(
+	let expected_ready_ops = match Executor::from_state(
 		&ExecState {
 			address: state.address,
 			frame: frame.clone(),
@@ -127,27 +111,7 @@ fn return_trigger(
 		{
 			let state = exec.state();
 			let ready_ops = state.frame.op_queue.get(&0).cloned();
-			let mut reads = Vec::new();
-			let ready_ops = ready_ops.map(|mut op_list| {
-				let mut read_map = HashMap::<usize, _>::new();
-				op_list.iter_mut().for_each(|op| {
-					if let OperandState::MustRead(idx) = op
-					{
-						if let Some(idx_mapped) = read_map.get(idx)
-						{
-							*idx = *idx_mapped;
-						}
-						else
-						{
-							reads.push(state.frame.reads[*idx]);
-							read_map.insert(*idx, reads.len() - 1);
-							*idx = reads.len() - 1;
-						}
-					}
-				});
-				op_list
-			});
-			(ready_ops, reads)
+			ready_ops
 		},
 		_ => return TestResult::discard(),
 	};
@@ -158,7 +122,6 @@ fn return_trigger(
 		frame,
 		instr.0,
 		expected_ready_ops,
-		expected_reads,
 		expected_metrics,
 	)
 }
@@ -169,36 +132,13 @@ fn return_immediately(state: NoCF<ExecState>, frame: CallFrameState) -> TestResu
 {
 	// The operands given to the branch location must be moved into the caller
 	// frame.
-	let mut expected_ready_ops = frame.op_queue.get(&1).cloned();
-	let mut expected_reads = Vec::new();
-	if let Some(ops) = &mut expected_ready_ops
-	{
-		let mut read_map = Vec::new();
-		ops.iter_mut().for_each(|op| {
-			if let OperandState::MustRead(read_idx) = op
-			{
-				// Read operands must be renumbered
-				if !read_map.contains(read_idx)
-				{
-					read_map.push(*read_idx);
-					expected_reads.push(frame.reads[*read_idx]);
-				}
-				*read_idx = read_map
-					.iter()
-					.enumerate()
-					.find(|(_, old_idx)| read_idx == *old_idx)
-					.unwrap()
-					.0;
-			}
-		});
-	}
+	let expected_ready_ops = frame.op_queue.get(&1).cloned();
 
 	return_trigger_impl(
 		state,
 		frame,
 		Instruction::Call(CallVariant::Ret, 0.try_into().unwrap()),
 		expected_ready_ops,
-		expected_reads,
 		TrackReport::from([
 			(Metric::IssuedReturns, 1),
 			(Metric::TriggeredReturns, 1),
@@ -221,7 +161,6 @@ fn return_non_trigger(NoCF(state): NoCF<ExecState>, offset: Bits<6, false>) -> T
 	let mut expected_state = state.clone();
 	// Return discards any operands its given
 	expected_state.frame.op_queue.remove(&0);
-	expected_state.frame.clean_reads();
 	expected_state.frame.op_queue = advance_queue(expected_state.frame.op_queue);
 	expected_state.frame.branches.insert(
 		state.address + (offset.value() as usize * 2),
@@ -390,10 +329,10 @@ fn test_jump_immediate(
 	test_state.frame.op_queue = regress_queue(test_state.frame.op_queue);
 	if let Some(condition) = &condition
 	{
-		test_state.frame.op_queue.insert(
-			0,
-			OperandList::new(OperandState::Ready(condition.0.clone()), vec![]),
-		);
+		test_state
+			.frame
+			.op_queue
+			.insert(0, OperandList::new(condition.0.clone(), vec![]));
 	}
 
 	// Expected state should be the same as the given one (since we first regressed
@@ -650,7 +589,6 @@ fn call_trigger_impl(
 	// Add new frame with the ready list being the same as the old ready list
 	let ready_list = expected_state.frame.op_queue.remove(&0);
 	expected_state.frame.op_queue = advance_queue(expected_state.frame.op_queue);
-	let reads = expected_state.frame.reads.clone();
 	// Create expected stack frame
 	let block = Block {
 		address: expected_state.frame.stack.block.address + expected_state.frame.stack.base_size,
@@ -664,7 +602,6 @@ fn call_trigger_impl(
 		ret_addr: state.address + 2,
 		branches: Default::default(),
 		op_queue: HashMap::from_iter(ready_list.map(|list| (0, list)).into_iter()),
-		reads,
 		stack: frame_block,
 	};
 	expected_state.frame.stack.block.size = expected_state.frame.stack.base_size;
@@ -672,7 +609,6 @@ fn call_trigger_impl(
 	expected_state
 		.frame_stack
 		.insert(0, std::mem::replace(&mut expected_state.frame, new_frame));
-	expected_state.clean_reads();
 	// Move the current address to the call target
 	expected_state.address = call_target.0;
 
@@ -744,17 +680,15 @@ fn call_trigger_immediately(
 	let mut test_state: ExecState = state.clone();
 	if let Some(list) = test_state.frame.op_queue.get_mut(&0)
 	{
-		list.rest.insert(
-			0,
-			std::mem::replace(&mut list.first, OperandState::Ready(addr)),
-		);
+		list.rest
+			.insert(0, std::mem::replace(&mut list.first, addr));
 	}
 	else
 	{
 		test_state
 			.frame
 			.op_queue
-			.insert(0, OperandList::new(OperandState::Ready(addr), Vec::new()));
+			.insert(0, OperandList::new(addr, Vec::new()));
 	}
 
 	test_execution_step(
@@ -783,12 +717,11 @@ fn call_non_trigger(
 	}
 
 	let instr_encoded = Instruction::encode(&Instruction::Call(CallVariant::Call, offset));
-	let addr_value = OperandState::Ready(addr.clone());
+	let addr_value = addr.clone();
 
 	let mut expected_state = state.clone();
 	// Call discards any operand after the first
 	expected_state.frame.op_queue.remove(&0);
-	expected_state.frame.clean_reads();
 	expected_state.frame.op_queue = advance_queue(expected_state.frame.op_queue);
 	expected_state.frame.branches.insert(
 		state.address + (offset.value() as usize * 2),

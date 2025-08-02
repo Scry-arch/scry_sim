@@ -10,8 +10,8 @@ use scry_isa::{
 	Alu2OutputVariant, Alu2Variant, Alu2Variant::Multiply, AluVariant, Bits, Instruction,
 };
 use scry_sim::{
-	arbitrary::{LimitedOps, NoCF, NoReads, SimpleOps},
-	ExecState, Metric, OperandList, OperandState, Scalar, TrackReport, Value,
+	arbitrary::{LimitedOps, NoCF, SimpleOps},
+	ExecState, Metric, OperandList, Scalar, TrackReport, Value,
 };
 use std::{
 	cmp::min,
@@ -46,8 +46,7 @@ fn calculate_result<T: Default + Copy, const OPS_IN: usize, const OPS_OUT: usize
 /// consume and without any operands being Nan, Nar, nor needing to read from
 /// memory. Since all the other cases need to be handled in the same way, they
 /// will be tested in a way that is agnostic to the specific instruction variant
-type AluTestState<const OPS_IN: usize> =
-	NoCF<SimpleOps<NoReads<LimitedOps<ExecState, OPS_IN, OPS_IN>>>>;
+type AluTestState<const OPS_IN: usize> = NoCF<SimpleOps<LimitedOps<ExecState, OPS_IN, OPS_IN>>>;
 
 /// Tests the given arithmetic instruction on the given state.
 ///
@@ -78,7 +77,7 @@ fn test_arithmetic_instruction<const OPS_IN: usize, const OPS_OUT: usize>(
 	i128_sem: Option<impl Fn([i128; OPS_IN]) -> [Value; OPS_OUT]>,
 ) -> TestResult
 {
-	let state = state.0 .0 .0 .0;
+	let state = state.0 .0 .0;
 
 	if out_idx.iter().any(|idx| {
 		state
@@ -102,17 +101,13 @@ fn test_arithmetic_instruction<const OPS_IN: usize, const OPS_OUT: usize>(
 	let mut new_op_q = state.frame.op_queue.clone();
 	// Remove ready list
 	let removed_list = new_op_q.remove(&0).unwrap();
-	let removed_rest_values: Vec<Value> = removed_list
-		.rest
-		.into_iter()
-		.map(|op| op.extract_value().unwrap())
-		.collect();
+	let removed_rest_values: Vec<Value> = removed_list.rest.into_iter().collect();
 
 	expected_state.frame.op_queue = advance_queue(new_op_q);
 
 	// Calculate expected result operand
 	let mut result_scalars = Vec::new();
-	let first_value = removed_list.first.extract_value().unwrap();
+	let first_value = removed_list.first;
 	let input_typ = first_value.value_type();
 	for (scalar_idx, sc0) in first_value.iter().enumerate()
 	{
@@ -193,15 +188,15 @@ fn test_arithmetic_instruction<const OPS_IN: usize, const OPS_OUT: usize>(
 		if let Some(op_list) = expected_state.frame.op_queue.get_mut(idx)
 		{
 			// Push on end of list
-			op_list.push(OperandState::Ready(result_value));
+			op_list.push(result_value);
 		}
 		else
 		{
 			// No existing list, create it
-			expected_state.frame.op_queue.insert(
-				*idx,
-				OperandList::new(OperandState::Ready(result_value), vec![]),
-			);
+			expected_state
+				.frame
+				.op_queue
+				.insert(*idx, OperandList::new(result_value, vec![]));
 		}
 	}
 

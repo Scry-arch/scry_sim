@@ -1,11 +1,9 @@
 use crate::{
-	memory::{MemError, Memory},
-	value::Value,
-	CallFrameState, ExecState, Metric, MetricTracker, OperandList, OperandState, StackFrame,
+	value::Value, CallFrameState, ExecState, Metric, MetricTracker, OperandList, StackFrame,
 	ValueType,
 };
 use std::{
-	cell::{Ref, RefCell},
+	cell::RefCell,
 	collections::{HashMap, VecDeque},
 	fmt::Debug,
 	iter::{once, FromIterator},
@@ -27,78 +25,14 @@ use std::{
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Operand
 {
-	op: Rc<RefCell<OperandState<(bool, usize, usize, ValueType)>>>,
+	op: Rc<RefCell<Value>>,
 }
 impl Operand
 {
-	/// Constructs an operand that needs to read from the given address the
-	/// given amount of scalars of the given type.
-	pub fn read_typed(stack_read: bool, address: usize, len: usize, typ: ValueType) -> Self
-	{
-		Self {
-			op: Rc::new(OperandState::MustRead((stack_read, address, len, typ)).into()),
-		}
-	}
-
 	/// Returns a reference to this operands value if available.
-	///
-	/// Otherwise, calls the given function with the following about a required
-	/// data read:
-	///
-	/// 0. whether it's a read from stack
-	/// 0. the address or index
-	/// 0. number of scalars
-	/// 0. type to read
-	///
-	/// The function should perform the read and return the loaded value.
-	/// Which is saved in the operand and a reference to it returned.
-	/// If the function fails, the error is returned.
-	pub(crate) fn get_value_or<E, F: FnOnce(bool, usize, usize, ValueType) -> Result<Value, E>>(
-		&mut self,
-		f: F,
-	) -> Result<impl '_ + Deref<Target = Value>, E>
+	pub fn get_value(&self) -> impl '_ + Deref<Target = Value>
 	{
-		if self.get_value().is_none()
-		{
-			let mut ref_mut = (*self.op).borrow_mut();
-			match *ref_mut
-			{
-				OperandState::MustRead((stack_read, addr, len, typ)) =>
-				{
-					let new_value = f(stack_read, addr, len, typ)?;
-					*ref_mut = OperandState::Ready(new_value)
-				},
-				_ => (),
-			}
-		}
-
-		if let Some(v) = self.get_value()
-		{
-			Ok(v)
-		}
-		else
-		{
-			unreachable!()
-		}
-	}
-
-	/// Returns a reference to this operands value if available.
-	pub fn get_value(&self) -> Option<impl '_ + Deref<Target = Value>>
-	{
-		if let OperandState::Ready(_) = *(*self.op).borrow()
-		{
-			Some(Ref::map((*self.op).borrow(), |b| {
-				match b
-				{
-					OperandState::Ready(v) => v,
-					_ => unreachable!(),
-				}
-			}))
-		}
-		else
-		{
-			None
-		}
+		(*self.op).borrow()
 	}
 }
 impl From<Value> for Operand
@@ -106,7 +40,7 @@ impl From<Value> for Operand
 	fn from(v: Value) -> Self
 	{
 		Self {
-			op: Rc::new(OperandState::Ready(v).into()),
+			op: Rc::new(v.into()),
 		}
 	}
 }
@@ -136,66 +70,38 @@ impl OperandStack
 	}
 
 	/// An iterator providing the operand list at the front of the operand
-	/// queue. The given memory is used to perform any pending read operations.
+	/// queue.
 	///
 	/// Only when `next` is called, will a returned operand be treated as
 	/// "consumed" by the report.
 	///
 	/// When the iterator is dropped, the queue discards the remaining operands
 	/// at the front of the queue, and moves the next operand list to the front.
-	pub fn ready_iter<'a, M: Memory, T: MetricTracker>(
+	pub fn ready_iter<'a, T: MetricTracker>(
 		&'a mut self,
-		stack_base: usize,
-		mem: &'a mut M,
 		tracker: &'a mut T,
-	) -> impl 'a + Iterator<Item = (Value, Option<(MemError, usize)>)>
+	) -> impl 'a + Iterator<Item = Value>
 	{
-		struct RemoveIter<'b, M: Memory, Ti: MetricTracker>
+		struct RemoveIter<'b, Ti: MetricTracker>
 		{
-			stack_base: usize,
 			stack: &'b mut OperandStack,
-			mem: &'b mut M,
 			tracker: &'b mut Ti,
 		}
-		impl<'b, M: Memory, Ti: MetricTracker> Iterator for RemoveIter<'b, M, Ti>
+		impl<'b, Ti: MetricTracker> Iterator for RemoveIter<'b, Ti>
 		{
-			type Item = (Value, Option<(MemError, usize)>);
+			type Item = Value;
 
 			fn next(&mut self) -> Option<Self::Item>
 			{
-				self.stack.ready.pop_front().and_then(|mut op: Operand| {
-					let mut err = None;
-					let val = op
-						.get_value_or::<(), _>(|stack_read, addr_idx, len, typ| {
-							let mut v = Value::new_nar_typed(typ, 0);
-							let addr = if stack_read
-							{
-								OperandStack::operand_stack_address(self.stack_base, typ, addr_idx)
-							}
-							else
-							{
-								addr_idx
-							};
-
-							err = self.mem.read_data(addr, &mut v, len, self.tracker).err();
-
-							if stack_read
-							{
-								self.tracker.add_stat(Metric::StackReads, 1);
-								self.tracker.add_stat(Metric::StackReadBytes, typ.scale());
-							}
-
-							Ok(v)
-						})
-						.unwrap()
-						.clone();
+				self.stack.ready.pop_front().and_then(|op: Operand| {
+					let val = op.get_value().clone();
 					self.tracker.add_stat(Metric::ConsumedOperands, 1);
 					self.tracker.add_stat(Metric::ConsumedBytes, val.size());
-					Some((val, err))
+					Some(val)
 				})
 			}
 		}
-		impl<'b, M: Memory, Ti: MetricTracker> Drop for RemoveIter<'b, M, Ti>
+		impl<'b, Ti: MetricTracker> Drop for RemoveIter<'b, Ti>
 		{
 			fn drop(&mut self)
 			{
@@ -203,9 +109,7 @@ impl OperandStack
 			}
 		}
 		RemoveIter {
-			stack_base,
 			stack: self,
-			mem,
 			tracker,
 		}
 	}
@@ -240,15 +144,8 @@ impl OperandStack
 	/// Pushes the given operand to the back of the list at the given index.
 	pub fn push_operand(&mut self, idx: usize, op: Operand, tracker: &mut impl MetricTracker)
 	{
-		if let Some(v) = op.get_value()
-		{
-			tracker.add_stat(Metric::QueuedValues, 1);
-			tracker.add_stat(Metric::QueuedValueBytes, v.size());
-		}
-		else
-		{
-			tracker.add_stat(Metric::QueuedReads, 1);
-		}
+		tracker.add_stat(Metric::QueuedValues, 1);
+		tracker.add_stat(Metric::QueuedValueBytes, op.get_value().size());
 		self.push_op_unreported(idx, op);
 	}
 
@@ -352,35 +249,12 @@ impl OperandStack
 		{
 			None.into_iter().chain(self.stack.get(idx - 1).unwrap())
 		};
-		let mut reads = Vec::new();
 		let mut op_queue = HashMap::new();
 
-		let mut convert_queue = |q: &VecDeque<Operand>| {
+		let convert_queue = |q: &VecDeque<Operand>| {
 			let mut all_ops = q
 				.iter()
-				.map(|op| {
-					match (*op.op).borrow().deref()
-					{
-						OperandState::MustRead(_) =>
-						{
-							OperandState::MustRead(
-								if let Some((idx, _)) = reads
-									.iter()
-									.enumerate()
-									.find(|(_, read_op)| Rc::ptr_eq(read_op, &op.op))
-								{
-									idx
-								}
-								else
-								{
-									reads.push(op.op.clone());
-									reads.len() - 1
-								},
-							)
-						},
-						OperandState::Ready(v) => OperandState::Ready(v.clone()),
-					}
-				})
+				.map(|op| op.get_value().clone())
 				.collect::<Vec<_>>();
 			OperandList::new(all_ops.remove(0), all_ops)
 		};
@@ -392,19 +266,6 @@ impl OperandStack
 		});
 
 		to_set.op_queue = op_queue;
-		to_set.reads = reads
-			.iter()
-			.map(|op| {
-				if let OperandState::MustRead(addr_len_typ) = (*op).borrow().deref()
-				{
-					*addr_len_typ
-				}
-				else
-				{
-					unreachable!()
-				}
-			})
-			.collect();
 	}
 
 	pub fn set_all_frame_states<'a>(&self, to_set: impl Iterator<Item = &'a mut CallFrameState>)
@@ -437,23 +298,11 @@ impl<'a> From<&'a ExecState> for OperandStack
 	fn from(state: &'a ExecState) -> Self
 	{
 		let frame_op_queue = |frame: &CallFrameState| {
-			let reads: Vec<_> = frame
-				.reads
-				.clone()
-				.into_iter()
-				.map(|(stack_read, addr, len, typ)| Operand::read_typed(stack_read, addr, len, typ))
-				.collect();
 			frame
 				.op_queue
 				.iter()
 				.fold(VecDeque::new(), |mut op_lists, (list_idx, op_list)| {
-					let ops = op_list.iter().cloned().map(|op| {
-						match op
-						{
-							OperandState::MustRead(idx) => reads[idx].clone(),
-							OperandState::Ready(v) => v.clone().into(),
-						}
-					});
+					let ops = op_list.iter().cloned().map(|op| op.into());
 					if op_lists.len() <= *list_idx
 					{
 						op_lists.resize_with(*list_idx + 1, VecDeque::new);

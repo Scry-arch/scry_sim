@@ -1,8 +1,8 @@
 use duplicate::duplicate_item;
 use quickcheck_macros::quickcheck;
 use scry_sim::{
-	arbitrary::{LimitedOps, NoCF, NoReads, Restriction, SimpleOps},
-	CallFrameState, ExecState, ValueType,
+	arbitrary::{LimitedOps, NoCF, Restriction, SimpleOps},
+	CallFrameState, ExecState,
 };
 
 /// Tests that all arbitrarily generated states are valid
@@ -24,15 +24,13 @@ fn state_unaligned_address(mut state: ExecState) -> bool
 
 /// Tests that any state with an invalid frame is invalid
 #[quickcheck]
-fn state_invalid_frame(
-	mut state: ExecState,
-	mut frame: CallFrameState,
-	idx: usize,
-	read: (bool, usize, usize, ValueType),
-) -> bool
+fn state_invalid_frame(mut state: ExecState, mut frame: CallFrameState, idx: usize) -> bool
 {
-	// Create invalid by adding a superfluous read
-	frame.reads.push(read);
+	// Create invalid by making return address unaligned
+	if frame.ret_addr % 2 == 0
+	{
+		frame.ret_addr += 1;
+	}
 
 	// Insert frame into state
 	let insert_idx = idx % (state.frame_stack.len() + 1);
@@ -54,7 +52,6 @@ fn state_invalid_frame(
 #[duplicate_item(
 	restricter 	test_name;
 	[NoCF] 		[arb_state_no_cf];
-	[NoReads] 	[arb_state_no_reads];
 )]
 #[quickcheck]
 fn test_name(state: restricter<ExecState>) -> bool
@@ -63,12 +60,9 @@ fn test_name(state: restricter<ExecState>) -> bool
 }
 
 #[quickcheck]
-fn no_cf_simple_ops_no_reads_limited_ops_2_2(
-	state: NoCF<SimpleOps<NoReads<LimitedOps<ExecState, 2, 2>>>>,
-) -> bool
+fn no_cf_simple_ops_limited_ops_2_2(state: NoCF<SimpleOps<LimitedOps<ExecState, 2, 2>>>) -> bool
 {
 	NoCF::restriction_holds(&state)
 		&& SimpleOps::restriction_holds(&state)
-		&& NoReads::restriction_holds(&state)
 		&& LimitedOps::<_, 2, 2>::restriction_holds(&state)
 }

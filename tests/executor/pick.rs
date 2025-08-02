@@ -4,7 +4,7 @@ use quickcheck_macros::quickcheck;
 use scry_isa::{Bits, Instruction};
 use scry_sim::{
 	arbitrary::{ArbValue, NoCF},
-	ExecState, Metric, OperandList, OperandState, Value,
+	ExecState, Metric, OperandList, Value,
 };
 
 #[quickcheck]
@@ -20,13 +20,7 @@ fn pick_2_inputs(
 	test_state.frame.op_queue = regress_queue(test_state.frame.op_queue);
 	test_state.frame.op_queue.insert(
 		0,
-		OperandList::new(
-			OperandState::Ready(condition.0.clone()),
-			vec![
-				OperandState::Ready(in1.clone()),
-				OperandState::Ready(in2.clone()),
-			],
-		),
+		OperandList::new(condition.0.clone(), vec![in1.clone(), in2.clone()]),
 	);
 
 	test_simple_instruction(
@@ -50,14 +44,11 @@ fn pick_2_inputs(
 			let target_idx = (target.value + 1) as usize;
 			if let Some(list) = new_op_q.get_mut(&target_idx)
 			{
-				list.rest.push(OperandState::Ready(chosen));
+				list.rest.push(chosen);
 			}
 			else
 			{
-				new_op_q.insert(
-					target_idx,
-					OperandList::new(OperandState::Ready(chosen), vec![]),
-				);
+				new_op_q.insert(target_idx, OperandList::new(chosen, vec![]));
 			}
 
 			new_op_q

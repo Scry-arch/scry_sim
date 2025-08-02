@@ -2,7 +2,7 @@ use crate::executor::test_simple_instruction;
 use quickcheck::TestResult;
 use quickcheck_macros::quickcheck;
 use scry_isa::{Bits, Instruction};
-use scry_sim::{arbitrary::NoCF, ExecState, Metric, OperandList, OperandState};
+use scry_sim::{arbitrary::NoCF, ExecState, Metric, OperandList};
 use std::cmp::min;
 
 /// Tests the "duplicate" instruction
@@ -44,20 +44,11 @@ fn duplicate(
 			new_op_q
 		},
 		|old_op_queue| {
-			let (old_op_ready, old_op_ready_bytes, old_op_reads) =
-				old_op_queue.get(&0).map_or((0, 0, 0), |op_list| {
-					op_list
-						.iter()
-						.fold((0, 0, 0), |(ready, read_bytes, reads), op| {
-							match op
-							{
-								OperandState::MustRead(_) => (ready, read_bytes, reads + 1),
-								OperandState::Ready(v) =>
-								{
-									(ready + 1, v.value_type().scale() + read_bytes, reads)
-								},
-							}
-						})
+			let (old_op_ready, old_op_ready_bytes) =
+				old_op_queue.get(&0).map_or((0, 0), |op_list| {
+					op_list.iter().fold((0, 0), |(ready, read_bytes), v| {
+						(ready + 1, v.value_type().scale() + read_bytes)
+					})
 				});
 			let double_if_dup_next = |val| if dup_next { val * 2 } else { val };
 			[
@@ -66,8 +57,7 @@ fn duplicate(
 					Metric::QueuedValueBytes,
 					double_if_dup_next(old_op_ready_bytes),
 				),
-				(Metric::QueuedReads, double_if_dup_next(old_op_reads)),
-				(Metric::ReorderedOperands, old_op_ready + old_op_reads),
+				(Metric::ReorderedOperands, old_op_ready),
 			]
 			.into()
 		},

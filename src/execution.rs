@@ -3,7 +3,7 @@ use crate::{
 	data::{Operand, OperandStack, ProgramStack},
 	memory::Memory,
 	value::Value,
-	ExecState, MemError, Metric, MetricTracker, Scalar, ValueType,
+	ExecState, Metric, MetricTracker, Scalar, ValueType,
 };
 use byteorder::{ByteOrder, LittleEndian};
 use duplicate::substitute;
@@ -100,10 +100,9 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 	fn get_ready_iter<'a>(
 		&'a mut self,
 		tracker: &'a mut impl MetricTracker,
-	) -> impl 'a + Iterator<Item = (Value, Option<(MemError, usize)>)>
+	) -> impl 'a + Iterator<Item = Value>
 	{
-		self.operands
-			.ready_iter(self.get_stack_base(), self.memory.borrow_mut(), tracker)
+		self.operands.ready_iter(tracker)
 	}
 
 	/// Perform one execution step.
@@ -127,8 +126,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 			{
 				Call(CallVariant::Call, offset) =>
 				{
-					let (addr, addr_error) = self.get_ready_iter(tracker).next().unwrap();
-					assert!(addr_error.is_none());
+					let addr = self.get_ready_iter(tracker).next().unwrap();
 
 					let target_addr = Self::get_absolute_address(
 						self.control.next_addr,
@@ -293,7 +291,6 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 						assert!(ready_peek.next().is_some());
 						condition
 							.get_value()
-							.unwrap()
 							.get_first()
 							.bytes()
 							.unwrap()
@@ -467,27 +464,13 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 	fn get_store_val<'a>(
 		&'a mut self,
 		tracker: &'a mut impl MetricTracker,
-	) -> Result<
-		(
-			Value,
-			impl 'a + Iterator<Item = (Value, Option<(MemError, usize)>)>,
-		),
-		ExecError,
-	>
+	) -> Result<(Value, impl 'a + Iterator<Item = Value>), ExecError>
 	{
 		let mut ready_iter = self.get_ready_iter(tracker);
 
-		let (to_store, to_store_err) = ready_iter.next().ok_or(ExecError::Exception(
+		let to_store = ready_iter.next().ok_or(ExecError::Exception(
 			"Store instruction got no operands".into(),
 		))?;
-
-		if let Some((err, addr)) = to_store_err
-		{
-			return Err(ExecError::Exception(format!(
-				"Store operand errored while loaded: ({:?}, {:#X})",
-				err, addr
-			)));
-		}
 
 		Ok((to_store, ready_iter))
 	}
@@ -503,7 +486,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 	/// an error with exception. If any operand is Nan, returns an error with
 	/// None. Otherwise, returns the resolved address.
 	fn get_mem_instr_effective_addr(
-		mut ready_iter: impl Iterator<Item = (Value, Option<(MemError, usize)>)>,
+		mut ready_iter: impl Iterator<Item = Value>,
 		current_addr: usize,
 		scale: usize,
 	) -> Result<usize, Option<ExecError>>
@@ -513,16 +496,13 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 			.ok_or(Some(ExecError::Exception(
 				"Memory instruction missing first operand".into(),
 			)))
-			.and_then(|(in1, err1)| {
-				assert!(err1.is_none());
-
+			.and_then(|in1| {
 				let in2 = ready_iter.next();
-				let in2_extracted = in2.as_ref().map(|(in2, err2)| {
-					assert!(err2.is_none());
-					(in2.value_type(), in2.get_first().bytes().unwrap(), scale)
-				});
+				let in2_extracted = in2
+					.as_ref()
+					.map(|in2| (in2.value_type(), in2.get_first().bytes().unwrap(), scale));
 
-				match (in1.get_first(), in2.as_ref().map(|(v, _)| v.get_first()))
+				match (in1.get_first(), in2.as_ref().map(|v| v.get_first()))
 				{
 					(Scalar::Nan, _) | (_, Some(Scalar::Nan)) =>
 					{
@@ -628,8 +608,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 
 		// If no operands are given, it's an unconditional jump
 		let unconditional = op1.is_none();
-		let is_zero = op1.map_or(false, |(val1, errs)| {
-			assert!(errs.is_none());
+		let is_zero = op1.map_or(false, |val1| {
 			val1.get_first().bytes().unwrap().iter().all(|b| *b == 0)
 		});
 
@@ -706,12 +685,11 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 					let in1 = in1.ok_or(ExecError::Exception(
 						"Alu instruction missing first operand".into(),
 					))?;
-					Self::fail_if_nan_nar(&in1.0)?;
-					let typ = in1.0.value_type();
+					Self::fail_if_nan_nar(&in1)?;
+					let typ = in1.value_type();
 
 					let in2 = in2.unwrap_or_else(|| {
 						let mut scalars: Vec<_> = in1
-							.0
 							.iter()
 							.map(|_| {
 								let mut bytes = Vec::new();
@@ -729,17 +707,14 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 								Scalar::Val(bytes.into_boxed_slice())
 							})
 							.collect();
-						(
-							Value::new_typed(typ, scalars.remove(0), scalars).unwrap(),
-							None,
-						)
+						Value::new_typed(typ, scalars.remove(0), scalars).unwrap()
 					});
 
-					Self::fail_if_nan_nar(&in2.0)?;
-					Self::fail_if_diff_types(typ, in2.0.value_type())?;
+					Self::fail_if_nan_nar(&in2)?;
+					Self::fail_if_diff_types(typ, in2.value_type())?;
 
-					let in1 = in1.0.iter();
-					let in2 = in2.0.iter();
+					let in1 = in1.iter();
+					let in2 = in2.iter();
 
 					let func = match variant
 					{
@@ -782,9 +757,9 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 					let in1 = in1.ok_or(ExecError::Exception(
 						"Alu instruction missing operand".into(),
 					))?;
-					Self::fail_if_nan_nar(&in1.0)?;
-					let typ = in1.0.value_type();
-					let in1 = in1.0.iter();
+					Self::fail_if_nan_nar(&in1)?;
+					let typ = in1.value_type();
+					let in1 = in1.iter();
 					let func = match variant
 					{
 						ShiftLeft => Self::alu_shift_left_once,
@@ -841,13 +816,12 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 			let in1 = in1.ok_or(ExecError::Exception(
 				"Alu2 instruction missing first operand".into(),
 			))?;
-			Self::fail_if_nan_nar(&in1.0)?;
-			let typ = in1.0.value_type();
+			Self::fail_if_nan_nar(&in1)?;
+			let typ = in1.value_type();
 
 			let in2 = ins.next();
 			let in2 = in2.unwrap_or({
 				let mut scalars: Vec<_> = in1
-					.0
 					.iter()
 					.map(|scal| {
 						let mut bytes = Vec::new();
@@ -861,16 +835,13 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 						Scalar::Val(bytes.into_boxed_slice())
 					})
 					.collect();
-				(
-					Value::new_typed(typ, scalars.remove(0), scalars).unwrap(),
-					None,
-				)
+				Value::new_typed(typ, scalars.remove(0), scalars).unwrap()
 			});
-			Self::fail_if_nan_nar(&in2.0)?;
-			Self::fail_if_diff_types(typ, in2.0.value_type())?;
+			Self::fail_if_nan_nar(&in2)?;
+			Self::fail_if_diff_types(typ, in2.value_type())?;
 
-			let in1 = in1.0.iter();
-			let in2 = in2.0.iter();
+			let in1 = in1.iter();
+			let in2 = in2.iter();
 
 			let func = match variant
 			{

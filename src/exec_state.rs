@@ -1,52 +1,10 @@
-use crate::{Value, ValueType};
+use crate::Value;
 use std::{
 	collections::HashMap,
 	fmt::Debug,
 	iter::{once, Chain, Once},
 	vec::IntoIter,
 };
-
-/// An instruction operand.
-///
-/// Differs from values in that they may not actually be available yet or may be
-/// connected to other operands that use the same value.
-/// This can happen during a read from memory. Initially the read is issued but
-/// not yet needed. The operand may then be cloned e.g. by a duplicate
-/// instruction. The resulting operands are then connected, such that when one
-/// of them is consumed by an instruction, e.g. an add, the memory
-/// read is actually performed and all connected operands now used the read
-/// value.
-///
-/// `R` is the type used to refer to what needs reading
-#[derive(Debug, Eq, PartialEq, Clone)]
-pub enum OperandState<R>
-{
-	/// Operand is ready for use as the given value
-	Ready(Value),
-
-	/// Operand must read from memory to get the value needed.
-	MustRead(R),
-}
-impl<R> OperandState<R>
-{
-	pub fn extract_value(self) -> Option<Value>
-	{
-		match self
-		{
-			Self::Ready(v) => Some(v),
-			Self::MustRead(_) => None,
-		}
-	}
-
-	pub fn get_value(&self) -> Option<&Value>
-	{
-		match self
-		{
-			Self::Ready(v) => Some(v),
-			Self::MustRead(_) => None,
-		}
-	}
-}
 
 /// Control flow types
 #[derive(Debug, Eq, PartialEq, Clone, Copy)]
@@ -65,15 +23,15 @@ pub enum ControlFlowType
 pub struct OperandList
 {
 	/// First operand in the list
-	pub first: OperandState<usize>,
+	pub first: Value,
 
 	/// The rest of the operands in the list. In order.
-	pub rest: Vec<OperandState<usize>>,
+	pub rest: Vec<Value>,
 }
 impl IntoIterator for OperandList
 {
-	type IntoIter = Chain<Once<OperandState<usize>>, IntoIter<OperandState<usize>>>;
-	type Item = OperandState<usize>;
+	type IntoIter = Chain<Once<Value>, IntoIter<Value>>;
+	type Item = Value;
 
 	fn into_iter(self) -> Self::IntoIter
 	{
@@ -83,25 +41,25 @@ impl IntoIterator for OperandList
 impl OperandList
 {
 	/// Construct new operand list with the given first operand and the rest
-	pub fn new(first: OperandState<usize>, rest: Vec<OperandState<usize>>) -> Self
+	pub fn new(first: Value, rest: Vec<Value>) -> Self
 	{
 		Self { first, rest }
 	}
 
 	/// Iterates over the operands in-order
-	pub fn iter(&self) -> impl Iterator<Item = &OperandState<usize>>
+	pub fn iter(&self) -> impl Iterator<Item = &Value>
 	{
 		once(&self.first).chain(self.rest.iter())
 	}
 
 	/// Iterates over the operands in-order
-	pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut OperandState<usize>>
+	pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Value>
 	{
 		once(&mut self.first).chain(self.rest.iter_mut())
 	}
 
 	/// Adds an operands to the end of the list
-	pub fn push(&mut self, op: OperandState<usize>)
+	pub fn push(&mut self, op: Value)
 	{
 		self.rest.push(op)
 	}
@@ -113,7 +71,7 @@ impl OperandList
 	}
 
 	/// Adds all the given operands to the end of the list
-	pub fn extend(&mut self, iter: impl Iterator<Item = OperandState<usize>>)
+	pub fn extend(&mut self, iter: impl Iterator<Item = Value>)
 	{
 		self.rest.extend(iter)
 	}
@@ -376,79 +334,20 @@ pub struct CallFrameState
 	/// Operands queue
 	pub op_queue: OperandQueue,
 
-	/// Read instructions that have been issued but still waiting.
-	///
-	/// 0. Whether it's a stack read or not (true is stack).
-	/// 0. element is the offset (stack) or address (non-stack) to read from.
-	/// 0. is the number of scalars to read.
-	/// 0. is the type of scalars to read.
-	pub reads: Vec<(bool, usize, usize, ValueType)>,
-
 	/// Stack frame
 	pub stack: StackFrame,
 }
 impl CallFrameState
 {
-	/// Returns the number of times the given index is referenced by a MustRead
-	/// operand in the given map
-	pub(crate) fn count_read_refs(&self, idx: usize) -> usize
-	{
-		self.op_queue.iter().fold(0, |c, (_, ops)| {
-			ops.iter().fold(c, |mut c, op| {
-				if let OperandState::MustRead(read_idx) = op
-				{
-					if *read_idx == idx
-					{
-						c += 1;
-					}
-				}
-				c
-			})
-		})
-	}
-
 	/// Returns whether this call frame is valid.
 	///
 	/// It is invalid if:
-	/// * A MustRead operand references a read index that doesn't exist.
-	/// * A read is not references by any MustRead operand.
 	/// * Return address is not 2-byte aligned
 	/// * Any control flow trigger address is not 2-byte aligned
 	/// * Any control flow target address is not 2-byte aligned
 	/// * Any operand list has more than supported number of operands (4)
 	pub fn validate(&self) -> Result<(), String>
 	{
-		if (0..self.reads.len()).any(|idx| self.count_read_refs(idx) == 0)
-		{
-			return Err("MustRead without operands referencing it".to_string());
-		}
-
-		if self.reads.iter().any(|(_, _, len, _)| *len == 0)
-		{
-			return Err("Read 0 bytes".to_string());
-		}
-
-		if self.op_queue.iter().any(|(_, ops)| {
-			for op in ops.iter()
-			{
-				match op
-				{
-					OperandState::MustRead(idx) =>
-					{
-						if *idx >= self.reads.len()
-						{
-							return true;
-						}
-					},
-					_ => (),
-				}
-			}
-			false
-		})
-		{
-			return Err("Operand read reference out of bounds".to_string());
-		}
-
 		if self.ret_addr % 2 != 0
 		{
 			return Err("Unaligned return address".to_string());
@@ -473,52 +372,6 @@ impl CallFrameState
 
 		Ok(())
 	}
-
-	/// Remove the read with the given index if there is no references to it
-	/// from MustRead operands. Returns whether any reads were removed.
-	fn remove_read_if_unused(&mut self, idx: usize) -> bool
-	{
-		// Remove read with given index, if no operand references it
-		if self.count_read_refs(idx) == 0
-		{
-			// Remove read
-			self.reads.remove(idx);
-			// Correct any references to higher-indexed reads
-			self.op_queue.iter_mut().for_each(|(_, ops)| {
-				ops.iter_mut().for_each(|op| {
-					if let OperandState::MustRead(read_idx) = op
-					{
-						if *read_idx > idx
-						{
-							*read_idx -= 1;
-						}
-					}
-				})
-			});
-			true
-		}
-		else
-		{
-			false
-		}
-	}
-
-	/// Removes any reads that have no MustRead operands referencing them
-	pub fn clean_reads(&mut self)
-	{
-		'outer: loop
-		{
-			for idx in 0..self.reads.len()
-			{
-				if self.remove_read_if_unused(idx)
-				{
-					continue 'outer;
-				}
-			}
-			// All reads have references
-			break;
-		}
-	}
 }
 impl Default for CallFrameState
 {
@@ -528,7 +381,6 @@ impl Default for CallFrameState
 			ret_addr: 0,
 			branches: Default::default(),
 			op_queue: Default::default(),
-			reads: Default::default(),
 			stack: Default::default(),
 		}
 	}
@@ -609,14 +461,5 @@ impl ExecState
 		}
 
 		Ok(())
-	}
-
-	/// Goes through all pending reads and ensures that they are referenced by
-	/// an operand. Any read not referenced is removed.
-	pub fn clean_reads(&mut self)
-	{
-		once(&mut self.frame)
-			.chain(self.frame_stack.iter_mut())
-			.for_each(CallFrameState::clean_reads);
 	}
 }

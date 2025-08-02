@@ -4,7 +4,7 @@ use quickcheck_macros::quickcheck;
 use scry_isa::{Alu2Variant, AluVariant, Bits, CallVariant, Instruction, Type};
 use scry_sim::{
 	arbitrary::NoCF, ExecError, ExecState, Executor, Memory, Metric, MetricReporter, MetricTracker,
-	OperandList, OperandQueue, OperandState, Scalar, TrackReport, Value,
+	OperandList, OperandQueue, Scalar, TrackReport, Value,
 };
 use std::{borrow::BorrowMut, fmt::Debug};
 
@@ -160,8 +160,6 @@ fn test_simple_instruction(
 	// Advance expected operand queue by 1
 	assert!(expected_state.frame.op_queue.get(&0).is_none());
 	expected_state.frame.op_queue = advance_queue(expected_state.frame.op_queue);
-	// Ensure any superfluous reads are removed
-	expected_state.clean_reads();
 
 	// Build expected metrics
 	let mut expected_mets = expected_metrics(&state.frame.op_queue);
@@ -240,10 +238,8 @@ fn instruction_constant(
 
 			// The produced operand should go first in the next operand list
 			let old_operands = new_op_q.remove(&0);
-			let new_const = OperandState::Ready(Value::singleton_typed(
-				typ.clone().into(),
-				Scalar::Val(bytes.into_boxed_slice()),
-			));
+			let new_const =
+				Value::singleton_typed(typ.clone().into(), Scalar::Val(bytes.into_boxed_slice()));
 
 			let ops_rest = if let Some(ops) = new_op_q.get_mut(&1)
 			{
