@@ -6,7 +6,7 @@ use scry_sim::{arbitrary::InstrAddr, CallFrameState, ControlFlowType};
 #[quickcheck]
 fn arb_valid(frame: CallFrameState) -> bool
 {
-	frame.validate().is_ok()
+	frame.validate(usize::MAX).is_ok()
 }
 
 /// Tests that any frame with the return address not 2-byte aligned is not
@@ -16,7 +16,7 @@ fn unaligned_return_invalid(mut frame: CallFrameState) -> bool
 {
 	// Assume address is already aligned, unalign it.
 	frame.ret_addr += 1;
-	frame.validate().is_err()
+	frame.validate(usize::MAX).is_err()
 }
 
 /// Tests that any frame with the return address not 2-byte aligned is invalid
@@ -29,7 +29,7 @@ fn unaligned_control_trigger_invalid(
 {
 	// Address is already aligned, unalign it.
 	frame.branches.insert(trigger + 1, typ);
-	frame.validate().is_err()
+	frame.validate(usize::MAX).is_err()
 }
 
 /// Tests that any frame with the control flow target address not 2-byte aligned
@@ -52,7 +52,7 @@ fn unaligned_control_target_invalid(
 			Return => return TestResult::discard(),
 		},
 	);
-	TestResult::from_bool(frame.validate().is_err())
+	TestResult::from_bool(frame.validate(usize::MAX).is_err())
 }
 
 /// Tests that any frame with an operand list of more than 4 operands is
@@ -71,7 +71,7 @@ fn long_operand_list_invalid(mut frame: CallFrameState, list_idx: usize) -> Test
 	{
 		op_list.push(op_list.first.clone());
 	}
-	TestResult::from_bool(frame.validate().is_err())
+	TestResult::from_bool(frame.validate(usize::MAX).is_err())
 }
 
 /// Tests that any frame is equals to itself

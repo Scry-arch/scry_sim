@@ -1,6 +1,5 @@
 use crate::{
 	value::Value, CallFrameState, ExecState, Metric, MetricTracker, OperandList, StackFrame,
-	ValueType,
 };
 use std::{
 	cell::RefCell,
@@ -275,14 +274,14 @@ impl OperandStack
 			.for_each(|(idx, frame)| self.set_frame_state(idx, frame));
 	}
 
-	/// Calculates the effective address of a value with given type and index in
+	/// Calculates the effective address of a value with given size and index in
 	/// the stack with the given stack base. I.e. returns an absolute address
-	pub fn operand_stack_address(stack_base: usize, typ: ValueType, index: usize) -> usize
+	pub fn operand_stack_address(stack_base: usize, size: usize, index: usize) -> usize
 	{
-		let stack_offset = index * typ.scale();
-		let missing_align = typ.scale() - (stack_base % typ.scale());
+		let stack_offset = index * size;
+		let missing_align = size - (stack_base % size);
 		stack_offset
-			+ if missing_align != typ.scale()
+			+ if missing_align != size
 			{
 				stack_base + missing_align
 			}

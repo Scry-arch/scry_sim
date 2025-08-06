@@ -1,13 +1,13 @@
 use crate::{
-	executor::test_execution_step,
-	misc::{advance_queue, RepeatingMem},
+	executor::{load::idx_address, test_execution_step},
+	misc::{advance_queue, regress_queue, RepeatingMem},
 };
 use quickcheck::TestResult;
 use quickcheck_macros::quickcheck;
 use scry_isa::{Bits, Instruction};
 use scry_sim::{
 	arbitrary::{LimitedOps, NoCF},
-	ExecState, Metric,
+	BlockedMemory, ExecState, Metric, OperandList, Scalar, Value, ValueType,
 };
 
 fn default_expected_state(
@@ -165,6 +165,61 @@ fn static_free_base(
 			(Metric::InstructionReads, 1),
 			(Metric::StackFreeBase, 1),
 			(Metric::StackFreeBaseBytes, free_amount),
+		]
+		.into(),
+	)
+}
+
+/// Test getting a stack object's address using only index
+#[quickcheck]
+fn stack_address_indexed_static(
+	NoCF(state): NoCF<ExecState>,
+	size: Bits<2, false>,
+	idx: Bits<5, false>,
+) -> TestResult
+{
+	let effective_addr = idx_address(
+		state.frame.stack.get_base_addres(),
+		2usize.pow(size.value as u32),
+		idx.value as usize,
+	);
+	let result_type = ValueType::Uint(state.addr_space);
+	let result_addr = Value::singleton_typed(
+		result_type,
+		Scalar::from_sized(effective_addr, result_type.scale()),
+	);
+
+	let mut test_state = state.clone();
+	test_state.frame.op_queue = regress_queue(test_state.frame.op_queue);
+
+	let mut expected_state: ExecState = state.clone();
+	expected_state.address += 2;
+	if let Some(list) = expected_state.frame.op_queue.get_mut(&0)
+	{
+		list.push(result_addr);
+	}
+	else
+	{
+		expected_state
+			.frame
+			.op_queue
+			.insert(0, OperandList::new(result_addr, Vec::new()));
+	}
+
+	let instruction = Instruction::StackAddr(size, idx);
+	let test_mem = BlockedMemory::new(
+		instruction.encode().to_le_bytes().into_iter(),
+		state.address,
+	);
+
+	test_execution_step(
+		&test_state,
+		test_mem,
+		&expected_state,
+		&[
+			(Metric::InstructionReads, 1),
+			(Metric::QueuedValues, 1),
+			(Metric::QueuedValueBytes, state.pointer_size() as usize),
 		]
 		.into(),
 	)

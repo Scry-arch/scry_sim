@@ -131,6 +131,17 @@ impl Scalar
 			_ => None,
 		}
 	}
+
+	/// Returns a scalar containing the given value and of the given size.
+	pub fn from_sized(val: usize, size: usize) -> Self
+	{
+		assert!(size.is_power_of_two());
+		let mut bytes = val.to_le_bytes().into_iter().take(size).collect::<Vec<_>>();
+		bytes.resize(size, 0);
+		assert_eq!(bytes.len(), size);
+
+		Self::Val(bytes.into_boxed_slice())
+	}
 }
 
 /// A value is a (potential) vector of 0 or more scalars of the same type.

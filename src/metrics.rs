@@ -30,11 +30,6 @@ pub enum Metric
 	QueuedValues,
 	/// Value operand bytes queued on any operand list
 	QueuedValueBytes,
-	/// Read operands queued on any operand list.
-	///
-	/// Note that duplicating an issued read that has yet to resolve also
-	/// increments this counter.
-	QueuedReads,
 	/// Operands reordered from one operand list into another
 	ReorderedOperands,
 

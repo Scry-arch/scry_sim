@@ -27,6 +27,7 @@ pub enum ExecError
 #[derive(Debug)]
 pub struct Executor<M: Memory, B: BorrowMut<M>>
 {
+	addr_space: u8, // power of 2
 	control: ControlFlow,
 	operands: OperandStack,
 	stack: ProgramStack,
@@ -39,9 +40,15 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 	/// Constructs an executor that starts executing from the given address from
 	/// the given memory. The given values are the inputs to the instruction at
 	/// start_addr
-	pub fn new(start_addr: usize, memory: B, ready_ops: impl Iterator<Item = Value>) -> Self
+	pub fn new(
+		addr_space: u8,
+		start_addr: usize,
+		memory: B,
+		ready_ops: impl Iterator<Item = Value>,
+	) -> Self
 	{
 		Self {
+			addr_space,
 			operands: OperandStack::new(ready_ops),
 			control: ControlFlow::new(start_addr),
 			stack: ProgramStack::new(Default::default()),
@@ -56,6 +63,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 	pub fn from_state(state: &ExecState, memory: B) -> Self
 	{
 		Self {
+			addr_space: state.addr_space,
 			operands: state.into(),
 			control: state.into(),
 			stack: state.into(),
@@ -77,6 +85,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 		self.stack.set_all_frame_states(frames.iter_mut());
 
 		ExecState {
+			addr_space: self.addr_space,
 			address: self.control.next_addr,
 			frame: frames.remove(0),
 			frame_stack: frames,
@@ -247,7 +256,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 					let to_store = self.get_store_val(tracker)?.0;
 					let effective_address = OperandStack::operand_stack_address(
 						self.get_stack_base(),
-						to_store.value_type(),
+						to_store.value_type().scale(),
 						index.value as usize,
 					);
 
@@ -274,7 +283,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 					let read_typ: ValueType = typ.try_into().unwrap();
 					let effective_address = OperandStack::operand_stack_address(
 						self.get_stack_base(),
-						read_typ,
+						read_typ.scale(),
 						index.value as usize,
 					);
 
@@ -380,6 +389,26 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 					}
 
 					self.discard_ready_list(tracker);
+				},
+				StackAddr(size, index) =>
+				{
+					self.discard_ready_list(tracker);
+					let effective_address = OperandStack::operand_stack_address(
+						self.get_stack_base(),
+						2usize.pow(size.value as u32),
+						index.value as usize,
+					);
+					let result_type = ValueType::Uint(self.addr_space);
+
+					self.operands.push_operand(
+						0,
+						Value::singleton_typed(
+							result_type,
+							Scalar::from_sized(effective_address, result_type.scale()),
+						)
+						.into(),
+						tracker,
+					);
 				},
 				instr =>
 				{

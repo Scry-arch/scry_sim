@@ -1,11 +1,12 @@
 use crate::{
-	Block, CallFrameState, ControlFlowType, ExecState, OperandList, Scalar, StackFrame, Value,
+	arbitrary::WeightedArbitrary, Block, CallFrameState, ControlFlowType, ExecState, OperandList,
+	Scalar, StackFrame, Value,
 };
 use duplicate::duplicate_item;
 use num_traits::{PrimInt, Unsigned};
 use quickcheck::{Arbitrary, Gen};
 use std::{
-	collections::{HashMap, VecDeque},
+	collections::HashMap,
 	fmt::Debug,
 	iter::{empty, once},
 	ops::{Add, AddAssign, Div, Sub},
@@ -57,63 +58,113 @@ impl<N: PrimInt + AddAssign + Debug + Unsigned + Arbitrary> Arbitrary for SmallI
 #[derive(Debug, Clone, Copy)]
 pub struct InstrAddr(pub usize);
 
-impl Arbitrary for InstrAddr
+/// The weight is the maximum pointer in the address space.
+///
+/// The returned instruction will be smaller than it.
+impl WeightedArbitrary<usize> for InstrAddr
 {
-	fn arbitrary(g: &mut Gen) -> Self
+	fn arbitrary_weighted(g: &mut Gen, max_addr: usize) -> Self
 	{
-		let mut addr = Arbitrary::arbitrary(g);
+		let mut addr = usize::arbitrary(g) % max_addr;
 		// Ensure is 2-byte aligned
 		if addr % 2 != 0
 		{
 			addr -= 1;
 		}
+		assert!(addr <= max_addr);
 		Self(addr)
 	}
 
-	fn shrink(&self) -> Box<dyn Iterator<Item = Self>>
+	fn shrink_weighted(&self, max_addr: usize) -> Box<dyn Iterator<Item = Self>>
 	{
-		Box::new(self.0.shrink().map(|mut addr| {
+		Box::new(self.0.shrink().map(move |mut addr| {
 			// Ensure is 2-byte aligned
 			if addr % 2 != 0
 			{
 				addr -= 1;
 			}
+			assert!(addr <= max_addr);
 			Self(addr)
 		}))
 	}
 }
-
-impl Arbitrary for ControlFlowType
+impl Arbitrary for InstrAddr
 {
 	fn arbitrary(g: &mut Gen) -> Self
 	{
-		match u8::arbitrary(g) % 100
-		{
-			0..=39 => Self::Branch(InstrAddr::arbitrary(g).0),
-			40..=79 => Self::Call(InstrAddr::arbitrary(g).0),
-			_ => Self::Return,
-		}
+		InstrAddr::arbitrary_weighted(g, usize::MAX)
 	}
 
 	fn shrink(&self) -> Box<dyn Iterator<Item = Self>>
 	{
-		match self
-		{
-			Self::Branch(t) => Box::new(InstrAddr(*t).shrink().map(|v| Self::Branch(v.0))),
-			Self::Call(t) => Box::new(InstrAddr(*t).shrink().map(|v| Self::Call(v.0))),
-			Self::Return => Box::new(std::iter::empty()),
-		}
+		InstrAddr::shrink_weighted(self, usize::MAX)
 	}
 }
 
-impl Arbitrary for Block
+/// The weight is the maximum pointer in the address space.
+///
+/// Any returned address with be lower than the max.
+impl WeightedArbitrary<usize> for ControlFlowType
+{
+	fn arbitrary_weighted(g: &mut Gen, max_addr: usize) -> Self
+	{
+		match u8::arbitrary(g) % 100
+		{
+			0..=39 => Self::Branch(InstrAddr::arbitrary_weighted(g, max_addr).0),
+			40..=79 => Self::Call(InstrAddr::arbitrary_weighted(g, max_addr).0),
+			_ => Self::Return,
+		}
+	}
+
+	fn shrink_weighted(&self, max_addr: usize) -> Box<dyn Iterator<Item = Self>>
+	{
+		match self
+		{
+			Self::Branch(t) =>
+			{
+				Box::new(
+					InstrAddr(*t)
+						.shrink_weighted(max_addr)
+						.map(|v| Self::Branch(v.0)),
+				)
+			},
+			Self::Call(t) =>
+			{
+				Box::new(
+					InstrAddr(*t)
+						.shrink_weighted(max_addr)
+						.map(|v| Self::Call(v.0)),
+				)
+			},
+			Self::Return => Box::new(empty()),
+		}
+	}
+}
+impl Arbitrary for ControlFlowType
 {
 	fn arbitrary(g: &mut Gen) -> Self
 	{
+		ControlFlowType::arbitrary_weighted(g, usize::MAX)
+	}
+
+	fn shrink(&self) -> Box<dyn Iterator<Item = Self>>
+	{
+		ControlFlowType::shrink_weighted(self, usize::MAX)
+	}
+}
+
+/// The weight is the maximum pointer in the address space.
+///
+/// Any returned address with be lower than the max.
+impl WeightedArbitrary<usize> for Block
+{
+	fn arbitrary_weighted(g: &mut Gen, max_addr: usize) -> Self
+	{
 		loop
 		{
-			let address = usize::arbitrary(g);
-			let size = usize::arbitrary(g) % (64 * g.size());
+			let address = usize::arbitrary(g) % max_addr;
+			let available_size = max_addr - address;
+			let size = (usize::arbitrary(g) % (64 * g.size())) % available_size;
 
 			let result = Self { address, size };
 
@@ -124,7 +175,7 @@ impl Arbitrary for Block
 		}
 	}
 
-	fn shrink(&self) -> Box<dyn Iterator<Item = Self>>
+	fn shrink_weighted(&self, _: usize) -> Box<dyn Iterator<Item = Self>>
 	{
 		let clone = self.clone();
 		// Shrink size
@@ -146,21 +197,39 @@ impl Arbitrary for Block
 							size: clone.size,
 						}
 					}),
-				),
+				)
+				.map(|shrunk| {
+					assert!(shrunk.validate::<false>().is_ok());
+					shrunk
+				}),
 		)
 	}
 }
-
-impl Arbitrary for StackFrame
+impl Arbitrary for Block
 {
 	fn arbitrary(g: &mut Gen) -> Self
 	{
+		Block::arbitrary_weighted(g, usize::MAX)
+	}
+
+	fn shrink(&self) -> Box<dyn Iterator<Item = Self>>
+	{
+		Block::shrink_weighted(self, usize::MAX)
+	}
+}
+
+/// The weight is the maximum pointer in the address space.
+///
+/// Any returned address with be lower than the max.
+impl WeightedArbitrary<usize> for StackFrame
+{
+	fn arbitrary_weighted(g: &mut Gen, max_addr: usize) -> Self
+	{
 		let mut frame = StackFrame {
-			block: Arbitrary::arbitrary(g),
+			block: WeightedArbitrary::arbitrary_weighted(g, max_addr),
 			base_size: 0,
 		};
 
-		// decide on primary size
 		if frame.block.size > 0
 		{
 			frame.base_size = usize::arbitrary(g) % frame.block.size;
@@ -172,42 +241,64 @@ impl Arbitrary for StackFrame
 		frame
 	}
 
-	fn shrink(&self) -> Box<dyn Iterator<Item = Self>>
+	fn shrink_weighted(&self, max_addr: usize) -> Box<dyn Iterator<Item = Self>>
 	{
-		let clone = self.clone();
+		let clone1 = self.clone();
+		let clone2 = self.clone();
 		Box::new(
-			// Shrink by reducing block size
-			self.block
-			.shrink()
-			.map(move|new_block| {
-				let mut clone = clone.clone();
-				clone.block = new_block;
-				clone
-			})
-			.filter(|shrunk| shrunk.validate().is_ok())
-
 			// Shrink by reducing primary size
-			.chain(
-				{
-					let clone = self.clone();
-					self.base_size.shrink().map(move |new_size| {
-						let mut clone = clone.clone();
-						clone.base_size = new_size;
-						clone.validate().unwrap();
-						clone
-					})
-				}
-			),
+			self.base_size
+				.shrink()
+				.map(move |new_size| {
+					let mut clone = clone1.clone();
+					clone.base_size = new_size;
+					clone.validate().unwrap();
+					clone
+				})
+				.chain(
+					// Shrink by reducing block size
+					self.block
+						.shrink_weighted(max_addr)
+						.map(move |new_block| {
+							let mut clone = clone2.clone();
+							clone.block = new_block;
+							clone
+						})
+						.filter(|shrunk| shrunk.validate().is_ok()),
+				),
 		)
 	}
 }
-
-impl Arbitrary for CallFrameState
+impl Arbitrary for StackFrame
 {
 	fn arbitrary(g: &mut Gen) -> Self
 	{
-		let ret_addr: usize = InstrAddr::arbitrary(g).0;
-		let branches: Vec<(InstrAddr, ControlFlowType)> = Arbitrary::arbitrary(g);
+		StackFrame::arbitrary_weighted(g, usize::MAX)
+	}
+
+	fn shrink(&self) -> Box<dyn Iterator<Item = Self>>
+	{
+		StackFrame::shrink_weighted(self, usize::MAX)
+	}
+}
+
+/// The weight is the maximum pointer in the address space.
+///
+/// Any returned address with be lower than the max.
+impl WeightedArbitrary<usize> for CallFrameState
+{
+	fn arbitrary_weighted(g: &mut Gen, max_addr: usize) -> Self
+	{
+		let ret_addr: usize = InstrAddr::arbitrary_weighted(g, max_addr).0;
+		let mut branches = Vec::new();
+
+		for _ in 0..SmallInt::<usize>::arbitrary(g).0
+		{
+			branches.push((
+				InstrAddr::arbitrary_weighted(g, max_addr),
+				ControlFlowType::arbitrary_weighted(g, max_addr),
+			));
+		}
 
 		let mut op_queue = HashMap::new();
 
@@ -238,205 +329,151 @@ impl Arbitrary for CallFrameState
 		}
 	}
 
-	fn shrink(&self) -> Box<dyn Iterator<Item = Self>>
+	fn shrink_weighted(&self, max_addr: usize) -> Box<dyn Iterator<Item = Self>>
 	{
-		enum ShrinkState
-		{
-			Start,
-			BranchTrig(usize),
-			BranchTyp(usize),
-			BranchRem(usize, VecDeque<usize>),
-			Operand(VecDeque<usize>, usize),
-			Stack,
-			Done,
-		}
-		struct Shrinker
-		{
-			original: CallFrameState,
-			state: ShrinkState,
-			other: Box<dyn Iterator<Item = CallFrameState>>,
-		}
-		impl Iterator for Shrinker
-		{
-			type Item = CallFrameState;
-
-			fn next(&mut self) -> Option<Self::Item>
-			{
-				// First empty any remaining shrinks
-				if let Some(result) = self.other.next()
-				{
-					return Some(result);
-				}
-
-				use ShrinkState::*;
-				match &mut self.state
-				{
-					Start =>
-					{
-						// Shrink return address
-						let clone = self.original.clone();
-						self.other =
-							Box::new(InstrAddr(self.original.ret_addr).shrink().map(move |ret| {
-								let mut clone = clone.clone();
-								clone.ret_addr = ret.0;
-								clone
-							}));
-						self.state = BranchTrig(0);
-						self.next()
-					},
-					BranchTrig(idx) =>
-					{
-						// Shrink branch trigger address
-						if let Some((addr, _)) = self.original.branches.iter().nth(*idx)
-						{
-							let clone = self.original.clone();
-							let addr = *addr;
-							self.other = Box::new(InstrAddr(addr).shrink().map(move |new_addr| {
-								let mut clone = clone.clone();
-								let typ = clone.branches.remove(&addr).unwrap();
-								clone.branches.insert(new_addr.0, typ);
-								clone
-							}));
-							self.state = BranchTyp(*idx);
-						}
-						else
-						{
-							self.state =
-								Operand(self.original.op_queue.keys().cloned().collect(), 0);
-						}
-						self.next()
-					},
-					BranchTyp(idx) =>
-					{
-						// Shrink branch type
-						let (addr, typ) = self.original.branches.iter().nth(*idx).unwrap();
-
-						let clone = self.original.clone();
-						let addr = *addr;
-						let typ = *typ;
-
-						self.other = Box::new(typ.shrink().map(move |new_typ| {
-							let mut clone = clone.clone();
-							*clone.branches.get_mut(&addr).unwrap() = new_typ;
-							clone
-						}));
-						self.state =
-							BranchRem(*idx, self.original.branches.keys().cloned().collect());
-						self.next()
-					},
-					BranchRem(idx, addrs) =>
-					{
-						// Remove a branch
-						if let Some(addr) = addrs.pop_front()
-						{
-							let mut clone = self.original.clone();
-							clone.branches.remove(&addr).unwrap();
+		let clone1 = self.clone();
+		let clone2 = self.clone();
+		let clone3 = self.clone();
+		let clone4 = self.clone();
+		let branches = self.branches.clone();
+		let op_queue = self.op_queue.clone();
+		Box::new(
+			// Shrink return address
+			InstrAddr(self.ret_addr)
+				.shrink_weighted(max_addr)
+				.map(move |shrunk| {
+					let mut clone = clone1.clone();
+					clone.ret_addr = shrunk.0;
+					clone
+				})
+				.chain(
+					// Shrink branches
+					branches.into_iter().flat_map(move |(addr, typ)| {
+						let mut branch_clone1 = clone2.clone();
+						branch_clone1.branches.remove_entry(&addr);
+						let branch_clone2 = branch_clone1.clone();
+						let branch_clone3 = branch_clone1.clone();
+						// Shrink trigger address
+						InstrAddr(addr).shrink_weighted(max_addr).filter_map(move|shrunk|{
+						let mut clone = branch_clone1.clone();
+						if clone.branches.insert(shrunk.0, typ).is_none() {
 							Some(clone)
+						} else {
+							// Discard if branch triggers collide
+							None
 						}
-						else
-						{
-							self.state = BranchTrig(*idx + 1);
-							self.next()
-						}
-					},
-					Operand(list_idxs, op_idx) =>
-					{
-						if let Some(list_idx) = list_idxs.front()
-						{
-							// Reduce the index of operand lists where possible
-							let q_clone = if *list_idx > 0
-								&& !self.original.op_queue.contains_key(&(list_idx - 1))
-							{
-								let mut q_clone = self.original.clone();
-								let q = q_clone.op_queue.remove(list_idx).unwrap();
-								q_clone.op_queue.insert(list_idx - 1, q);
-								Some(q_clone)
-							}
-							else
-							{
-								None
-							};
+					})
+					.chain({
+						// Shrink trigger type
+						typ.shrink_weighted(max_addr).map(move|shrunk|{
+							let mut clone = branch_clone2.clone();
+							clone.branches.insert(addr, shrunk);
+							clone
+						})
+					})
+					// Shrink by removing the branch
+					.chain(once(branch_clone3))
+					}),
+				)
+				.chain(op_queue.into_iter().flat_map(move |(idx, list)| {
+					let list_len = list.len();
+					let list_clone = list.clone();
+					let list_clone2 = list.clone();
+					let mut removed_clone = clone3.clone();
+					removed_clone.op_queue.remove_entry(&idx);
+					let removed_clone2 = removed_clone.clone();
+					let queue_clone1 = clone3.clone();
+					let queue_clone2 = clone3.clone();
 
-							let op_list = self.original.op_queue.get(&list_idx).unwrap();
-							if let Some(v) = op_list.iter().nth(*op_idx)
-							{
-								// Remove operand
-								let mut rem_clone = self.original.clone();
-								let rem_from = rem_clone.op_queue.get_mut(list_idx).unwrap();
-								if *op_idx == 0
+					// Remove whole list
+					once(removed_clone.clone())
+						.chain(
+							// Remove operand from list
+							if list_len > 1 { Some(()) } else { None }
+								.into_iter()
+								.flat_map(move |_| {
+									let list_clone2 = list_clone2.clone();
+									let queue_clone2 = removed_clone2.clone();
+									(0..list_len).map(move |idx| {
+										let mut list_clone3 = list_clone2.clone();
+										if idx == 0
+										{
+											if let Some(new_first) = list_clone2.rest.first()
+											{
+												list_clone3.first = new_first.clone();
+												list_clone3.rest.remove(0);
+											}
+										}
+										else
+										{
+											list_clone3.rest.remove(idx - 1);
+										}
+										let mut clone = queue_clone2.clone();
+										clone.op_queue.insert(idx, list_clone3);
+										clone
+									})
+								}),
+						)
+						.chain(
+							// Shrink operand list indices
+							idx.shrink().filter_map(move |shrunk| {
+								if removed_clone.op_queue.contains_key(&shrunk)
 								{
-									if rem_from.rest.len() > 0
-									{
-										rem_from.first = rem_from.rest.remove(0);
-									}
-									else
-									{
-										// Only one operand in list, remove whole list
-										rem_clone.op_queue.remove(list_idx).unwrap();
-									}
+									None
 								}
 								else
 								{
-									rem_from.rest.remove(*op_idx - 1);
+									let mut clone = removed_clone.clone();
+									clone.op_queue.insert(shrunk, list_clone.clone());
+									Some(clone)
 								}
-								// Shrink value operand
-								let clone = self.original.clone();
-								let list_idx = *list_idx;
-								let op_idx2 = *op_idx;
-								self.other = Box::new(
-									once(rem_clone)
-										.chain(v.shrink().map(move |v| {
-											let mut clone = clone.clone();
-											*clone
-												.op_queue
-												.get_mut(&list_idx)
-												.unwrap()
-												.iter_mut()
-												.nth(op_idx2)
-												.unwrap() = v;
-											clone
-										}))
-										.chain(q_clone.into_iter()),
-								);
+							}),
+						)
+						.chain(
+							// Shrink operand values
 
-								*op_idx += 1;
-							}
-							else
-							{
-								// No more operands, next list
-								list_idxs.pop_front().unwrap();
-								*op_idx = 0;
-							}
-							self.next()
-						}
-						else
-						{
-							self.state = Stack;
-							self.next()
-						}
-					},
-					Stack =>
-					{
-						// Shrink stack frame
-						let clone = self.original.clone();
-						self.other = Box::new(self.original.stack.shrink().map(move |shrunk| {
-							let mut clone = clone.clone();
-							clone.stack = shrunk;
+							// Shrink first value
+							clone3.op_queue[&idx].first.shrink().map(move|shrunk| {
+							let mut clone = queue_clone1.clone();
+							clone.op_queue.get_mut(&idx).unwrap().first = shrunk;
 							clone
-						}));
-						self.state = Done;
-						self.next()
-					},
-					_ => None,
-				}
-			}
-		}
+						})
+						// Shrink the rest
+						.chain({
+							let clone3 = clone3.clone();
+							(1..list_len).flat_map(move|list_idx| {
+								let queue_clone2 = queue_clone2.clone();
+								clone3.op_queue[&idx].rest[list_idx-1].shrink().map(move|shrunk| {
+									let mut clone = queue_clone2.clone();
+									clone.op_queue.get_mut(&idx).unwrap().rest[list_idx-1] = shrunk;
+									clone
+								})
+							})
+						}
+						),
+						)
+				}))
+				.chain(
+					// Shrink stack frame
+					self.stack.shrink_weighted(max_addr).map(move |shrunk| {
+						let mut clone = clone4.clone();
+						clone.stack = shrunk;
+						clone
+					}),
+				),
+		)
+	}
+}
+impl Arbitrary for CallFrameState
+{
+	fn arbitrary(g: &mut Gen) -> Self
+	{
+		CallFrameState::arbitrary_weighted(g, usize::MAX)
+	}
 
-		Box::new(Shrinker {
-			original: self.clone(),
-			state: ShrinkState::Start,
-			other: Box::new(empty()),
-		})
+	fn shrink(&self) -> Box<dyn Iterator<Item = Self>>
+	{
+		CallFrameState::shrink_weighted(self, usize::MAX)
 	}
 }
 
@@ -444,27 +481,44 @@ impl Arbitrary for ExecState
 {
 	fn arbitrary(g: &mut Gen) -> Self
 	{
-		let frame = CallFrameState::arbitrary(g);
-		let earliest_trigger = frame.branches.iter().fold(usize::MAX, |earliest, (k, _)| {
-			if earliest > *k
-			{
-				*k
-			}
-			else
-			{
-				earliest
-			}
-		});
-
+		let addr_space = u8::arbitrary(g) % 3;
 		let mut result = Self {
+			addr_space,
 			// Ensure that the address may be increased by 2 (after executing an instruction)
 			// without causing overflow.
 			// Also ensure address precedes all branch trigger locations
-			address: InstrAddr::arbitrary(g).0 % (std::cmp::min(earliest_trigger, usize::MAX - 3)),
-			frame,
+			address: 0,
+			frame: CallFrameState {
+				// Dummy frame
+				ret_addr: 0,
+				branches: Default::default(),
+				op_queue: Default::default(),
+				stack: Default::default(),
+			},
 			frame_stack: vec![],
-			stack_buffer: usize::arbitrary(g),
+			stack_buffer: 0,
 		};
+		let max_addr = result.max_addr();
+
+		result.frame = CallFrameState::arbitrary_weighted(g, max_addr);
+		result.stack_buffer = usize::arbitrary(g) % max_addr;
+
+		let earliest_trigger = result
+			.frame
+			.branches
+			.iter()
+			.fold(usize::MAX, |earliest, (k, _)| {
+				if earliest > *k
+				{
+					*k
+				}
+				else
+				{
+					earliest
+				}
+			});
+		result.address =
+			InstrAddr::arbitrary_weighted(g, std::cmp::min(earliest_trigger, max_addr - 3)).0;
 		assert!(result.validate().is_ok());
 
 		// We limit the call depth for performance reasons
@@ -476,7 +530,9 @@ impl Arbitrary for ExecState
 		{
 			loop
 			{
-				result.frame_stack.push(Arbitrary::arbitrary(g));
+				result
+					.frame_stack
+					.push(CallFrameState::arbitrary_weighted(g, max_addr));
 				result.frame_stack.last_mut().unwrap().stack.block.address = next_addr;
 
 				// Check new frame does not clash with others

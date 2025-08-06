@@ -342,15 +342,21 @@ impl CallFrameState
 	/// Returns whether this call frame is valid.
 	///
 	/// It is invalid if:
-	/// * Return address is not 2-byte aligned
-	/// * Any control flow trigger address is not 2-byte aligned
-	/// * Any control flow target address is not 2-byte aligned
+	/// * Return address is not 2-byte aligned and within given address space
+	/// * Any control flow trigger address is not 2-byte aligned and within
+	///   given address space
+	/// * Any control flow target address is not 2-byte aligned and within given
+	///   address space
 	/// * Any operand list has more than supported number of operands (4)
-	pub fn validate(&self) -> Result<(), String>
+	pub fn validate(&self, max_addr: usize) -> Result<(), String>
 	{
 		if self.ret_addr % 2 != 0
 		{
 			return Err("Unaligned return address".to_string());
+		}
+		if self.ret_addr > max_addr
+		{
+			return Err("Return address overflows address space".to_string());
 		}
 
 		if self.branches.iter().any(|(trig, ctrl)| {
@@ -363,6 +369,17 @@ impl CallFrameState
 		})
 		{
 			return Err("Control flow target address unaligned".to_string());
+		}
+		if self.branches.iter().any(|(trig, ctrl)| {
+			trig > &max_addr
+				|| match ctrl
+				{
+					ControlFlowType::Call(targ) | ControlFlowType::Branch(targ) => targ > &max_addr,
+					_ => false,
+				}
+		})
+		{
+			return Err("Control flow target address overflows address space".to_string());
 		}
 
 		if self.op_queue.iter().any(|(_, ops)| ops.len() > 4)
@@ -395,6 +412,12 @@ impl Default for CallFrameState
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub struct ExecState
 {
+	/// The size of the memory space in powers of two bytes.
+	///
+	/// I.e., when 0, 1 byte is enough to address the whole space,
+	/// when 1, 2 bytes is enough, etc.
+	pub addr_space: u8,
+
 	/// Next address to be executed.
 	pub address: usize,
 
@@ -418,7 +441,8 @@ impl ExecState
 	///
 	/// It is invalid if:
 	/// * Any call frame is invalid
-	/// * Next address is not 2-byte aligned
+	/// * Next address is not 2-byte aligned or overflows address space
+	/// * The address space is no large than usize
 	pub fn validate(&self) -> Result<(), String>
 	{
 		let frames = once(&self.frame).chain(self.frame_stack.iter());
@@ -426,7 +450,7 @@ impl ExecState
 		// Validate frames
 		for f in frames.clone()
 		{
-			if let Err(msg) = f.validate()
+			if let Err(msg) = f.validate(self.max_addr())
 			{
 				return Err(format!("Invalid call frame: {}", msg));
 			}
@@ -460,6 +484,30 @@ impl ExecState
 			return Err("Unaligned next address".into());
 		}
 
+		if size_of::<usize>() < self.pointer_size() as usize
+		{
+			return Err("Oversized address space".into());
+		}
+		if self.address > self.max_addr()
+		{
+			return Err("Next instruction overflowing address space".into());
+		}
+
 		Ok(())
+	}
+
+	/// Returns the address space size in bytes.
+	///
+	/// This is the smallest pointer size that can address the whole memory
+	/// address space.
+	pub fn pointer_size(&self) -> u8
+	{
+		2u8.pow(self.addr_space as u32)
+	}
+
+	/// Returns the highest address in the address space.
+	pub fn max_addr(&self) -> usize
+	{
+		2usize.saturating_pow((self.pointer_size() * 8) as u32)
 	}
 }

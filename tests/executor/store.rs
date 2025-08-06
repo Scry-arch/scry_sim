@@ -48,7 +48,7 @@ fn test_store_instruction<const ADDR_OPS: usize>(
 			state.frame.stack.block.size,
 			min_stack_size(state.frame.stack.block.address, to_store, idx).unwrap(),
 		);
-		idx_address(state.frame.stack.block.address, to_store, idx)
+		idx_address(state.frame.stack.block.address, to_store.size(), idx)
 	}
 	else
 	{

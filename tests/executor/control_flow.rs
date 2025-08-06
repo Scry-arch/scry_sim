@@ -98,6 +98,7 @@ fn return_trigger(
 	let mut expected_metrics = TrackReport::new();
 	let expected_ready_ops = match Executor::from_state(
 		&ExecState {
+			addr_space: state.addr_space,
 			address: state.address,
 			frame: frame.clone(),
 			frame_stack: Vec::new(),
@@ -546,6 +547,7 @@ fn call_trigger_empty_stack()
 {
 	assert!(!call_trigger_impl(
 		NoCF(ExecState {
+			addr_space: 0,
 			address: 0,
 			frame: Default::default(),
 			frame_stack: vec![],

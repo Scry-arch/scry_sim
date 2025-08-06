@@ -213,9 +213,9 @@ pub fn address_space_fits_stack(stack_base: usize, value: &Value, idx: usize) ->
 
 /// Returns the effective absolute address of the given value at the given index
 /// with the given stack base.
-pub fn idx_address(stack_base: usize, value: &Value, idx: usize) -> usize
+pub fn idx_address(stack_base: usize, value_size: usize, idx: usize) -> usize
 {
-	((stack_base + value.size() - 1) & !(value.size() - 1)) + (idx * value.size())
+	((stack_base + value_size - 1) & !(value_size - 1)) + (idx * value_size)
 }
 
 /// Tests executing load instructions.
@@ -237,7 +237,11 @@ fn test_issue_load(
 {
 	let effective_address = if output_offset.is_none()
 	{
-		idx_address(state.frame.stack.get_base_addres(), &loaded_val.0, addr)
+		idx_address(
+			state.frame.stack.get_base_addres(),
+			loaded_val.0.size(),
+			addr,
+		)
 	}
 	else
 	{
