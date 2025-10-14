@@ -1,4 +1,4 @@
-extern crate core;
+#![cfg_attr(feature = "fail-on-warnings", deny(warnings))]
 
 pub mod arbitrary;
 mod control_flow;

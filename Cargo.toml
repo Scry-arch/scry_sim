@@ -4,19 +4,23 @@ version = "0.0.0"
 edition = "2021"
 
 [dependencies]
-scry_isa = { path = "../scry_isa" }
-scry_asm = { path = "../scry_asm" }
+scry_isa = { git = "https://github.com/scry-arch/scry_isa.git" }
 num-traits = "0.2.14"
-bitvec = "1.0.0"
+bitvec = "1.0"
+tap = "1.0.1" # Does not compile with lower version, not directly needed
 byteorder = "1.4.3"
 quickcheck = "1.0.3"
 duplicate = { version = "2.0.0", default-features = false }
 paste = "1.0.11"
 delegate = "0.13.0"
 strum = { version = "0.27", features = ["derive"] }
-strum_macros = "0.27.1"
+strum_macros = "0.27"
+syn = "2.0.1" # Does not compile with lower version, not directly needed
+syn_old = { version = "1.0.5", package = "syn" } # Does not compile with lower version, not directly needed
 
 [dev-dependencies]
 quickcheck_macros = "1.0.0"
 
-
+[features]
+default = []
+fail-on-warnings = [] # Forces compilation to fail if any warnings are given. Used in CI.
