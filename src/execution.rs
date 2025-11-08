@@ -707,7 +707,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 
 			let typ = match variant
 			{
-				Add | Sub | BitAnd | BitOr | Equal | LessThan | GreaterThan =>
+				Add | Sub | BitAnd | BitOr | Equal | LessThan | GreaterThan | BitXor | IsNar | NarTo =>
 				{
 					// Variants with 2 inputs
 					let in2 = ins.next();
@@ -780,7 +780,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 					}
 					typ_out
 				},
-				ShiftLeft | ShiftRight | RotateLeft | RotateRight =>
+				RotateLeft | RotateRight =>
 				{
 					// Variants with 1 input
 					let in1 = in1.ok_or(ExecError::Exception(
@@ -791,8 +791,6 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 					let in1 = in1.iter();
 					let func = match variant
 					{
-						ShiftLeft => Self::alu_shift_left_once,
-						ShiftRight => Self::alu_shift_right_once,
 						RotateLeft => Self::alu_rotate_left_once,
 						RotateRight => Self::alu_rotate_right_once,
 						_ =>
@@ -859,7 +857,10 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 						{
 							Alu2Variant::Add => bytes[0] = 1, // implicit 1
 							Alu2Variant::Sub => bytes[0] = 1, // implicit 1
+							Alu2Variant::ShiftLeft => bytes[0] = 1, // implicit 1
+							Alu2Variant::ShiftRight => bytes[0] = 1, // implicit 1
 							Alu2Variant::Multiply => bytes.clone_from_slice(scal.bytes().unwrap()), // implicit in1
+							Alu2Variant::Division => unimplemented!(),
 						}
 						Scalar::Val(bytes.into_boxed_slice())
 					})
@@ -877,12 +878,18 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 				Alu2Variant::Add => Self::alu_add_overflowing,
 				Alu2Variant::Sub => Self::alu_sub_overflowing,
 				Alu2Variant::Multiply => Self::alu_multiply,
+				Alu2Variant::ShiftLeft => unimplemented!(),
+				Alu2Variant::ShiftRight => unimplemented!(),
+				Alu2Variant::Division => unimplemented!(),
 			};
 			let (out_typ_1, out_typ_2) = match variant
 			{
 				Alu2Variant::Add => (typ, ValueType::new::<u8>()),
 				Alu2Variant::Sub => (typ, ValueType::new::<u8>()),
 				Alu2Variant::Multiply => (typ, typ),
+				Alu2Variant::ShiftLeft => unimplemented!(),
+				Alu2Variant::ShiftRight => unimplemented!(),
+				Alu2Variant::Division => unimplemented!(),
 			};
 
 			let mut result_scalars_low = Vec::new();

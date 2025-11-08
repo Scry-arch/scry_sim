@@ -15,7 +15,7 @@ use scry_sim::{
 };
 use std::{
 	cmp::min,
-	ops::{BitAnd, BitOr, Shl, Shr},
+	ops::{BitAnd, BitOr, Shl, Shr, Mul},
 };
 
 /// Manages the calculation of applying the given semantic function to the given
@@ -343,11 +343,11 @@ fn test_alu2_instruction<const OPS: usize>(
 #[duplicate_item(
 	test_name 		alu_var		std_fn				inputs	second;
 	[add]			[Add]		[saturating_add]	[2]		[sc[1]];
+	[inc_sat]		[Add]		[saturating_add]	[1]		[1];
 	[sub]			[Sub]		[saturating_sub]	[2]		[sc[1]];
+	[dec_sat]		[Sub]		[saturating_sub]	[1]		[1];
 	[bit_and]		[BitAnd]	[bitand]			[2]		[sc[1]];
 	[bit_or]		[BitOr]		[bitor]				[2]		[sc[1]];
-	[inc_sat]		[Add]		[saturating_add]	[1]		[1];
-	[dec_sat]		[Sub]		[saturating_sub]	[1]		[1];
 )]
 #[quickcheck]
 fn test_name(state: AluTestState<inputs>, offset: Bits<5, false>) -> TestResult
@@ -404,8 +404,8 @@ fn test_name(state: AluTestState<inputs>, offset: Bits<5, false>) -> TestResult
 /// that does the same for all data types
 #[duplicate_item(
 	test_name 	alu_var			std_fn;
-	[shl]		[ShiftLeft]		[shl];
-	[shr]		[ShiftRight]	[shr];
+	// [shl]		[ShiftLeft]		[shl];
+	// [shr]		[ShiftRight]	[shr];
 	[rol_once]	[RotateLeft]	[rotate_left];
 	[ror_once]	[RotateRight]	[rotate_right];
 )]
@@ -495,10 +495,14 @@ fn name(state: AluTestState<2>, offset: Bits<5, false>, out_var: Alu2OutputVaria
 	)
 }
 
-/// Test the Alu2 instruction variant `Multiply`
+#[duplicate_item(
+	name				variant		func	inputs	second;
+	[multiply_carry]	[Multiply]	[mul]	[2]		[x[1]];
+	[multiply_implicit]	[Multiply]	[mul]	[1]		[x[0]];
+)]
 #[quickcheck]
-fn multiply_carry(
-	state: AluTestState<2>,
+fn name(
+	state: AluTestState<inputs>,
 	offset: Bits<5, false>,
 	out_var: Alu2OutputVariant,
 ) -> TestResult
@@ -509,16 +513,16 @@ fn multiply_carry(
 			|x| {
 				paste::paste!{
 					let mut result = [0u8;2];
-					LittleEndian::[<write_ typ>](&mut result, (x[0] as typ) * (x[1] as typ));
+					LittleEndian::[<write_ typ>](&mut result, (x[0] as typ).func(second as typ));
 					order((result[0] as typ1).into(), (result[1] as typ1).into(), out_var)
 				}
 			}
 		];
-		closure2 [
+		closure2(typ, typ2) [
 			|x| {
 				paste::paste!{
 					let mut result = [0u8;size_of::<typ2>()];
-					LittleEndian::[<write_ typ2>](&mut result, (x[0] as typ2) * (x[1] as typ2));
+					LittleEndian::[<write_ typ2>](&mut result, (x[0] as typ2).func(second as typ2));
 					let (r1,r2) = result.split_at(result.len() / 2);
 					order(LittleEndian::[<read_ typ>](r1).into(), LittleEndian::[<read_ typ>](r2).into(), out_var)
 				}
@@ -535,7 +539,7 @@ fn multiply_carry(
 			}
 			test_arithmetic_instruction(
 				state,
-				Instruction::Alu2(Multiply, out_var, offset),
+				Instruction::Alu2(variant, out_var, offset),
 				[offset.value as usize],
 				closure([u8],[u16]),
 				duplicate! (
@@ -545,7 +549,7 @@ fn multiply_carry(
 						[u32] [u64];
 						[u64] [u128];
 					]
-					closure2
+					closure2([typ], [typ2])
 				)
 				closure([i8],[i16]),
 				duplicate! (
@@ -555,10 +559,10 @@ fn multiply_carry(
 						[i32] [i64];
 						[i64] [i128];
 					]
-					closure2
+					closure2([typ], [typ2])
 				)
-				None::<fn([u128;2]) -> [Value;1]>,
-				None::<fn([i128;2]) -> [Value;1]>,
+				None::<fn([u128;inputs]) -> [Value;1]>,
+				None::<fn([i128;inputs]) -> [Value;1]>,
 			)
 		} else {
 			fn order<T>(out1: T, out2: T, var: Alu2OutputVariant) -> [T; 2] {
@@ -572,7 +576,7 @@ fn multiply_carry(
 			}
 			test_arithmetic_instruction(
 				state,
-				Instruction::Alu2(Multiply, out_var, offset),
+				Instruction::Alu2(variant, out_var, offset),
 				[
 					if out_var == FirstLow || out_var == FirstHigh { offset.value as usize}else {0},
 					offset.value as usize
@@ -585,7 +589,7 @@ fn multiply_carry(
 						[u32] [u64];
 						[u64] [u128];
 					]
-					closure2
+					closure2([typ], [typ2])
 				)
 				closure([i8],[i16]),
 				duplicate! (
@@ -595,119 +599,10 @@ fn multiply_carry(
 						[i32] [i64];
 						[i64] [i128];
 					]
-					closure2
+					closure2([typ], [typ2])
 				)
-				None::<fn([u128;2]) -> [Value;2]>,
-				None::<fn([i128;2]) -> [Value;2]>,
-			)
-		}
-	)
-}
-
-/// Test the Alu2 instruction variant `Multiply` with 1 input
-#[quickcheck]
-fn multiply_implicit(
-	state: AluTestState<1>,
-	offset: Bits<5, false>,
-	out_var: Alu2OutputVariant,
-) -> TestResult
-{
-	use Alu2OutputVariant::*;
-	substitute! ( [
-		closure(typ1, typ) [
-			|x| {
-				paste::paste!{
-					let mut result = [0u8;2];
-					LittleEndian::[<write_ typ>](&mut result, (x[0] as typ) * (x[0] as typ));
-					order((result[0] as typ1).into(), (result[1] as typ1).into(), out_var)
-				}
-			}
-		];
-		closure2 [
-			|x| {
-				paste::paste!{
-					let mut result = [0u8;size_of::<typ2>()];
-					LittleEndian::[<write_ typ2>](&mut result, (x[0] as typ2) * (x[0] as typ2));
-					let (r1,r2) = result.split_at(result.len() / 2);
-					order(LittleEndian::[<read_ typ>](r1).into(), LittleEndian::[<read_ typ>](r2).into(), out_var)
-				}
-			},
-		]
-	]
-		if out_var == High || out_var == Low {
-			fn order<T>(out1: T, out2: T, var: Alu2OutputVariant) -> [T; 1] {
-				match var {
-					Low => [out1],
-					High => [out2],
-					_ => unreachable!()
-				}
-			}
-			test_arithmetic_instruction(
-				state,
-				Instruction::Alu2(Multiply, out_var, offset),
-				[offset.value as usize],
-				closure([u8],[u16]),
-				duplicate! (
-					[
-						typ typ2 ;
-						[u16] [u32];
-						[u32] [u64];
-						[u64] [u128];
-					]
-					closure2
-				)
-				closure([i8],[i16]),
-				duplicate! (
-					[
-						typ typ2 ;
-						[i16] [i32];
-						[i32] [i64];
-						[i64] [i128];
-					]
-					closure2
-				)
-				None::<fn([u128;1]) -> [Value;1]>,
-				None::<fn([i128;1]) -> [Value;1]>,
-			)
-		} else {
-			fn order<T>(out1: T, out2: T, var: Alu2OutputVariant) -> [T; 2] {
-				match var {
-					FirstLow => [out1, out2],
-					FirstHigh => [out2, out1],
-					NextLow => [out1, out2],
-					NextHigh => [out2, out1],
-					_ => unreachable!()
-				}
-			}
-			test_arithmetic_instruction(
-				state,
-				Instruction::Alu2(Multiply, out_var, offset),
-				[
-					if out_var == FirstLow || out_var == FirstHigh { offset.value as usize}else {0},
-					offset.value as usize
-				],
-				closure([u8],[u16]),
-				duplicate! (
-					[
-						typ typ2 ;
-						[u16] [u32];
-						[u32] [u64];
-						[u64] [u128];
-					]
-					closure2
-				)
-				closure([i8],[i16]),
-				duplicate! (
-					[
-						typ typ2 ;
-						[i16] [i32];
-						[i32] [i64];
-						[i64] [i128];
-					]
-					closure2
-				)
-				None::<fn([u128;1]) -> [Value;2]>,
-				None::<fn([i128;1]) -> [Value;2]>,
+				None::<fn([u128;inputs]) -> [Value;2]>,
+				None::<fn([i128;inputs]) -> [Value;2]>,
 			)
 		}
 	)
