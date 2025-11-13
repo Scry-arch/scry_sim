@@ -6,16 +6,14 @@ use byteorder::{ByteOrder, LittleEndian};
 use duplicate::{duplicate_item, substitute};
 use quickcheck::TestResult;
 use quickcheck_macros::quickcheck;
-use scry_isa::{
-	Alu2OutputVariant, Alu2Variant, Alu2Variant::Multiply, AluVariant, Bits, Instruction,
-};
+use scry_isa::{Alu2OutputVariant, Alu2Variant, AluVariant, Bits, Instruction};
 use scry_sim::{
 	arbitrary::{LimitedOps, NoCF, SimpleOps},
 	ExecState, Metric, OperandList, Scalar, TrackReport, Value,
 };
 use std::{
 	cmp::min,
-	ops::{BitAnd, BitOr, Shl, Shr, Mul},
+	ops::{BitAnd, BitOr, Mul, Shl},
 };
 
 /// Manages the calculation of applying the given semantic function to the given
@@ -495,10 +493,40 @@ fn name(state: AluTestState<2>, offset: Bits<5, false>, out_var: Alu2OutputVaria
 	)
 }
 
+/// Checks that the second ready operand is a shift amount of valid size
+/// compared to the size of the first operand.
+fn valid_shift(state: &ExecState) -> Option<()>
+{
+	let ready = state.frame.op_queue.get(&0)?;
+	let width = ready.first.typ.scale() * 8;
+	let shift_type = ready.rest.first()?.typ;
+	let shift_amount = if shift_type.is_signed_integer()
+	{
+		let amount = ready.rest.first()?.first.i128_value()?;
+		if amount < 0
+		{
+			return None;
+		}
+		amount as u128
+	}
+	else
+	{
+		ready.rest.first()?.first.u128_value()?
+	};
+
+	if (width as u128) < shift_amount
+	{
+		return None;
+	}
+	Some(())
+}
+
 #[duplicate_item(
-	name				variant		func	inputs	second;
-	[multiply_carry]	[Multiply]	[mul]	[2]		[x[1]];
-	[multiply_implicit]	[Multiply]	[mul]	[1]		[x[0]];
+	name				variant		func	inputs	second	validate;
+	[multiply_carry]	[Multiply]	[mul]	[2]		[x[1]]	[Some(())];
+	[multiply_implicit]	[Multiply]	[mul]	[1]		[x[0]]	[Some(())];
+	[shift_left]		[ShiftLeft]	[shl]	[2]		[x[1]]	[valid_shift(&state.0.0.0)];
+	[shift_left_once]	[ShiftLeft]	[shl]	[1]		[1u8]	[Some(())];
 )]
 #[quickcheck]
 fn name(
@@ -507,6 +535,11 @@ fn name(
 	out_var: Alu2OutputVariant,
 ) -> TestResult
 {
+	if validate.is_none()
+	{
+		return TestResult::discard();
+	}
+
 	use Alu2OutputVariant::*;
 	substitute! ( [
 		closure(typ1, typ) [
@@ -539,7 +572,7 @@ fn name(
 			}
 			test_arithmetic_instruction(
 				state,
-				Instruction::Alu2(variant, out_var, offset),
+				Instruction::Alu2(Alu2Variant::variant, out_var, offset),
 				[offset.value as usize],
 				closure([u8],[u16]),
 				duplicate! (
@@ -576,7 +609,7 @@ fn name(
 			}
 			test_arithmetic_instruction(
 				state,
-				Instruction::Alu2(variant, out_var, offset),
+				Instruction::Alu2(Alu2Variant::variant, out_var, offset),
 				[
 					if out_var == FirstLow || out_var == FirstHigh { offset.value as usize}else {0},
 					offset.value as usize

@@ -6,11 +6,11 @@ use crate::{
 	ExecState, Metric, MetricTracker, Scalar, ValueType,
 };
 use byteorder::{ByteOrder, LittleEndian};
-use duplicate::substitute;
+use duplicate::duplicate_item;
 use scry_isa::{
 	Alu2OutputVariant, Alu2Variant, AluVariant, BitValue, Bits, CallVariant, Instruction, Type,
 };
-use std::{borrow::BorrowMut, fmt::Debug, marker::PhantomData, mem::size_of};
+use std::{borrow::BorrowMut, fmt::Debug, marker::PhantomData, mem::size_of, ops::Mul};
 
 /// The result of performing one execution step
 #[derive(Debug, Eq, PartialEq)]
@@ -707,7 +707,8 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 
 			let typ = match variant
 			{
-				Add | Sub | BitAnd | BitOr | Equal | LessThan | GreaterThan | BitXor | IsNar | NarTo =>
+				Add | Sub | BitAnd | BitOr | Equal | LessThan | GreaterThan | BitXor | IsNar
+				| NarTo =>
 				{
 					// Variants with 2 inputs
 					let in2 = ins.next();
@@ -851,16 +852,15 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 				let mut scalars: Vec<_> = in1
 					.iter()
 					.map(|scal| {
+						use Alu2Variant::*;
+
 						let mut bytes = Vec::new();
 						bytes.resize(typ.scale(), 0);
 						match variant
 						{
-							Alu2Variant::Add => bytes[0] = 1, // implicit 1
-							Alu2Variant::Sub => bytes[0] = 1, // implicit 1
-							Alu2Variant::ShiftLeft => bytes[0] = 1, // implicit 1
-							Alu2Variant::ShiftRight => bytes[0] = 1, // implicit 1
-							Alu2Variant::Multiply => bytes.clone_from_slice(scal.bytes().unwrap()), // implicit in1
-							Alu2Variant::Division => unimplemented!(),
+							Add | Sub | ShiftLeft | ShiftRight => bytes[0] = 1, // implicit 1
+							Multiply => bytes.clone_from_slice(scal.bytes().unwrap()), // implicit in1
+							Division => unimplemented!(),
 						}
 						Scalar::Val(bytes.into_boxed_slice())
 					})
@@ -878,7 +878,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 				Alu2Variant::Add => Self::alu_add_overflowing,
 				Alu2Variant::Sub => Self::alu_sub_overflowing,
 				Alu2Variant::Multiply => Self::alu_multiply,
-				Alu2Variant::ShiftLeft => unimplemented!(),
+				Alu2Variant::ShiftLeft => Self::alu_shift_left,
 				Alu2Variant::ShiftRight => unimplemented!(),
 				Alu2Variant::Division => unimplemented!(),
 			};
@@ -887,7 +887,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 				Alu2Variant::Add => (typ, ValueType::new::<u8>()),
 				Alu2Variant::Sub => (typ, ValueType::new::<u8>()),
 				Alu2Variant::Multiply => (typ, typ),
-				Alu2Variant::ShiftLeft => unimplemented!(),
+				Alu2Variant::ShiftLeft => (typ, typ),
 				Alu2Variant::ShiftRight => unimplemented!(),
 				Alu2Variant::Division => unimplemented!(),
 			};
@@ -896,7 +896,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 			let mut result_scalars_high = Vec::new();
 			for (sc1, sc2) in in1.zip(in2)
 			{
-				let (low, high) = func(sc1, sc2, typ);
+				let (low, high) = func(sc1, typ, sc2, typ);
 				result_scalars_low.push(low);
 				result_scalars_high.push(high);
 			}
@@ -1332,63 +1332,88 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 
 	/// Performs multiplication on the given scalars, returning the lower-order
 	/// result
-	fn alu_multiply(sc1: &Scalar, sc2: &Scalar, typ: ValueType) -> (Scalar, Scalar)
+	fn alu_multiply(sc1: &Scalar, typ: ValueType, sc2: &Scalar, typ2: ValueType)
+		-> (Scalar, Scalar)
 	{
-		use ValueType::*;
-		let result: Vec<u8> = substitute! {
-			[throw_away [];] // used just to allow duplicate! in match case position
-			match typ {
-				duplicate!{
-					[
-						Sign	letter;
-						[Uint]	[u];
-						[Int]	[i];
-					]
-					Sign(0) => {
-						paste::paste!{
-							let v1 = (sc1.bytes().unwrap()[0] as [<letter 8>]) as [<letter 16>];
-							let v2 = (sc2.bytes().unwrap()[0] as [<letter 8>]) as [<letter 16>];
-							let mut result = [0u8;2];
-							LittleEndian::[< write_ letter 16 >]
-										(&mut result, v1 * v2);
-							result.into()
-						}
-					},
-					duplicate!{
-						[
-							power size bits bits2;
-							[1] [2] [16] [32];
-							[2] [4] [32] [64];
-							[3] [8] [64] [128];
-						]
-						Sign(power) => {
-							paste::paste!{
-								let v1 = LittleEndian::
-									[< read_ letter bits >](sc1.bytes().unwrap()) as [< letter bits2 >];
-								let v2 = LittleEndian::
-									[< read_ letter bits >](sc2.bytes().unwrap()) as [< letter bits2 >];
-								let mut result = [0u8;size*2];
-								LittleEndian::[< write_ letter bits2 >]
-									(&mut result, v1 * v2);
-								result.into()
-							}
-						},
-					}
-				}
-				_ => todo!()
-			}
-		};
+		let sc1_ext = sc1.extend(size_of::<u128>(), &typ);
+		let sc2_ext = sc2.extend(size_of::<u128>(), &typ2);
+		if typ.is_signed_integer() || typ2.is_signed_integer()
+		{
+			Self::alu_op_i128(&sc1_ext, &sc2_ext, Mul::mul, typ)
+		}
+		else
+		{
+			Self::alu_op_u128(&sc1_ext, &sc2_ext, Mul::mul, typ)
+		}
+	}
 
-		let (low, high) = result.split_at(result.len() / 2);
+	#[duplicate_item(
+		name			typ128;
+		[alu_op_u128]	[u128];
+		[alu_op_i128]	[i128];
+	)]
+	/// Performs the given ALU operation (`f`) on the given scalars, producing
+	/// the high and low products of the given output type.
+	///
+	/// The given scalars are assumed to be of a u128/i128 scale.
+	/// The output will use the scale of the given type, splitting the relevant
+	/// bytes of the `f` output into the output scalars.
+	fn name(
+		sc1: &Scalar,
+		sc2: &Scalar,
+		f: fn(typ128, typ128) -> typ128,
+		out_typ: ValueType,
+	) -> (Scalar, Scalar)
+	{
+		assert_eq!(sc1.bytes().unwrap().len(), sc2.bytes().unwrap().len());
+		assert_eq!(sc1.bytes().unwrap().len(), size_of::<typ128>());
+
+		let mut result = [0; size_of::<typ128>()];
+
+		paste::paste! {
+			let op1 = LittleEndian::[<read_ typ128 >](&sc1.bytes().unwrap());
+			let op2 = LittleEndian::[<read_ typ128 >](&sc2.bytes().unwrap());
+
+			LittleEndian::[<write_ typ128 >](&mut result, f(op1,op2));
+		}
+
 		(
-			Scalar::Val(low.iter().cloned().collect::<Vec<_>>().into_boxed_slice()),
-			Scalar::Val(high.iter().cloned().collect::<Vec<_>>().into_boxed_slice()),
+			Scalar::Val(Box::from(&result[0..out_typ.scale()])),
+			Scalar::Val(Box::from(&result[out_typ.scale()..(out_typ.scale() * 2)])),
 		)
+	}
+
+	/// Performs left shift
+	fn alu_shift_left(
+		sc1: &Scalar,
+		typ1: ValueType,
+		sc2: &Scalar,
+		typ2: ValueType,
+	) -> (Scalar, Scalar)
+	{
+		let sc1_ext = sc1.extend(size_of::<u128>(), &typ1);
+
+		let mut shift_bytes: Vec<_> = sc2.bytes().unwrap().iter().cloned().collect();
+
+		assert!(
+			!typ2.is_signed_integer() || shift_bytes.last().unwrap() < &0b1000_0000,
+			"Cannot shift negative amount"
+		);
+
+		shift_bytes.resize(size_of::<u128>(), 0);
+		let sc2_ext = Scalar::Val(shift_bytes.into_boxed_slice());
+
+		Self::alu_op_u128(&sc1_ext, &sc2_ext, std::ops::Shl::shl, typ1)
 	}
 
 	/// Performs addition on the given scalars, returning the wrapping result
 	/// and whether it overflowed. Both results are of the given type
-	fn alu_add_overflowing(sc1: &Scalar, sc2: &Scalar, typ: ValueType) -> (Scalar, Scalar)
+	fn alu_add_overflowing(
+		sc1: &Scalar,
+		typ: ValueType,
+		sc2: &Scalar,
+		_typ2: ValueType,
+	) -> (Scalar, Scalar)
 	{
 		let mut raw_result = Self::alu_add_carry(sc1, sc2);
 		if let ValueType::Int(_) = typ
@@ -1410,7 +1435,12 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 
 	/// Performs subtraction on the given scalars, returning the wrapping result
 	/// and whether it overflowed. Both results are of the given type
-	fn alu_sub_overflowing(sc1: &Scalar, sc2: &Scalar, typ: ValueType) -> (Scalar, Scalar)
+	fn alu_sub_overflowing(
+		sc1: &Scalar,
+		typ: ValueType,
+		sc2: &Scalar,
+		_typ2: ValueType,
+	) -> (Scalar, Scalar)
 	{
 		let mut raw_result = Self::alu_add_carry(sc1, &Self::negate(sc2.clone(), typ));
 

@@ -1,3 +1,5 @@
+use byteorder::{ByteOrder, LittleEndian};
+use duplicate::duplicate_item;
 use num_traits::PrimInt;
 use scry_isa::{Bits, Type};
 use std::iter::once;
@@ -46,6 +48,16 @@ impl ValueType
 		match self
 		{
 			ValueType::Uint(x) | ValueType::Int(x) => 2usize.pow(*x as u32),
+		}
+	}
+
+	/// Returns whether this type is a signed integer type
+	pub fn is_signed_integer(&self) -> bool
+	{
+		match self
+		{
+			ValueType::Uint(_) => false,
+			ValueType::Int(_) => true,
 		}
 	}
 }
@@ -141,6 +153,56 @@ impl Scalar
 		assert_eq!(bytes.len(), size);
 
 		Self::Val(bytes.into_boxed_slice())
+	}
+
+	/// Extends the given scalar to the given scale and returns the result.
+	///
+	/// Will sign- or zero-extend based on the given type
+	///
+	/// If the scalar is not a value, returns a copy of the scalar
+	pub fn extend(&self, scale: usize, typ: &ValueType) -> Self
+	{
+		match self
+		{
+			Scalar::Val(bytes) =>
+			{
+				let negative = bytes.iter().last().map_or(false, |b| b >= &0b1000_0000);
+				let extend_with = if negative && typ.is_signed_integer()
+				{
+					u8::MAX
+				}
+				else
+				{
+					0
+				};
+				let mut new_bytes: Vec<_> = bytes.iter().cloned().collect();
+				new_bytes.resize(scale, extend_with);
+				Scalar::Val(new_bytes.into_boxed_slice())
+			},
+			_ => self.clone(),
+		}
+	}
+
+	#[duplicate_item(
+		name			typ		value_typ(scale);
+		[u128_value]	[u128]	[ValueType::Uint(scale)];
+		[i128_value]	[i128]	[ValueType::Int(scale)];
+	)]
+	/// Returns the integer value of the bytes of this scalar
+	///
+	/// Returns none if not a value
+	pub fn name(&self) -> Option<typ>
+	{
+		match self.extend(size_of::<typ>(), &value_typ([4]))
+		{
+			Scalar::Val(bytes) =>
+			{
+				paste::paste! {
+					Some(LittleEndian::[<read_ typ >](&*bytes))
+				}
+			},
+			_ => None,
+		}
 	}
 }
 
