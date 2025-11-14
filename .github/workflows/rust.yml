@@ -26,7 +26,7 @@ jobs:
       QUICKCHECK_GENERATOR_SIZE: 100 
       QUICKCHECK_MIN_TESTS_PASSED: 1000
       QUICKCHECK_TESTS: 2000
-      QUICKCHECK_MAX_TESTS: 10000
+      QUICKCHECK_MAX_TESTS: 1000000
     steps:
       - uses: actions/checkout@v4
       - name: Run Test Groups

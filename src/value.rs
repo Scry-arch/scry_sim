@@ -60,6 +60,31 @@ impl ValueType
 			ValueType::Int(_) => true,
 		}
 	}
+
+	#[duplicate_item(
+		typ;
+		[u8];
+		[u16];
+		[u32];
+		[u64];
+		[i8];
+		[i16];
+		[i32];
+		[i64];
+	)]
+	/// Returns the ValueType representation of the given type
+	pub fn typ() -> ValueType
+	{
+		let log2 = size_of::<typ>().ilog2() as u8;
+		if stringify!(typ).starts_with("u")
+		{
+			ValueType::Uint(log2)
+		}
+		else
+		{
+			ValueType::Int(log2)
+		}
+	}
 }
 impl From<Type> for ValueType
 {

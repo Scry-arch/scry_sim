@@ -13,7 +13,7 @@ use scry_sim::{
 };
 use std::{
 	cmp::min,
-	ops::{BitAnd, BitOr, Mul, Shl},
+	ops::{BitAnd, BitOr, Mul, Shl, Shr},
 };
 
 /// Manages the calculation of applying the given semantic function to the given
@@ -495,8 +495,9 @@ fn name(state: AluTestState<2>, offset: Bits<5, false>, out_var: Alu2OutputVaria
 
 /// Checks that the second ready operand is a shift amount of valid size
 /// compared to the size of the first operand.
-fn valid_shift(state: &ExecState) -> Option<()>
+fn valid_shift<const OPS_IN: usize>(state: &AluTestState<OPS_IN>) -> Option<()>
 {
+	let state = &state.0 .0 .0;
 	let ready = state.frame.op_queue.get(&0)?;
 	let width = ready.first.typ.scale() * 8;
 	let shift_type = ready.rest.first()?.typ;
@@ -522,11 +523,23 @@ fn valid_shift(state: &ExecState) -> Option<()>
 }
 
 #[duplicate_item(
-	name				variant		func	inputs	second	validate;
-	[multiply_carry]	[Multiply]	[mul]	[2]		[x[1]]	[Some(())];
-	[multiply_implicit]	[Multiply]	[mul]	[1]		[x[0]]	[Some(())];
-	[shift_left]		[ShiftLeft]	[shl]	[2]		[x[1]]	[valid_shift(&state.0.0.0)];
-	[shift_left_once]	[ShiftLeft]	[shl]	[1]		[1u8]	[Some(())];
+	name				variant		func	inputs	second_input	validate 				second_out(second_input, typ);
+	[multiply_carry]	[Multiply]	[mul]	[2]		[x[1]]			[Some(())]				[r2];
+	[multiply_implicit]	[Multiply]	[mul]	[1]		[x[0]]			[Some(())]				[r2];
+	[shift_left]		[ShiftLeft]	[shl]	[2]		[x[1]]			[valid_shift(&state)]	[r2];
+	[shift_left_once]	[ShiftLeft]	[shl]	[1]		[1u8]			[Some(())]				[r2];
+	[shift_right_once]	[ShiftRight][shr]	[1]		[1u8]			[Some(())]				[
+		let shifted_out_bit = x[0] & 1;
+		shifted_out_bit << ((size_of::<typ>() * 8)-(second_input as usize))
+	];
+	[shift_right]		[ShiftRight][shr]	[2]		[x[1]]			[valid_shift(&state)]	[
+		if second_input == 0 || x[0] == 0 {
+			0
+		} else {
+			let shifted_out_bits = x[0] & (((1 << second_input) as typ).overflowing_sub(1).0);
+			shifted_out_bits << (size_of::<typ>() * 8)-(second_input as usize)
+		}
+	];
 )]
 #[quickcheck]
 fn name(
@@ -542,12 +555,14 @@ fn name(
 
 	use Alu2OutputVariant::*;
 	substitute! ( [
-		closure(typ1, typ) [
+		closure(typ1, typ2) [
 			|x| {
 				paste::paste!{
 					let mut result = [0u8;2];
-					LittleEndian::[<write_ typ>](&mut result, (x[0] as typ).func(second as typ));
-					order((result[0] as typ1).into(), (result[1] as typ1).into(), out_var)
+					LittleEndian::[<write_ typ2>](&mut result, (x[0] as typ2).func(second_input as typ2));
+					#[allow(unused_variables)]
+					let r2 = result[1];
+					order((result[0] as typ1).into(), ({second_out([second_input],[typ1])} as typ1).into(), out_var)
 				}
 			}
 		];
@@ -555,9 +570,11 @@ fn name(
 			|x| {
 				paste::paste!{
 					let mut result = [0u8;size_of::<typ2>()];
-					LittleEndian::[<write_ typ2>](&mut result, (x[0] as typ2).func(second as typ2));
+					LittleEndian::[<write_ typ2>](&mut result, (x[0] as typ2).func(second_input as typ2));
 					let (r1,r2) = result.split_at(result.len() / 2);
-					order(LittleEndian::[<read_ typ>](r1).into(), LittleEndian::[<read_ typ>](r2).into(), out_var)
+					#[allow(unused_variables)]
+					let r2 = LittleEndian::[<read_ typ>](r2);
+					order(LittleEndian::[<read_ typ>](r1).into(), ({second_out([second_input],[typ])}).into(), out_var)
 				}
 			},
 		]

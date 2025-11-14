@@ -879,7 +879,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 				Alu2Variant::Sub => Self::alu_sub_overflowing,
 				Alu2Variant::Multiply => Self::alu_multiply,
 				Alu2Variant::ShiftLeft => Self::alu_shift_left,
-				Alu2Variant::ShiftRight => unimplemented!(),
+				Alu2Variant::ShiftRight => Self::alu_shift_right,
 				Alu2Variant::Division => unimplemented!(),
 			};
 			let (out_typ_1, out_typ_2) = match variant
@@ -888,7 +888,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 				Alu2Variant::Sub => (typ, ValueType::new::<u8>()),
 				Alu2Variant::Multiply => (typ, typ),
 				Alu2Variant::ShiftLeft => (typ, typ),
-				Alu2Variant::ShiftRight => unimplemented!(),
+				Alu2Variant::ShiftRight => (typ, typ),
 				Alu2Variant::Division => unimplemented!(),
 			};
 
@@ -1177,75 +1177,6 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 		Self::alu_add_carry(in1, &Self::scalar_one(typ)).0
 	}
 
-	/// Performs a shift left by 1 of the given scalar.
-	///
-	/// The bytes of the input are assumed to have the given type.
-	///
-	/// Returns the resulting bytes of the same length as the input.
-	fn alu_shift_left_once(in1: &Scalar, _: ValueType) -> Vec<u8>
-	{
-		let mut result_bytes = Vec::new();
-		let bytes = in1.bytes().unwrap();
-		let mut carry = false;
-		for i in 0..bytes.len()
-		{
-			let byte = bytes[i];
-			// capture the highest order bit
-			let new_carry = byte >= 0b10000000u8;
-			// shift
-			let mut shifted = byte << 1;
-			if carry
-			{
-				shifted += 1;
-			}
-			carry = new_carry;
-			result_bytes.push(shifted);
-		}
-
-		result_bytes
-	}
-
-	/// Performs a shift right by 1 of the given scalar.
-	///
-	/// The bytes of the input are assumed to have the given type.
-	///
-	/// Returns the resulting bytes of the same length as the input.
-	fn alu_shift_right_once(in1: &Scalar, typ: ValueType) -> Vec<u8>
-	{
-		let mut result_bytes = Vec::new();
-		let bytes = in1.bytes().unwrap();
-
-		for i in 0..bytes.len()
-		{
-			let byte = bytes[i];
-			// This is a logical shift right
-			let shifted = byte >> 1;
-
-			let high_bit = if let Some(next_byte) = bytes.get(i + 1)
-			{
-				// We have to ensure that the highest bit is the same as the lowest in the next
-				// byte
-				(*next_byte & 0b1) << 7
-			}
-			else
-			{
-				// Last byte, must ensure using arithmetic shift if signed
-				if let ValueType::Int(_) = typ
-				{
-					byte & 0b10000000
-				}
-				else
-				{
-					0
-				}
-			};
-			// shifted is guaranteed to have 0 in the highest bit
-			result_bytes.push(high_bit + shifted);
-		}
-
-		result_bytes
-	}
-
 	/// Performs a bitwise operation on the 2 given scalars.
 	///
 	/// The given closure should perform the needed operand on a pair of bytes.
@@ -1353,7 +1284,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 		[alu_op_i128]	[i128];
 	)]
 	/// Performs the given ALU operation (`f`) on the given scalars, producing
-	/// the high and low products of the given output type.
+	/// the low and high products of the given output type.
 	///
 	/// The given scalars are assumed to be of a u128/i128 scale.
 	/// The output will use the scale of the given type, splitting the relevant
@@ -1404,6 +1335,44 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 		let sc2_ext = Scalar::Val(shift_bytes.into_boxed_slice());
 
 		Self::alu_op_u128(&sc1_ext, &sc2_ext, std::ops::Shl::shl, typ1)
+	}
+
+	/// Performs right shift
+	fn alu_shift_right(
+		sc1: &Scalar,
+		typ1: ValueType,
+		sc2: &Scalar,
+		typ2: ValueType,
+	) -> (Scalar, Scalar)
+	{
+		let mut sc1_prep_bytes = Vec::from(sc1.bytes().unwrap());
+		for _ in 0..typ1.scale()
+		{
+			sc1_prep_bytes.insert(0, 0);
+		}
+		let sc1_shifted = Scalar::Val(sc1_prep_bytes.into_boxed_slice());
+		let sc1_ext = sc1_shifted.extend(size_of::<u128>(), &typ1);
+
+		let mut shift_bytes: Vec<_> = sc2.bytes().unwrap().iter().cloned().collect();
+
+		assert!(
+			!typ2.is_signed_integer() || shift_bytes.last().unwrap() < &0b1000_0000,
+			"Cannot shift negative amount"
+		);
+
+		shift_bytes.resize(size_of::<u128>(), 0);
+		let sc2_ext = Scalar::Val(shift_bytes.into_boxed_slice());
+
+		let (low, high) = if typ1.is_signed_integer()
+		{
+			Self::alu_op_i128(&sc1_ext, &sc2_ext, std::ops::Shr::shr, typ1)
+		}
+		else
+		{
+			Self::alu_op_u128(&sc1_ext, &sc2_ext, std::ops::Shr::shr, typ1)
+		};
+
+		(high, low)
 	}
 
 	/// Performs addition on the given scalars, returning the wrapping result
