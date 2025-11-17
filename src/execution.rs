@@ -837,6 +837,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 		tracker: &mut impl MetricTracker,
 	) -> Result<(), ExecError>
 	{
+		let addr_size = self.addr_space;
 		let (out_typ_1, out_typ_2, mut result_scalars_low, mut result_scalars_high) = {
 			// Extract operands
 			let mut ins = self.get_ready_iter(tracker);
@@ -851,7 +852,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 			let in2 = in2.unwrap_or({
 				let mut scalars: Vec<_> = in1
 					.iter()
-					.map(|scal| {
+					.map(|_| {
 						use Alu2Variant::*;
 
 						let mut bytes = Vec::new();
@@ -859,8 +860,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 						match variant
 						{
 							Add | Sub | ShiftLeft | ShiftRight => bytes[0] = 1, // implicit 1
-							Multiply => bytes.clone_from_slice(scal.bytes().unwrap()), // implicit in1
-							Division => unimplemented!(),
+							Multiply | Division => bytes[0] = addr_size,
 						}
 						Scalar::Val(bytes.into_boxed_slice())
 					})

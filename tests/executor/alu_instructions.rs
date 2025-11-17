@@ -525,7 +525,7 @@ fn valid_shift<const OPS_IN: usize>(state: &AluTestState<OPS_IN>) -> Option<()>
 #[duplicate_item(
 	name				variant		func	inputs	second_input	validate 				second_out(second_input, typ);
 	[multiply_carry]	[Multiply]	[mul]	[2]		[x[1]]			[Some(())]				[r2];
-	[multiply_implicit]	[Multiply]	[mul]	[1]		[x[0]]			[Some(())]				[r2];
+	[multiply_implicit]	[Multiply]	[mul]	[1]		[_addr_size]			[Some(())]				[r2];
 	[shift_left]		[ShiftLeft]	[shl]	[2]		[x[1]]			[valid_shift(&state)]	[r2];
 	[shift_left_once]	[ShiftLeft]	[shl]	[1]		[1u8]			[Some(())]				[r2];
 	[shift_right_once]	[ShiftRight][shr]	[1]		[1u8]			[Some(())]				[
@@ -548,6 +548,7 @@ fn name(
 	out_var: Alu2OutputVariant,
 ) -> TestResult
 {
+	let _addr_size = state.0 .0 .0.addr_space;
 	if validate.is_none()
 	{
 		return TestResult::discard();
