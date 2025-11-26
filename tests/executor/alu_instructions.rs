@@ -4,6 +4,7 @@ use crate::{
 };
 use byteorder::{ByteOrder, LittleEndian};
 use duplicate::{duplicate_item, substitute};
+use num_traits::{ops::overflowing::OverflowingSub, PrimInt};
 use quickcheck::TestResult;
 use quickcheck_macros::quickcheck;
 use scry_isa::{Alu2OutputVariant, Alu2Variant, AluVariant, Bits, Instruction};
@@ -515,7 +516,7 @@ fn valid_shift<const OPS_IN: usize>(state: &AluTestState<OPS_IN>) -> Option<()>
 		ready.rest.first()?.first.u128_value()?
 	};
 
-	if (width as u128) < shift_amount
+	if (width as u128) <= shift_amount
 	{
 		return None;
 	}
@@ -523,23 +524,11 @@ fn valid_shift<const OPS_IN: usize>(state: &AluTestState<OPS_IN>) -> Option<()>
 }
 
 #[duplicate_item(
-	name				variant		func	inputs	second_input	validate 				second_out(second_input, typ);
-	[multiply_carry]	[Multiply]	[mul]	[2]		[x[1]]			[Some(())]				[r2];
-	[multiply_implicit]	[Multiply]	[mul]	[1]		[_addr_size]			[Some(())]				[r2];
-	[shift_left]		[ShiftLeft]	[shl]	[2]		[x[1]]			[valid_shift(&state)]	[r2];
-	[shift_left_once]	[ShiftLeft]	[shl]	[1]		[1u8]			[Some(())]				[r2];
-	[shift_right_once]	[ShiftRight][shr]	[1]		[1u8]			[Some(())]				[
-		let shifted_out_bit = x[0] & 1;
-		shifted_out_bit << ((size_of::<typ>() * 8)-(second_input as usize))
-	];
-	[shift_right]		[ShiftRight][shr]	[2]		[x[1]]			[valid_shift(&state)]	[
-		if second_input == 0 || x[0] == 0 {
-			0
-		} else {
-			let shifted_out_bits = x[0] & (((1 << second_input) as typ).overflowing_sub(1).0);
-			shifted_out_bits << (size_of::<typ>() * 8)-(second_input as usize)
-		}
-	];
+	name				variant		func	inputs	second_input	validate;
+	[multiply_carry]	[Multiply]	[mul]	[2]		[x[1]]			[Some(())];
+	[multiply_implicit]	[Multiply]	[mul]	[1]		[_addr_size]	[Some(())];
+	[shift_left]		[ShiftLeft]	[shl]	[2]		[x[1]]			[valid_shift(&state)];
+	[shift_left_once]	[ShiftLeft]	[shl]	[1]		[1u8]			[Some(())];
 )]
 #[quickcheck]
 fn name(
@@ -561,9 +550,7 @@ fn name(
 				paste::paste!{
 					let mut result = [0u8;2];
 					LittleEndian::[<write_ typ2>](&mut result, (x[0] as typ2).func(second_input as typ2));
-					#[allow(unused_variables)]
-					let r2 = result[1];
-					order((result[0] as typ1).into(), ({second_out([second_input],[typ1])} as typ1).into(), out_var)
+					order((result[0] as typ1).into(), (result[1] as typ1).into(), out_var)
 				}
 			}
 		];
@@ -573,9 +560,7 @@ fn name(
 					let mut result = [0u8;size_of::<typ2>()];
 					LittleEndian::[<write_ typ2>](&mut result, (x[0] as typ2).func(second_input as typ2));
 					let (r1,r2) = result.split_at(result.len() / 2);
-					#[allow(unused_variables)]
-					let r2 = LittleEndian::[<read_ typ>](r2);
-					order(LittleEndian::[<read_ typ>](r1).into(), ({second_out([second_input],[typ])}).into(), out_var)
+					order(LittleEndian::[<read_ typ>](r1).into(), LittleEndian::[<read_ typ>](r2).into(), out_var)
 				}
 			},
 		]
@@ -612,8 +597,8 @@ fn name(
 					]
 					closure2([typ], [typ2])
 				)
-				None::<fn([u128;inputs]) -> [Value;1]>,
-				None::<fn([i128;inputs]) -> [Value;1]>,
+				None::<fn(_) -> _>,
+				None::<fn(_) -> _>,
 			)
 		} else {
 			fn order<T>(out1: T, out2: T, var: Alu2OutputVariant) -> [T; 2] {
@@ -652,8 +637,86 @@ fn name(
 					]
 					closure2([typ], [typ2])
 				)
-				None::<fn([u128;inputs]) -> [Value;2]>,
-				None::<fn([i128;inputs]) -> [Value;2]>,
+				None::<fn(_) -> _>,
+				None::<fn(_) -> _>,
+			)
+		}
+	)
+}
+
+/// Returns the High result of shifting right by the amount of the second input
+fn shr_high<T: PrimInt + OverflowingSub>(in1: T, in2: T) -> T
+{
+	let shift_amount = in2.to_usize().unwrap();
+	if in2 == T::zero() || in1 == T::zero()
+	{
+		T::zero()
+	}
+	else
+	{
+		let shifted_out_bits = in1 & ((T::one() << shift_amount).overflowing_sub(&T::one()).0);
+		shifted_out_bits << ((size_of::<T>() * 8) - shift_amount)
+	}
+}
+
+#[duplicate_item(
+	name				variant		func_low	func_high	inputs	second_input	validate;
+	[shift_right_once]	[ShiftRight][Shr::shr]	[shr_high]	[1]		[1]				[Some(())];
+	[shift_right]		[ShiftRight][Shr::shr]	[shr_high]	[2]		[x[1]]			[valid_shift(&state)];
+)]
+#[quickcheck]
+fn name(
+	state: AluTestState<inputs>,
+	offset: Bits<5, false>,
+	out_var: Alu2OutputVariant,
+) -> TestResult
+{
+	if validate.is_none()
+	{
+		return TestResult::discard();
+	}
+
+	use Alu2OutputVariant::*;
+	substitute! ( [
+		run_test(targets, order) [
+			test_arithmetic_instruction(
+				state,
+				Instruction::Alu2(Alu2Variant::variant, out_var, offset),
+				[targets],
+				duplicate! (
+					[
+						typ;
+						[u8]; [u16]; [u32]; [u64];
+						[i8]; [i16]; [i32]; [i64];
+					]
+					|x| order(func_low(x[0], second_input as typ).into(), func_high(x[0], second_input).into()),
+				)
+				None::<fn(_) -> _>,
+				None::<fn(_) -> _>,
+			)
+		];
+	]
+		if out_var == High || out_var == Low {
+			let order = |out1, out2| match out_var {
+					Low => [out1],
+					High => [out2],
+					_ => unreachable!()
+				};
+			run_test([offset.value as usize], [order])
+		} else {
+			let order = |out1, out2| match out_var {
+					FirstLow => [out1, out2],
+					FirstHigh => [out2, out1],
+					NextLow => [out1, out2],
+					NextHigh => [out2, out1],
+					_ => unreachable!()
+				};
+			run_test(
+				[
+					if out_var == FirstLow || out_var == FirstHigh { offset.value as usize}else {0},
+					offset.value as usize
+				],
+				[order]
 			)
 		}
 	)
