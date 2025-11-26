@@ -859,8 +859,9 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 						bytes.resize(typ.scale(), 0);
 						match variant
 						{
-							Add | Sub | ShiftLeft | ShiftRight => bytes[0] = 1, // implicit 1
-							Multiply | Division => bytes[0] = addr_size,
+							Add | Sub | ShiftLeft | ShiftRight => bytes[0] = 1,
+							Multiply => bytes[0] = addr_size,
+							Division => bytes[0] = 2,
 						}
 						Scalar::Val(bytes.into_boxed_slice())
 					})
@@ -880,7 +881,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 				Alu2Variant::Multiply => Self::alu_multiply,
 				Alu2Variant::ShiftLeft => Self::alu_shift_left,
 				Alu2Variant::ShiftRight => Self::alu_shift_right,
-				Alu2Variant::Division => unimplemented!(),
+				Alu2Variant::Division => Self::alu_divide,
 			};
 			let (out_typ_1, out_typ_2) = match variant
 			{
@@ -889,7 +890,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 				Alu2Variant::Multiply => (typ, typ),
 				Alu2Variant::ShiftLeft => (typ, typ),
 				Alu2Variant::ShiftRight => (typ, typ),
-				Alu2Variant::Division => unimplemented!(),
+				Alu2Variant::Division => (typ, ValueType::Uint(typ.power())),
 			};
 
 			let mut result_scalars_low = Vec::new();
@@ -1373,6 +1374,29 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 		};
 
 		(high, low)
+	}
+
+	/// Performs division and remainder
+	fn alu_divide(sc1: &Scalar, typ1: ValueType, sc2: &Scalar, typ2: ValueType)
+		-> (Scalar, Scalar)
+	{
+		let sc1_ext = sc1.extend(size_of::<u128>(), &typ1);
+		let sc2_ext = sc2.extend(size_of::<u128>(), &typ2);
+
+		if typ1.is_signed_integer() || typ2.is_signed_integer()
+		{
+			(
+				Self::alu_op_i128(&sc1_ext, &sc2_ext, i128::div_euclid, typ1).0,
+				Self::alu_op_i128(&sc1_ext, &sc2_ext, i128::rem_euclid, typ1).0,
+			)
+		}
+		else
+		{
+			(
+				Self::alu_op_u128(&sc1_ext, &sc2_ext, u128::div_euclid, typ1).0,
+				Self::alu_op_u128(&sc1_ext, &sc2_ext, u128::rem_euclid, typ1).0,
+			)
+		}
 	}
 
 	/// Performs addition on the given scalars, returning the wrapping result

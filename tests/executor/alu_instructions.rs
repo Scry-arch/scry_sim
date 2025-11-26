@@ -659,10 +659,55 @@ fn shr_high<T: PrimInt + OverflowingSub>(in1: T, in2: T) -> T
 	}
 }
 
+/// Checks that the second ready operand is not a zero, returning None if so
+fn valid_div<const OPS_IN: usize>(state: &AluTestState<OPS_IN>) -> Option<()>
+{
+	let state = &state.0 .0 .0;
+	let ready = state.frame.op_queue.get(&0)?;
+	ready.rest.first()?.first.u128_value().and_then(|v| {
+		if v == 0
+		{
+			None
+		}
+		else
+		{
+			Some(())
+		}
+	})
+}
+
+/// Defines the rem_euclid function to return only unsigned remainders, since
+/// Euclidean division only produce unsigned remainders.
+trait ScryRem<Out>
+{
+	fn scry_rem(self, rhs: Self) -> Out;
+}
+
 #[duplicate_item(
-	name				variant		func_low	func_high	inputs	second_input	validate;
-	[shift_right_once]	[ShiftRight][Shr::shr]	[shr_high]	[1]		[1]				[Some(())];
-	[shift_right]		[ShiftRight][Shr::shr]	[shr_high]	[2]		[x[1]]			[valid_shift(&state)];
+	typ_in 	typ_out;
+	[u8] 	[u8];
+	[u16]	[u16];
+	[u32]	[u32];
+	[u64]	[u64];
+	[i8] 	[u8];
+	[i16]	[u16];
+	[i32]	[u32];
+	[i64]	[u64];
+)]
+impl ScryRem<typ_out> for typ_in
+{
+	fn scry_rem(self, rhs: typ_in) -> typ_out
+	{
+		typ_in::rem_euclid(self, rhs) as typ_out
+	}
+}
+
+#[duplicate_item(
+	name				variant		func_low(typ)		func_high(typ)	inputs	second_input	validate;
+	[shift_right_once]	[ShiftRight][Shr::shr]			[shr_high]		[1]		[1]				[Some(())];
+	[shift_right]		[ShiftRight][Shr::shr]			[shr_high]		[2]		[x[1]]			[valid_shift(&state)];
+	[division]			[Division]	[typ::div_euclid]	[typ::scry_rem]	[2]		[x[1]]			[valid_div(&state)];
+	[divide_by_two]		[Division]	[typ::div_euclid]	[typ::scry_rem]	[1]		[2]				[Some(())];
 )]
 #[quickcheck]
 fn name(
@@ -689,7 +734,7 @@ fn name(
 						[u8]; [u16]; [u32]; [u64];
 						[i8]; [i16]; [i32]; [i64];
 					]
-					|x| order(func_low(x[0], second_input as typ).into(), func_high(x[0], second_input).into()),
+					|x| order(func_low([typ])(x[0], second_input as typ).into(), func_high([typ])(x[0], second_input).into()),
 				)
 				None::<fn(_) -> _>,
 				None::<fn(_) -> _>,

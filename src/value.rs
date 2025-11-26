@@ -42,6 +42,17 @@ impl ValueType
 		}
 	}
 
+	/// Returns the power of 2 scale of the type.
+	///
+	/// I.e., u8 has a power of 0, u16 is 1, i16 is also 1, i32 is 2, etc.
+	pub fn power(&self) -> u8
+	{
+		match self
+		{
+			ValueType::Uint(x) | ValueType::Int(x) => *x,
+		}
+	}
+
 	/// Returns the number of bytes one scalar element if this type takes up.
 	pub fn scale(&self) -> usize
 	{
