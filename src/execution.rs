@@ -410,6 +410,31 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 						tracker,
 					);
 				},
+				Cast(typ, offset) =>
+				{
+					let target_typ: ValueType = typ.try_into().unwrap();
+
+					let to_cast = self.get_ready_iter(tracker).next().unwrap();
+
+					let casted = Value::singleton_typed(
+						target_typ,
+						if to_cast.typ.scale() < target_typ.scale()
+						{
+							to_cast.first.extend(target_typ.scale(), &to_cast.typ)
+						}
+						else
+						{
+							let mut bytes: Vec<_> =
+								to_cast.first.bytes().unwrap().iter().cloned().collect();
+							bytes.resize(target_typ.scale(), 0);
+							Scalar::Val(bytes.into_boxed_slice())
+						},
+					);
+					let target = offset.value;
+
+					self.operands
+						.push_operand(target as usize, casted.into(), tracker)
+				},
 				instr =>
 				{
 					dbg!(instr);
@@ -837,14 +862,16 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 		tracker: &mut impl MetricTracker,
 	) -> Result<(), ExecError>
 	{
+		let current_addr = self.control.next_addr;
 		let addr_size = self.addr_space;
 		let (out_typ_1, out_typ_2, mut result_scalars_low, mut result_scalars_high) = {
 			// Extract operands
 			let mut ins = self.get_ready_iter(tracker);
 			let in1 = ins.next();
-			let in1 = in1.ok_or(ExecError::Exception(
-				"Alu2 instruction missing first operand".into(),
-			))?;
+			let in1 = in1.ok_or(ExecError::Exception(format!(
+				"Alu2 instruction missing first operand. Variant: {:?}, address: {:?}",
+				variant, current_addr
+			)))?;
 			Self::fail_if_nan_nar(&in1)?;
 			let typ = in1.value_type();
 

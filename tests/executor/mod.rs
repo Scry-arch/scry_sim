@@ -9,6 +9,7 @@ use scry_sim::{
 use std::{borrow::BorrowMut, fmt::Debug};
 
 mod alu_instructions;
+mod cast;
 mod control_flow;
 mod data_flow;
 mod load;
