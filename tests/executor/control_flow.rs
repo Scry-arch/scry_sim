@@ -9,9 +9,9 @@ use quickcheck_macros::quickcheck;
 use scry_isa::{BitValue, Bits, CallVariant, Instruction};
 use scry_sim::{
 	arbitrary::{ArbValue, InstrAddr, NoCF},
-	Block, CallFrameState, ControlFlowType, ExecState, Executor, Metric,
+	Block, CallFrameState, CallType, ControlFlowType, ExecState, Executor, Metric,
 	Metric::{ConsumedBytes, ConsumedOperands, IssuedCalls},
-	MetricTracker, OperandList, Scalar, StackFrame, TrackReport, ValueType,
+	MetricTracker, OperandList, Scalar, StackFrame, TrackReport, Value, ValueType,
 };
 use std::collections::HashMap;
 
@@ -24,6 +24,8 @@ fn return_trigger_impl(
 	NoCF(state): NoCF<ExecState>,
 	// The executing call frame
 	mut frame: CallFrameState,
+	// spare call type
+	call_type: CallType<Value>,
 	// The next instruction to be executed
 	instr: Instruction,
 	// Operands expected to be at the end of the ready list after the return trigger.
@@ -65,7 +67,9 @@ fn return_trigger_impl(
 		.branches
 		.insert(state.address, ControlFlowType::Return);
 	let old_first_frame = std::mem::replace(&mut test_state.frame, frame);
-	test_state.frame_stack.insert(0, old_first_frame);
+	test_state
+		.frame_stack
+		.insert(0, (old_first_frame, call_type));
 
 	test_execution_step(
 		&test_state,
@@ -80,6 +84,7 @@ fn return_trigger_impl(
 fn return_trigger(
 	NoCF(state): NoCF<ExecState>,
 	mut frame: CallFrameState,
+	call_type: CallType<Value>,
 	instr: SupportedInstruction,
 ) -> TestResult
 {
@@ -121,6 +126,7 @@ fn return_trigger(
 	return_trigger_impl(
 		NoCF(state),
 		frame,
+		call_type,
 		instr.0,
 		expected_ready_ops,
 		expected_metrics,
@@ -129,7 +135,11 @@ fn return_trigger(
 
 /// Test return instructions with 0-offset (return immediately)
 #[quickcheck]
-fn return_immediately(state: NoCF<ExecState>, frame: CallFrameState) -> TestResult
+fn return_immediately(
+	state: NoCF<ExecState>,
+	frame: CallFrameState,
+	call_type: CallType<Value>,
+) -> TestResult
 {
 	// The operands given to the branch location must be moved into the caller
 	// frame.
@@ -138,6 +148,7 @@ fn return_immediately(state: NoCF<ExecState>, frame: CallFrameState) -> TestResu
 	return_trigger_impl(
 		state,
 		frame,
+		call_type,
 		Instruction::Call(CallVariant::Ret, 0.try_into().unwrap()),
 		expected_ready_ops,
 		TrackReport::from([
@@ -554,7 +565,7 @@ fn call_trigger_empty_stack()
 			stack_buffer: 0,
 		}),
 		SupportedInstruction(Instruction::NoOp),
-		InstrAddr(0x1000)
+		InstrAddr(0x1000),
 	)
 	.is_failure())
 }
@@ -608,9 +619,13 @@ fn call_trigger_impl(
 	};
 	expected_state.frame.stack.block.size = expected_state.frame.stack.base_size;
 
-	expected_state
-		.frame_stack
-		.insert(0, std::mem::replace(&mut expected_state.frame, new_frame));
+	expected_state.frame_stack.insert(
+		0,
+		(
+			std::mem::replace(&mut expected_state.frame, new_frame),
+			CallType::Call,
+		),
+	);
 	// Move the current address to the call target
 	expected_state.address = call_target.0;
 

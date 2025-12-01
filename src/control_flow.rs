@@ -1,7 +1,7 @@
 use crate::{
-	data::{OperandStack, ProgramStack},
+	data::{Operand, OperandStack, ProgramStack},
 	metrics::MetricTracker,
-	CallFrameState, ControlFlowType, ExecError, ExecState, Metric,
+	CallFrameState, CallType, ControlFlowType, ExecError, ExecState, Metric, Value,
 };
 use std::collections::{HashMap, VecDeque};
 
@@ -46,7 +46,7 @@ pub struct ControlFlow
 	/// Next instruction to be executed
 	pub next_addr: usize,
 	call_frame: CallFrame,
-	call_stack: VecDeque<CallFrame>,
+	call_stack: VecDeque<(CallFrame, CallType<Operand>)>,
 }
 
 impl ControlFlow
@@ -109,7 +109,7 @@ impl ControlFlow
 							branches: HashMap::new(),
 						},
 					);
-					self.call_stack.push_front(old_frame);
+					self.call_stack.push_front((old_frame, CallType::Call));
 					tracker.add_stat(Metric::TriggeredCalls, 1);
 				},
 				Return =>
@@ -127,9 +127,9 @@ impl ControlFlow
 						return Ok(false);
 					}
 
-					self.call_frame = if let Some(s) = self.call_stack.pop_front()
+					self.call_frame = if let Some((frame, _)) = self.call_stack.pop_front()
 					{
-						s
+						frame
 					}
 					else
 					{
@@ -191,28 +191,21 @@ impl ControlFlow
 	///
 	/// The given list is assumed to be in order, where the 0'th element is the
 	/// current call frame.
-	pub fn set_frame_state(&self, to_set: &mut Vec<CallFrameState>)
+	pub fn get_frame_state(&self) -> (CallFrameState, Vec<(CallFrameState, CallType<Value>)>)
 	{
-		let set_idx = |vec: &mut Vec<_>, idx, frame: &CallFrame| {
-			if vec.len() == idx
-			{
-				vec.push(Default::default());
-			}
-			assert!(vec.len() > idx);
-			if let Some(state) = vec.get_mut(idx)
-			{
-				frame.set_state(state);
-			}
-			else
-			{
-				unreachable!()
-			}
-		};
-		set_idx(to_set, 0, &self.call_frame);
-		self.call_stack
-			.iter()
-			.enumerate()
-			.for_each(|(i, f)| set_idx(to_set, i + 1, f));
+		let mut current = CallFrameState::default();
+		self.call_frame.set_state(&mut current);
+		(
+			current,
+			self.call_stack
+				.iter()
+				.map(|(f, t)| {
+					let mut next = CallFrameState::default();
+					f.set_state(&mut next);
+					(next, t.to_value())
+				})
+				.collect(),
+		)
 	}
 }
 /// Constructions a ControlFlow equivalent to an execution state
@@ -225,8 +218,8 @@ impl<'a> From<&'a ExecState> for ControlFlow
 			call_frame: (&state.frame).into(),
 			call_stack: state.frame_stack.clone().into_iter().fold(
 				VecDeque::new(),
-				|mut stack, frame| {
-					stack.push_back((&frame).into());
+				|mut stack, (frame, call)| {
+					stack.push_back(((&frame).into(), call.to_operand()));
 					stack
 				},
 			),

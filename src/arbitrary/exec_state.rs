@@ -1,6 +1,6 @@
 use crate::{
-	arbitrary::WeightedArbitrary, Block, CallFrameState, ControlFlowType, ExecState, OperandList,
-	Scalar, StackFrame, Value,
+	arbitrary::WeightedArbitrary, Block, CallFrameState, CallType, ControlFlowType, ExecState,
+	OperandList, Scalar, StackFrame, Value,
 };
 use duplicate::duplicate_item;
 use num_traits::{PrimInt, Unsigned};
@@ -477,6 +477,36 @@ impl Arbitrary for CallFrameState
 	}
 }
 
+impl<T: Arbitrary> Arbitrary for CallType<T>
+{
+	fn arbitrary(g: &mut Gen) -> Self
+	{
+		match u8::arbitrary(g) % 3
+		{
+			0 => CallType::Call,
+			1 => CallType::Trap,
+			_ => CallType::Interrupt(Arbitrary::arbitrary(g)),
+		}
+	}
+
+	fn shrink(&self) -> Box<dyn Iterator<Item = Self>>
+	{
+		match self
+		{
+			CallType::Call => Box::new(empty()),
+			CallType::Trap => Box::new(once(CallType::Call)),
+			CallType::Interrupt(v) =>
+			{
+				Box::new(
+					v.shrink()
+						.map(move |shrunk| CallType::Interrupt(shrunk))
+						.chain(once(CallType::Call)),
+				)
+			},
+		}
+	}
+}
+
 impl Arbitrary for ExecState
 {
 	fn arbitrary(g: &mut Gen) -> Self
@@ -530,15 +560,16 @@ impl Arbitrary for ExecState
 		{
 			loop
 			{
-				result
-					.frame_stack
-					.push(CallFrameState::arbitrary_weighted(g, max_addr));
-				result.frame_stack.last_mut().unwrap().stack.block.address = next_addr;
+				result.frame_stack.push((
+					CallFrameState::arbitrary_weighted(g, max_addr),
+					Arbitrary::arbitrary(g),
+				));
+				result.frame_stack.last_mut().unwrap().0.stack.block.address = next_addr;
 
 				// Check new frame does not clash with others
 				if result.validate().is_ok()
 				{
-					let block = &result.frame_stack.last().unwrap().stack.block;
+					let block = &result.frame_stack.last().unwrap().0.stack.block;
 					next_addr = block.address + block.size;
 					break;
 				}
@@ -556,36 +587,57 @@ impl Arbitrary for ExecState
 
 	fn shrink(&self) -> Box<dyn Iterator<Item = Self>>
 	{
-		let mut result = Vec::new();
-
-		// Shrink address
-		result.extend(InstrAddr(self.address).shrink().map(|new_addr| {
-			let mut clone = self.clone();
-			clone.address = new_addr.0;
-			clone
-		}));
-
-		// Shrink first frame
-		result.extend(
-			self.frame
-				.shrink()
-				.map(|new_frame| {
-					let mut clone = self.clone();
-					clone.frame = new_frame;
-					clone
-				})
-				.filter(|new_frame| new_frame.validate().is_ok()),
-		);
-
-		// Remove first frame
-		if self.frame_stack.len() > 0
+		let clone = self.clone();
+		let clone2 = self.clone();
+		let clone3 = self.clone();
+		// Shrink by removing the last stack frame
+		let without_last_frame = if self.frame_stack.len() <= 1
+		{
+			None
+		}
+		else
 		{
 			let mut clone = self.clone();
-			clone.frame = clone.frame_stack.remove(0);
-			result.push(clone);
-		}
-
-		Box::new(result.into_iter())
+			clone.frame_stack.pop();
+			Some(clone)
+		};
+		Box::new(
+			without_last_frame
+				.into_iter()
+				.chain(
+					// Shrink address
+					InstrAddr(self.address).shrink().map(move |new_addr| {
+						let mut clone = clone.clone();
+						clone.address = new_addr.0;
+						clone
+					}),
+				)
+				.chain(
+					// Shrink first frame
+					self.frame
+						.shrink()
+						.map(move |new_frame| {
+							let mut clone = clone2.clone();
+							clone.frame = new_frame;
+							clone
+						})
+						.filter(|new_frame| new_frame.validate().is_ok()),
+				)
+				.chain(
+					// Remove first frame
+					if self.frame_stack.len() > 0
+					{
+						let mut clone = clone3.clone();
+						clone.frame = clone.frame_stack.remove(0).0;
+						Some(clone)
+					}
+					else
+					{
+						None
+					}
+					.into_iter(),
+				),
+		)
 	}
 }
 

@@ -315,7 +315,7 @@ impl<'a> From<&'a ExecState> for OperandStack
 		Self {
 			stack: state.frame_stack.clone().into_iter().fold(
 				VecDeque::new(),
-				|mut stack, frame| {
+				|mut stack, (frame, _)| {
 					stack.push_back(frame_op_queue(&frame));
 					stack
 				},
@@ -399,7 +399,7 @@ impl<'a> From<&'a ExecState> for ProgramStack
 		let rest = state
 			.frame_stack
 			.iter()
-			.map(|c| &c.stack)
+			.map(|(frame, _)| &frame.stack)
 			.cloned()
 			.collect();
 		Self { top, rest }

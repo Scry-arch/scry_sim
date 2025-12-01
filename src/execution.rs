@@ -10,7 +10,7 @@ use duplicate::duplicate_item;
 use scry_isa::{
 	Alu2OutputVariant, Alu2Variant, AluVariant, BitValue, Bits, CallVariant, Instruction, Type,
 };
-use std::{borrow::BorrowMut, fmt::Debug, marker::PhantomData, mem::size_of, ops::Mul};
+use std::{borrow::BorrowMut, fmt::Debug, iter::once, marker::PhantomData, mem::size_of, ops::Mul};
 
 /// The result of performing one execution step
 #[derive(Debug, Eq, PartialEq)]
@@ -76,19 +76,20 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 	/// Returns the execution state equivalent to this executors state.
 	pub fn state(&self) -> ExecState
 	{
-		let mut frames = Vec::new();
+		let (mut first_frame, mut rest_frames) = self.control.get_frame_state();
 
-		self.control.set_frame_state(&mut frames);
-		assert!(frames.len() > 0);
-
-		self.operands.set_all_frame_states(frames.iter_mut());
-		self.stack.set_all_frame_states(frames.iter_mut());
+		self.operands.set_all_frame_states(
+			once(&mut first_frame).chain(rest_frames.iter_mut().map(|frame| &mut frame.0)),
+		);
+		self.stack.set_all_frame_states(
+			once(&mut first_frame).chain(rest_frames.iter_mut().map(|frame| &mut frame.0)),
+		);
 
 		ExecState {
 			addr_space: self.addr_space,
 			address: self.control.next_addr,
-			frame: frames.remove(0),
-			frame_stack: frames,
+			frame: first_frame,
+			frame_stack: rest_frames,
 			stack_buffer: self.stack_buffer.clone(),
 		}
 	}

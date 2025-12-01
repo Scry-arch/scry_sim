@@ -1,4 +1,4 @@
-use crate::Value;
+use crate::{data::Operand, Value};
 use std::{
 	collections::HashMap,
 	fmt::Debug,
@@ -403,6 +403,84 @@ impl Default for CallFrameState
 	}
 }
 
+/// The type of "call" between two stack frames.
+///
+/// The most common is a regular function call, triggered by the `call`
+/// instruction. It can also be a software trap tiggered by `trap`.
+/// Lastly, the system could trigger an interrupt (based on timers, devices, or
+/// other asynchronous events) which runs in a new stack frame.
+/// For the correct continuation of the originally running function/frame, the
+/// interrupt saves the first operand produced by the last instruction before
+/// the interrupt. This ensures that upon termination of the interrupt handler,
+/// the operand is available if the following instruction, e.g., is a `grow`.
+#[derive(Debug, Eq, PartialEq, Clone)]
+pub enum CallType<T>
+{
+	/// A regular function call
+	Call,
+
+	/// A software trap
+	Trap,
+
+	/// A system interrupt.
+	///
+	/// Contains the first operand produced by the instruction preceding the
+	/// interrupt's triggering
+	Interrupt(T),
+}
+impl<T> CallType<T>
+{
+	/// If this is an `Interrupt`, returns the ***f***irst ***o***perand
+	/// produced by the ***l***ast ***i***nstruction before the interrupt
+	/// triggered.
+	pub fn to_foli(self) -> Option<T>
+	{
+		match self
+		{
+			CallType::Call | CallType::Trap => None,
+			CallType::Interrupt(op) => Some(op),
+		}
+	}
+
+	/// If this is an `Interrupt`, returns the ***f***irst ***o***perand
+	/// produced by the ***l***ast ***i***nstruction before the interrupt
+	/// triggered.
+	pub fn get_foli(&self) -> Option<&T>
+	{
+		match self
+		{
+			CallType::Call | CallType::Trap => None,
+			CallType::Interrupt(op) => Some(op),
+		}
+	}
+}
+
+impl CallType<Value>
+{
+	pub(crate) fn to_operand(&self) -> CallType<Operand>
+	{
+		match self
+		{
+			CallType::Call => CallType::Call,
+			CallType::Trap => CallType::Trap,
+			CallType::Interrupt(v) => CallType::Interrupt(v.clone().into()),
+		}
+	}
+}
+
+impl CallType<Operand>
+{
+	pub(crate) fn to_value(&self) -> CallType<Value>
+	{
+		match self
+		{
+			CallType::Call => CallType::Call,
+			CallType::Trap => CallType::Trap,
+			CallType::Interrupt(op) => CallType::Interrupt(op.get_value().clone()),
+		}
+	}
+}
+
 /// The specific state a Scry execution core is in.
 ///
 /// An execution state contains all core information between two execution
@@ -428,7 +506,7 @@ pub struct ExecState
 	///
 	/// The first frame is of the current function's caller, the next is the
 	/// caller of the caller and so on. May be empty.
-	pub frame_stack: Vec<CallFrameState>,
+	pub frame_stack: Vec<(CallFrameState, CallType<Value>)>,
 
 	/// Number of free bytes available for the program stack.
 	///
@@ -445,7 +523,7 @@ impl ExecState
 	/// * The address space is no large than usize
 	pub fn validate(&self) -> Result<(), String>
 	{
-		let frames = once(&self.frame).chain(self.frame_stack.iter());
+		let frames = once(&self.frame).chain(self.frame_stack.iter().map(|(frame, _)| frame));
 
 		// Validate frames
 		for f in frames.clone()
@@ -457,7 +535,7 @@ impl ExecState
 		}
 
 		// Check no stack blocks overlap
-		self.frame_stack.iter().fold(
+		self.frame_stack.iter().map(|(frame, _)| frame).fold(
 			Ok(self.frame.stack.block.address + self.frame.stack.block.size),
 			|addr: Result<_, String>, frame| {
 				if let Ok(addr) = addr

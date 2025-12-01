@@ -2,7 +2,7 @@ use duplicate::duplicate_item;
 use quickcheck_macros::quickcheck;
 use scry_sim::{
 	arbitrary::{LimitedOps, NoCF, Restriction, SimpleOps},
-	CallFrameState, ExecState,
+	CallFrameState, CallType, ExecState, Value,
 };
 
 /// Tests that all arbitrarily generated states are valid
@@ -24,7 +24,12 @@ fn state_unaligned_address(mut state: ExecState) -> bool
 
 /// Tests that any state with an invalid frame is invalid
 #[quickcheck]
-fn state_invalid_frame(mut state: ExecState, mut frame: CallFrameState, idx: usize) -> bool
+fn state_invalid_frame(
+	mut state: ExecState,
+	mut frame: CallFrameState,
+	call_type: CallType<Value>,
+	idx: usize,
+) -> bool
 {
 	// Create invalid by making return address unaligned
 	if frame.ret_addr % 2 == 0
@@ -37,11 +42,11 @@ fn state_invalid_frame(mut state: ExecState, mut frame: CallFrameState, idx: usi
 	if insert_idx == 0
 	{
 		let old = std::mem::replace(&mut state.frame, frame);
-		state.frame_stack.insert(0, old);
+		state.frame_stack.insert(0, (old, call_type));
 	}
 	else
 	{
-		state.frame_stack.insert(insert_idx - 1, frame);
+		state.frame_stack.insert(insert_idx - 1, (frame, call_type));
 	}
 
 	state.validate().is_err()
