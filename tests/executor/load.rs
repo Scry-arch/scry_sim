@@ -111,6 +111,8 @@ fn test_issue_load(
 	{
 		0
 	};
+
+	expected_state.foli = loaded_op.clone().into();
 	if let Some(list) = expected_state.frame.op_queue.get_mut(&target_offset)
 	{
 		list.push(loaded_op);

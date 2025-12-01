@@ -178,6 +178,7 @@ fn test_arithmetic_instruction<const OPS_IN: usize, const OPS_OUT: usize>(
 		)
 		.unwrap();
 	}
+	expected_state.foli = result_values[0].clone();
 
 	let result_bytes = result_values.iter().fold(0, |acc, v| acc + v.scale());
 
@@ -296,7 +297,7 @@ fn test_alu2_instruction<const OPS: usize>(
 			}
 			duplicate!{
 				[
-					var 		order				first_offset;
+					var 		order							first_offset;
 					[FirstLow] 	[res.0.into(), res.1.into()] 	[offset];
 					[FirstHigh]	[res.1.into(), res.0.into()] 	[offset];
 					[NextLow] 	[res.0.into(), res.1.into()] 	[0];
@@ -761,7 +762,7 @@ fn name(
 					if out_var == FirstLow || out_var == FirstHigh { offset.value as usize}else {0},
 					offset.value as usize
 				],
-				[order]
+				[order],
 			)
 		}
 	)

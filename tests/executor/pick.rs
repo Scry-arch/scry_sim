@@ -44,14 +44,14 @@ fn pick_2_inputs(
 			let target_idx = (target.value + 1) as usize;
 			if let Some(list) = new_op_q.get_mut(&target_idx)
 			{
-				list.rest.push(chosen);
+				list.rest.push(chosen.clone());
 			}
 			else
 			{
-				new_op_q.insert(target_idx, OperandList::new(chosen, vec![]));
+				new_op_q.insert(target_idx, OperandList::new(chosen.clone(), vec![]));
 			}
 
-			new_op_q
+			(new_op_q, Some(chosen))
 		},
 		|_| {
 			[

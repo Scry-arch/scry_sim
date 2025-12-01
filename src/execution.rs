@@ -130,9 +130,12 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 			.borrow_mut()
 			.read_instr(self.control.next_addr, tracker)
 			.unwrap();
-		let instr = Instruction::decode(byteorder::LittleEndian::read_u16(&raw_instr));
+		let instr = Instruction::decode(LittleEndian::read_u16(&raw_instr));
 		{
 			use Instruction::*;
+			let mut foli = None;
+			let mut foli_from_ready = |s: &Self| foli = s.operands.ready_peek().cloned().next();
+
 			match instr
 			{
 				Call(CallVariant::Call, offset) =>
@@ -162,6 +165,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 				},
 				EchoLong(offset) =>
 				{
+					foli_from_ready(&self);
 					self.operands
 						.reorder_ready(offset.value() as usize + 1, tracker);
 					// Discard (now empty) ready list
@@ -169,6 +173,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 				},
 				Duplicate(to_next, tar1, tar2) =>
 				{
+					foli_from_ready(&self);
 					let ops: Vec<_> = self.operands.ready_peek().cloned().collect();
 					if to_next
 					{
@@ -189,12 +194,14 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 				},
 				Echo(to_next, tar1, tar2) =>
 				{
+					foli_from_ready(&self);
 					self.operands
 						.reorder(0, 1, tar2.value as usize + 1, tracker);
 					self.operands
 						.reorder(0, 0, tar1.value as usize + 1, tracker);
 					if to_next
 					{
+						foli_from_ready(&self);
 						self.operands.reorder_ready(1, tracker);
 					}
 					// Discard (maybe empty) ready list
@@ -202,11 +209,11 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 				},
 				Alu(variant, offset) =>
 				{
-					self.perform_alu(variant, offset, tracker)?;
+					foli = Some(self.perform_alu(variant, offset, tracker)?);
 				},
 				Alu2(variant, out, offset) =>
 				{
-					self.perform_alu2(variant, out, offset, tracker)?;
+					foli = Some(self.perform_alu2(variant, out, offset, tracker)?);
 				},
 				Constant(typ_bits, bits) =>
 				{
@@ -226,10 +233,12 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 						},
 					);
 
-					let new_val =
-						Value::singleton_typed(typ.into(), Scalar::Val(bytes.into_boxed_slice()));
+					let new_val: Operand =
+						Value::singleton_typed(typ.into(), Scalar::Val(bytes.into_boxed_slice()))
+							.into();
 
-					self.operands.push_operand(1, new_val.into(), tracker);
+					self.operands.push_operand(1, new_val.clone(), tracker);
+					foli = Some(new_val);
 
 					// Forward any ready operands to the next list
 					self.operands.reorder_ready(1, tracker);
@@ -277,7 +286,12 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 						.unwrap()
 					};
 
-					self.perform_load(typ, effective_address, offset.value as usize, tracker);
+					foli = Some(self.perform_load(
+						typ,
+						effective_address,
+						offset.value as usize,
+						tracker,
+					))
 				},
 				LoadStack(typ, index) =>
 				{
@@ -289,7 +303,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 						index.value as usize,
 					);
 
-					self.perform_load(read_typ, effective_address, 0, tracker);
+					foli = Some(self.perform_load(read_typ, effective_address, 0, tracker));
 					tracker.add_stat(Metric::StackReads, 1);
 					tracker.add_stat(Metric::StackReadBytes, read_typ.scale());
 				},
@@ -308,13 +322,11 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 							.iter()
 							.all(|b| *b == 0)
 					};
+					let choose_idx = if choose_first { 1 } else { 2 };
+					foli = self.operands.ready_peek().cloned().nth(choose_idx);
 
-					self.operands.reorder(
-						0,
-						if choose_first { 1 } else { 2 },
-						(target.value + 1) as usize,
-						tracker,
-					);
+					self.operands
+						.reorder(0, choose_idx, (target.value + 1) as usize, tracker);
 
 					// Consume the condition, discard the remaining
 					self.get_ready_iter(tracker).next();
@@ -402,15 +414,13 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 					);
 					let result_type = ValueType::Uint(self.addr_space);
 
-					self.operands.push_operand(
-						0,
-						Value::singleton_typed(
-							result_type,
-							Scalar::from_sized(effective_address, result_type.scale()),
-						)
-						.into(),
-						tracker,
-					);
+					let result: Operand = Value::singleton_typed(
+						result_type,
+						Scalar::from_sized(effective_address, result_type.scale()),
+					)
+					.into();
+					foli = Some(result.clone());
+					self.operands.push_operand(0, result, tracker);
 				},
 				Cast(typ, offset) =>
 				{
@@ -418,7 +428,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 
 					let to_cast = self.get_ready_iter(tracker).next().unwrap();
 
-					let casted = Value::singleton_typed(
+					let casted: Operand = Value::singleton_typed(
 						target_typ,
 						if to_cast.typ.scale() < target_typ.scale()
 						{
@@ -431,11 +441,13 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 							bytes.resize(target_typ.scale(), 0);
 							Scalar::Val(bytes.into_boxed_slice())
 						},
-					);
+					)
+					.into();
 					let target = offset.value;
 
-					self.operands
-						.push_operand(target as usize, casted.into(), tracker)
+					foli = Some(casted.clone());
+
+					self.operands.push_operand(target as usize, casted, tracker)
 				},
 				instr =>
 				{
@@ -443,6 +455,9 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 					todo!()
 				},
 			}
+
+			self.operands
+				.set_foli(foli.unwrap_or(Value::new_nar::<u8>(0).into()));
 		}
 		if self
 			.control
@@ -459,13 +474,14 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 	/// Loads a value of the given type from memory at the given address.
 	///
 	/// Outputs the loaded value to the operand queue at the given offset.
+	/// Returns the loaded operand.
 	fn perform_load(
 		&mut self,
 		typ: ValueType,
 		effective_address: usize,
 		offset: usize,
 		tracker: &mut impl MetricTracker,
-	)
+	) -> Operand
 	{
 		let mut loaded = Value::new_nar_typed(typ, 0);
 		if let Err((_err, _addr)) =
@@ -477,8 +493,10 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 		}
 		else
 		{
+			let loaded_op = Operand::from(loaded);
 			self.operands
-				.push_operand(offset, Operand::from(loaded), tracker);
+				.push_operand(offset, loaded_op.clone(), tracker);
+			loaded_op
 		}
 	}
 
@@ -717,12 +735,14 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 	/// The given variant is the Alu instruction to execute with the offset
 	/// being which list the result should go to (0 means the first list after
 	/// the list of the inputs has been discarded).
+	///
+	/// Returns the FOLI if successful.
 	fn perform_alu(
 		&mut self,
 		variant: AluVariant,
 		offset: Bits<5, false>,
 		tracker: &mut impl MetricTracker,
-	) -> Result<(), ExecError>
+	) -> Result<Operand, ExecError>
 	{
 		let (typ, mut result_scalars) = {
 			use AluVariant::*;
@@ -839,14 +859,12 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 
 			(typ, result_scalars)
 		};
-		self.operands.push_operand(
-			offset.value as usize,
-			Value::new_typed(typ, result_scalars.remove(0), result_scalars)
-				.unwrap()
-				.into(),
-			tracker,
-		);
-		Ok(())
+		let result: Operand = Value::new_typed(typ, result_scalars.remove(0), result_scalars)
+			.unwrap()
+			.into();
+		self.operands
+			.push_operand(offset.value as usize, result.clone(), tracker);
+		Ok(result)
 	}
 
 	/// Executes an Alu2 instruction, consuming the needed inputs and putting
@@ -856,13 +874,15 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 	/// being which list a result should go to (0 means the first list after
 	/// the list of the inputs has been discarded) according to the output
 	/// variant.
+	///
+	/// Returns the FOLI if successful.
 	fn perform_alu2(
 		&mut self,
 		variant: Alu2Variant,
 		out_var: Alu2OutputVariant,
 		offset: Bits<5, false>,
 		tracker: &mut impl MetricTracker,
-	) -> Result<(), ExecError>
+	) -> Result<Operand, ExecError>
 	{
 		let current_addr = self.control.next_addr;
 		let addr_size = self.addr_space;
@@ -938,9 +958,10 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 			)
 		};
 
-		let low = Value::new_typed(out_typ_1, result_scalars_low.remove(0), result_scalars_low)
-			.unwrap()
-			.into();
+		let low: Operand =
+			Value::new_typed(out_typ_1, result_scalars_low.remove(0), result_scalars_low)
+				.unwrap()
+				.into();
 		let high = Value::new_typed(
 			out_typ_2,
 			result_scalars_high.remove(0),
@@ -961,12 +982,13 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 			NextHigh => (0, high, Some(low)),
 			NextLow => (0, low, Some(high)),
 		};
-		self.operands.push_operand(first_offset, first_op, tracker);
+		self.operands
+			.push_operand(first_offset, first_op.clone(), tracker);
 		if let Some(op) = second_op
 		{
 			self.operands.push_operand(offset, op, tracker);
 		}
-		Ok(())
+		Ok(first_op)
 	}
 
 	/// Performs a byte-wise addition with carry.

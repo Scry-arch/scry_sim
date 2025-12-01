@@ -31,6 +31,7 @@ fn return_trigger_impl(
 	// Operands expected to be at the end of the ready list after the return trigger.
 	// They should be following any operands that were already there from before the call.
 	expected_ready_ops: Option<OperandList>,
+	expected_foli: Value,
 	// The metrics expected after the execution step
 	expected_metrics: TrackReport,
 ) -> TestResult
@@ -53,6 +54,7 @@ fn return_trigger_impl(
 			expected_state.frame.op_queue.insert(0, expected_ops);
 		}
 	}
+	expected_state.foli = expected_foli;
 
 	// Because the order of pending reads affects equality, but we don't
 	// want to dictate the order, we insert the expected state into an Executor
@@ -101,7 +103,7 @@ fn return_trigger(
 	// Execute one step on the frame to get the expected result of the next
 	// instruction
 	let mut expected_metrics = TrackReport::new();
-	let expected_ready_ops = match Executor::from_state(
+	let (expected_ready_ops, expected_foli) = match Executor::from_state(
 		&ExecState {
 			addr_space: state.addr_space,
 			address: state.address,
@@ -118,7 +120,7 @@ fn return_trigger(
 		{
 			let state = exec.state();
 			let ready_ops = state.frame.op_queue.get(&0).cloned();
-			ready_ops
+			(ready_ops, state.foli)
 		},
 		_ => return TestResult::discard(),
 	};
@@ -130,6 +132,7 @@ fn return_trigger(
 		call_type,
 		instr.0,
 		expected_ready_ops,
+		expected_foli,
 		expected_metrics,
 	)
 }
@@ -152,6 +155,7 @@ fn return_immediately(
 		call_type,
 		Instruction::Call(CallVariant::Ret, 0.try_into().unwrap()),
 		expected_ready_ops,
+		Value::new_nar::<u8>(0),
 		TrackReport::from([
 			(Metric::IssuedReturns, 1),
 			(Metric::TriggeredReturns, 1),
@@ -180,6 +184,7 @@ fn return_non_trigger(NoCF(state): NoCF<ExecState>, offset: Bits<6, false>) -> T
 		ControlFlowType::Return,
 	);
 	expected_state.address += 2;
+	expected_state.foli = Value::new_nar::<u8>(0);
 
 	use Metric::*;
 	let expected_metrics = TrackReport::from([(IssuedReturns, 1), (InstructionReads, 1)]);
@@ -429,6 +434,7 @@ fn test_jump_immediate(
 		}
 		false
 	};
+	expected_state.foli = Value::new_nar::<u8>(0);
 
 	let mut expected_metrics: TrackReport = [
 		(Metric::InstructionReads, 1),
@@ -763,6 +769,7 @@ fn call_non_trigger(
 		),
 	);
 	expected_state.address += 2;
+	expected_state.foli = Value::new_nar::<u8>(0);
 
 	use Metric::*;
 	let expected_metrics = TrackReport::from([

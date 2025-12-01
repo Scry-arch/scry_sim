@@ -302,6 +302,13 @@ impl OperandStack
 	{
 		&self.foli
 	}
+
+	/// The ***f***irst ***o***utput of ***l***ast the ***i***nstruction
+	/// executed.
+	pub fn set_foli(&mut self, foli: Operand)
+	{
+		self.foli = foli;
+	}
 }
 /// Constructs an OperandQueue equivalent to an execution state
 impl<'a> From<&'a ExecState> for OperandStack

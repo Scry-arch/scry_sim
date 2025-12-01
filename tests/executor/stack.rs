@@ -22,6 +22,7 @@ fn default_expected_state(
 
 	let mut expected_state: ExecState = state.clone();
 	expected_state.address += 2;
+	expected_state.foli = Value::new_nar::<u8>(0);
 	expected_state.frame.op_queue = advance_queue(expected_state.frame.op_queue);
 	(expected_state, test_mem)
 }
@@ -194,6 +195,7 @@ fn stack_address_indexed_static(
 
 	let mut expected_state: ExecState = state.clone();
 	expected_state.address += 2;
+	expected_state.foli = result_addr.clone();
 	if let Some(list) = expected_state.frame.op_queue.get_mut(&0)
 	{
 		list.push(result_addr);

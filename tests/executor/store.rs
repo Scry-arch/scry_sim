@@ -90,6 +90,7 @@ fn test_store_instruction<const ADDR_OPS: usize>(
 
 	let mut expected_state = state.clone();
 	expected_state.address += 2;
+	expected_state.foli = Value::new_nar::<u8>(0);
 
 	let step_result = test_execution_step::<BlockedMemory>(
 		&test_state,
@@ -267,6 +268,7 @@ fn store_nan_addr(
 
 	let mut expected_state = state.clone();
 	expected_state.address += 2;
+	expected_state.foli = Value::new_nar::<u8>(0);
 
 	test_execution_step(
 		&test_state,
@@ -294,6 +296,7 @@ fn store_nan_value(NoCF(state): NoCF<ExecState>, address: Value, to_store: Value
 
 	let mut expected_state = state.clone();
 	expected_state.address += 2;
+	expected_state.foli = Value::new_nar::<u8>(0);
 
 	test_execution_step(
 		&test_state,

@@ -144,19 +144,21 @@ pub fn test_execution_step_exceptions<M: Memory + Debug>(
 /// match those returned by `expected_metrics` (plus that 1 instruction has been
 /// read).
 ///
-/// Both `expected_op_queue` and `expected_metrics` are given the current
-/// function's operand queue before the step is performed.
+/// `expected_op_queue` must return the expected operand queue and the expected
+/// FOLI. `expected_metrics` must return the expected metrics.
 fn test_simple_instruction(
 	NoCF(state): NoCF<ExecState>,
 	instr: Instruction,
-	expected_op_queue: impl FnOnce(&OperandQueue) -> OperandQueue,
+	expected_op_queue: impl FnOnce(&OperandQueue) -> (OperandQueue, Option<Value>),
 	expected_metrics: impl FnOnce(&OperandQueue) -> TrackReport,
 ) -> TestResult
 {
 	// Build expected state
 	let mut expected_state = state.clone();
 	expected_state.address += 2;
-	expected_state.frame.op_queue = expected_op_queue(&state.frame.op_queue);
+	let (exp_opq, exp_foli) = expected_op_queue(&state.frame.op_queue);
+	expected_state.frame.op_queue = exp_opq;
+	expected_state.foli = exp_foli.unwrap_or(Value::new_nar::<u8>(0));
 
 	// Advance expected operand queue by 1
 	assert!(expected_state.frame.op_queue.get(&0).is_none());
@@ -197,7 +199,7 @@ fn instruction_nop(state: NoCF<ExecState>) -> TestResult
 			let mut new_op_q = old_op_queue.clone();
 			// Discard ready list if present
 			new_op_q.remove(&0);
-			new_op_q
+			(new_op_q, None)
 		},
 		|_| [].into(),
 	)
@@ -244,19 +246,19 @@ fn instruction_constant(
 
 			let ops_rest = if let Some(ops) = new_op_q.get_mut(&1)
 			{
-				ops.push(new_const);
+				ops.push(new_const.clone());
 				ops
 			}
 			else
 			{
-				new_op_q.insert(1, OperandList::new(new_const, Vec::new()));
+				new_op_q.insert(1, OperandList::new(new_const.clone(), Vec::new()));
 				new_op_q.get_mut(&1).unwrap()
 			};
 			if let Some(old_ops) = old_operands
 			{
 				ops_rest.extend(old_ops.into_iter());
 			}
-			new_op_q
+			(new_op_q, Some(new_const))
 		},
 		|old_op_queue| {
 			let old_op_count = old_op_queue.get(&0).map_or(0, |ops| ops.len());

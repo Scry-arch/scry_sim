@@ -68,6 +68,7 @@ fn name(
 	let target_value = Value::singleton::<to_typ>(Scalar::Val(target_bytes.into_boxed_slice()));
 
 	let mut expected_state = state.clone();
+	expected_state.foli = target_value.clone();
 	if let Some(list) = expected_state
 		.frame
 		.op_queue

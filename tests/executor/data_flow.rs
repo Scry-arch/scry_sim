@@ -19,6 +19,7 @@ fn duplicate(
 		Instruction::Duplicate(dup_next, target1, target2),
 		|old_op_queue| {
 			let mut new_op_q = old_op_queue.clone();
+			let mut foli = None;
 
 			if let Some(old_ops) = new_op_q.remove(&0)
 			{
@@ -40,8 +41,9 @@ fn duplicate(
 				}
 				push_idx(target1.value as usize + 1);
 				push_idx(target2.value as usize + 1);
+				foli = Some(old_ops.first);
 			}
-			new_op_q
+			(new_op_q, foli)
 		},
 		|old_op_queue| {
 			let (old_op_ready, old_op_ready_bytes) =
@@ -78,6 +80,7 @@ fn echo(
 		Instruction::Echo(rest_next, target1, target2),
 		|old_op_queue| {
 			let mut new_op_q = old_op_queue.clone();
+			let mut foli = None;
 
 			if let Some(old_ops) = new_op_q.remove(&0)
 			{
@@ -102,28 +105,34 @@ fn echo(
 					let tar1_idx = target1.value as usize + 1;
 					if let Some(list) = new_op_q.get_mut(&tar1_idx)
 					{
-						list.push(first);
+						list.push(first.clone());
 					}
 					else
 					{
-						new_op_q.insert(tar1_idx, OperandList::new(first, vec![]));
+						new_op_q.insert(tar1_idx, OperandList::new(first.clone(), vec![]));
 					}
 					// handle the rest if needed
 					if rest_next
 					{
+						let next = iter.next();
+						foli = next.clone();
 						if let Some(list) = new_op_q.get_mut(&1)
 						{
-							list.extend(iter);
+							list.extend(next.into_iter().chain(iter));
 						}
-						else if let Some(first_rest) = iter.next()
+						else if let Some(first_rest) = next
 						{
 							new_op_q.insert(1, OperandList::new(first_rest, iter.collect()));
 						}
 					}
+					else
+					{
+						foli = Some(first);
+					}
 				}
 			}
 
-			new_op_q
+			(new_op_q, foli)
 		},
 		|old_op_queue| {
 			let reordered = old_op_queue.get(&0).map_or(0, |list| {
@@ -150,23 +159,26 @@ fn echo_long(state: NoCF<ExecState>, target: Bits<10, false>) -> TestResult
 		Instruction::EchoLong(target),
 		|old_op_queue| {
 			let mut new_op_q = old_op_queue.clone();
+			let mut foli = None;
 
 			if let Some(old_ops) = new_op_q.remove(&0)
 			{
 				let mut iter = old_ops.into_iter();
+				let next = iter.next();
+				foli = next.clone();
 
 				let tar_idx = target.value as usize + 1;
 				if let Some(list) = new_op_q.get_mut(&tar_idx)
 				{
-					list.extend(iter);
+					list.extend(next.into_iter().chain(iter));
 				}
-				else if let Some(first) = iter.next()
+				else if let Some(first) = next
 				{
 					new_op_q.insert(tar_idx, OperandList::new(first, iter.collect()));
 				}
 			}
 
-			new_op_q
+			(new_op_q, foli)
 		},
 		|old_op_queue| {
 			let reordered = old_op_queue.get(&0).map_or(0, OperandList::len);
@@ -187,7 +199,7 @@ fn noop(state: NoCF<ExecState>) -> TestResult
 			// discard ready list
 			let _ = new_op_q.remove(&0);
 
-			new_op_q
+			(new_op_q, None)
 		},
 		|_| [].into(),
 	)

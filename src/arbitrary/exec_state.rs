@@ -637,6 +637,14 @@ impl Arbitrary for ExecState
 						None
 					}
 					.into_iter(),
+				)
+				.chain(
+					// Shrink foli
+					self.foli.shrink().map(move |v| {
+						let mut clone = clone3.clone();
+						clone.foli = v;
+						clone
+					}),
 				),
 		)
 	}
