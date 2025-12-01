@@ -56,12 +56,17 @@ pub struct OperandStack
 
 	/// The operands that should be used by the next instruction
 	ready: VecDeque<Operand>,
+
+	/// The ***f***irst ***o***utput of ***l***ast the ***i***nstruction
+	/// executed.
+	foli: Operand,
 }
 impl OperandStack
 {
 	pub fn new(ready_ops: impl Iterator<Item = Value>) -> Self
 	{
 		Self {
+			foli: Value::new_nar::<u8>(0).into(),
 			stack: VecDeque::new(),
 			queue: VecDeque::new(),
 			ready: VecDeque::from_iter(ready_ops.map(|v| v.into())),
@@ -290,6 +295,13 @@ impl OperandStack
 				stack_base
 			}
 	}
+
+	/// The ***f***irst ***o***utput of ***l***ast the ***i***nstruction
+	/// executed.
+	pub fn get_foli(&self) -> &Operand
+	{
+		&self.foli
+	}
 }
 /// Constructs an OperandQueue equivalent to an execution state
 impl<'a> From<&'a ExecState> for OperandStack
@@ -313,6 +325,7 @@ impl<'a> From<&'a ExecState> for OperandStack
 		let mut curr_frame_op_queue = frame_op_queue(&state.frame);
 		let first_list = curr_frame_op_queue.pop_front().unwrap_or(VecDeque::new());
 		Self {
+			foli: state.foli.clone().into(),
 			stack: state.frame_stack.clone().into_iter().fold(
 				VecDeque::new(),
 				|mut stack, (frame, _)| {

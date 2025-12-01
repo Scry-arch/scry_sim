@@ -499,6 +499,10 @@ pub struct ExecState
 	/// Next address to be executed.
 	pub address: usize,
 
+	/// The ***f***irst ***o***utput of ***l***ast the ***i***nstruction
+	/// executed.
+	pub foli: Value,
+
 	/// Current call frame
 	pub frame: CallFrameState,
 

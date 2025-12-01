@@ -518,6 +518,7 @@ impl Arbitrary for ExecState
 			// without causing overflow.
 			// Also ensure address precedes all branch trigger locations
 			address: 0,
+			foli: Arbitrary::arbitrary(g),
 			frame: CallFrameState {
 				// Dummy frame
 				ret_addr: 0,

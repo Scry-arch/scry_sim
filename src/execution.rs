@@ -88,6 +88,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 		ExecState {
 			addr_space: self.addr_space,
 			address: self.control.next_addr,
+			foli: self.operands.get_foli().get_value().clone(),
 			frame: first_frame,
 			frame_stack: rest_frames,
 			stack_buffer: self.stack_buffer.clone(),

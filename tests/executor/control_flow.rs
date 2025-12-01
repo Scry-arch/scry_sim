@@ -105,6 +105,7 @@ fn return_trigger(
 		&ExecState {
 			addr_space: state.addr_space,
 			address: state.address,
+			foli: Value::new_nar::<u8>(0),
 			frame: frame.clone(),
 			frame_stack: Vec::new(),
 			stack_buffer: 0,
@@ -560,6 +561,7 @@ fn call_trigger_empty_stack()
 		NoCF(ExecState {
 			addr_space: 0,
 			address: 0,
+			foli: Value::new_nar::<u8>(0),
 			frame: Default::default(),
 			frame_stack: vec![],
 			stack_buffer: 0,
