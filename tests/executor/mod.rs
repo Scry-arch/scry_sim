@@ -3,10 +3,11 @@ use quickcheck::{Arbitrary, Gen, TestResult};
 use quickcheck_macros::quickcheck;
 use scry_isa::{Alu2Variant, AluVariant, Bits, CallVariant, Instruction, Type};
 use scry_sim::{
-	arbitrary::NoCF, ExecError, ExecState, Executor, Memory, Metric, MetricReporter, MetricTracker,
-	OperandList, OperandQueue, Scalar, TrackReport, Value,
+	arbitrary::{LimitedOps, NoCF, SimpleOps},
+	ExecError, ExecState, Executor, Memory, Metric, MetricReporter, MetricTracker, OperandList,
+	OperandQueue, Scalar, TrackReport, Value, ValueType,
 };
-use std::{borrow::BorrowMut, fmt::Debug};
+use std::{borrow::BorrowMut, fmt::Debug, mem::replace};
 
 mod alu_instructions;
 mod cast;
@@ -264,6 +265,187 @@ fn instruction_constant(
 				(Metric::QueuedValues, 1),
 				(Metric::QueuedValueBytes, typ.size()),
 				(Metric::ReorderedOperands, old_op_count),
+			]
+			.into()
+		},
+	)
+}
+
+/// Tests the Grow instruction on values
+#[quickcheck]
+fn instruction_grow(
+	state: SimpleOps<LimitedOps<NoCF<ExecState>, 1, 4>>,
+	immediate: u8,
+) -> TestResult
+{
+	let ready_q = state.0 .0 .0.frame.op_queue.get(&0).unwrap();
+	let in_val = ready_q.first.clone();
+	let mut result = in_val
+		.first
+		.bytes()
+		.unwrap()
+		.iter()
+		.cloned()
+		.take(in_val.typ.scale() - 1)
+		.collect::<Vec<u8>>();
+	result.insert(0, immediate);
+	let result_value = Value::singleton_typed(in_val.typ, Scalar::Val(result.into_boxed_slice()));
+
+	test_simple_instruction(
+		state.0 .0.clone(),
+		Instruction::Grow(Bits {
+			value: immediate as i32,
+		}),
+		|old_op_queue| {
+			let mut new_op_q = old_op_queue.clone();
+
+			let ready_q = new_op_q.remove(&0).unwrap();
+
+			// Put the produced value on the next queue with the rest
+			if let Some(q) = new_op_q.get_mut(&1)
+			{
+				q.rest.push(result_value.clone());
+				q.rest.extend(ready_q.rest.into_iter());
+			}
+			else
+			{
+				new_op_q.insert(1, OperandList::new(result_value.clone(), ready_q.rest));
+			}
+
+			new_op_q
+		},
+		|_| {
+			[
+				(Metric::QueuedValues, 1),
+				(Metric::QueuedValueBytes, in_val.typ.scale()),
+				(Metric::ConsumedOperands, 1),
+				(Metric::ConsumedBytes, in_val.typ.scale()),
+				(Metric::ReorderedOperands, ready_q.rest.len()),
+			]
+			.into()
+		},
+	)
+}
+
+/// Tests the Grow instruction on values
+#[quickcheck]
+fn instruction_grow_nan(
+	mut state: LimitedOps<NoCF<ExecState>, 0, 3>,
+	nan_type: ValueType,
+	immediate: u8,
+) -> TestResult
+{
+	let ready_q_len = state.0 .0.frame.op_queue.get(&0).map_or(0, |l| l.len());
+	let result_value = Value::new_nan_typed(nan_type);
+
+	if let Some(q) = state.0 .0.frame.op_queue.get_mut(&0)
+	{
+		let old_first = replace(&mut q.first, result_value.clone());
+		q.rest.insert(0, old_first);
+	}
+	else
+	{
+		state
+			.0
+			 .0
+			.frame
+			.op_queue
+			.insert(0, OperandList::new(result_value.clone(), Vec::new()));
+	}
+
+	test_simple_instruction(
+		state.0,
+		Instruction::Grow(Bits {
+			value: immediate as i32,
+		}),
+		|old_op_queue| {
+			let mut new_op_q = old_op_queue.clone();
+
+			let ready_q = new_op_q.remove(&0).unwrap();
+
+			// Put the produced value on the next queue with the rest
+			if let Some(q) = new_op_q.get_mut(&1)
+			{
+				q.rest.push(result_value.clone());
+				q.rest.extend(ready_q.rest.into_iter());
+			}
+			else
+			{
+				new_op_q.insert(1, OperandList::new(result_value.clone(), ready_q.rest));
+			}
+
+			new_op_q
+		},
+		|_| {
+			[
+				(Metric::QueuedValues, 1),
+				(Metric::QueuedValueBytes, nan_type.scale()),
+				(Metric::ConsumedOperands, 1),
+				(Metric::ConsumedBytes, nan_type.scale()),
+				(Metric::ReorderedOperands, ready_q_len),
+			]
+			.into()
+		},
+	)
+}
+
+/// Tests the Grow instruction on values
+#[quickcheck]
+fn instruction_grow_nar(
+	mut state: LimitedOps<NoCF<ExecState>, 0, 3>,
+	nar_type: ValueType,
+	immediate: u8,
+	nar_payload: usize,
+) -> TestResult
+{
+	let ready_q_len = state.0 .0.frame.op_queue.get(&0).map_or(0, |l| l.len());
+	let result_value = Value::new_nar_typed(nar_type, nar_payload);
+
+	if let Some(q) = state.0 .0.frame.op_queue.get_mut(&0)
+	{
+		let old_first = replace(&mut q.first, result_value.clone());
+		q.rest.insert(0, old_first);
+	}
+	else
+	{
+		state
+			.0
+			 .0
+			.frame
+			.op_queue
+			.insert(0, OperandList::new(result_value.clone(), Vec::new()));
+	}
+
+	test_simple_instruction(
+		state.0,
+		Instruction::Grow(Bits {
+			value: immediate as i32,
+		}),
+		|old_op_queue| {
+			let mut new_op_q = old_op_queue.clone();
+
+			let ready_q = new_op_q.remove(&0).unwrap();
+
+			// Put the produced value on the next queue with the rest
+			if let Some(q) = new_op_q.get_mut(&1)
+			{
+				q.rest.push(result_value.clone());
+				q.rest.extend(ready_q.rest.into_iter());
+			}
+			else
+			{
+				new_op_q.insert(1, OperandList::new(result_value.clone(), ready_q.rest));
+			}
+
+			new_op_q
+		},
+		|_| {
+			[
+				(Metric::QueuedValues, 1),
+				(Metric::QueuedValueBytes, nar_type.scale()),
+				(Metric::ConsumedOperands, 1),
+				(Metric::ConsumedBytes, nar_type.scale()),
+				(Metric::ReorderedOperands, ready_q_len),
 			]
 			.into()
 		},

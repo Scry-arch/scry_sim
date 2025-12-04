@@ -435,6 +435,35 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 					self.operands
 						.push_operand(target as usize, casted.into(), tracker)
 				},
+				Grow(imm) =>
+				{
+					let to_grow = self.operands.pop_ready(tracker).unwrap();
+					let scale = to_grow.scale();
+
+					let result: Operand = match to_grow.get_first()
+					{
+						Scalar::Val(bytes) =>
+						{
+							let mut result: Vec<_> =
+								bytes.iter().cloned().take(scale - 1).collect();
+							result.insert(0, imm.value as u8);
+							Value::singleton_typed(
+								to_grow.typ,
+								Scalar::Val(result.into_boxed_slice()),
+							)
+						},
+						_ =>
+						{
+							// Result is the same as input
+							to_grow
+						},
+					}
+					.into();
+					self.operands.push_operand(1, result, tracker);
+					self.operands.reorder_ready(1, tracker);
+
+					self.discard_ready_list(tracker);
+				},
 				instr =>
 				{
 					dbg!(instr);

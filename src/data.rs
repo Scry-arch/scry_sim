@@ -92,12 +92,7 @@ impl OperandStack
 
 			fn next(&mut self) -> Option<Self::Item>
 			{
-				self.stack.ready.pop_front().and_then(|op: Operand| {
-					let val = op.get_value().clone();
-					self.tracker.add_stat(Metric::ConsumedOperands, 1);
-					self.tracker.add_stat(Metric::ConsumedBytes, val.size());
-					Some(val)
-				})
+				self.stack.pop_ready(self.tracker)
 			}
 		}
 		impl<'b, Ti: MetricTracker> Drop for RemoveIter<'b, Ti>
@@ -111,6 +106,17 @@ impl OperandStack
 			stack: self,
 			tracker,
 		}
+	}
+
+	/// Extracts the first operand on the ready queue
+	pub fn pop_ready<T: MetricTracker>(&mut self, tracker: &mut T) -> Option<Value>
+	{
+		self.ready.pop_front().and_then(|op: Operand| {
+			let val = op.get_value().clone();
+			tracker.add_stat(Metric::ConsumedOperands, 1);
+			tracker.add_stat(Metric::ConsumedBytes, val.size());
+			Some(val)
+		})
 	}
 
 	/// An iterator peeking at the operands at the front of the operand queue.
