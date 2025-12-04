@@ -449,6 +449,41 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 
 					self.operands.push_operand(target as usize, casted, tracker)
 				},
+				Grow(imm) =>
+				{
+					let result: Operand = {
+						let old_foli = self.operands.get_foli().get_value();
+						match old_foli.get_first()
+						{
+							Scalar::Val(bytes) =>
+							{
+								let mut result: Vec<_> =
+									bytes.iter().cloned().take(old_foli.scale() - 1).collect();
+								result.insert(0, imm.value as u8);
+								Value::singleton_typed(
+									old_foli.typ,
+									Scalar::Val(result.into_boxed_slice()),
+								)
+							},
+							_ =>
+							{
+								// Result is the same as input
+								old_foli.clone()
+							},
+						}
+						.into()
+					};
+					foli = Some(result.clone());
+					self.operands.push_operand(1, result, tracker);
+					self.discard_ready_list(tracker);
+
+					// Track consuming the FOLI
+					tracker.add_stat(
+						Metric::ConsumedBytes,
+						foli.as_ref().unwrap().get_value().scale(),
+					);
+					tracker.add_stat(Metric::ConsumedOperands, 1);
+				},
 				instr =>
 				{
 					dbg!(instr);

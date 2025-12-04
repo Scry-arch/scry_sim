@@ -3,8 +3,9 @@ use quickcheck::{Arbitrary, Gen, TestResult};
 use quickcheck_macros::quickcheck;
 use scry_isa::{Alu2Variant, AluVariant, Bits, CallVariant, Instruction, Type};
 use scry_sim::{
-	arbitrary::NoCF, ExecError, ExecState, Executor, Memory, Metric, MetricReporter, MetricTracker,
-	OperandList, OperandQueue, Scalar, TrackReport, Value,
+	arbitrary::{ArbValue, NoCF},
+	ExecError, ExecState, Executor, Memory, Metric, MetricReporter, MetricTracker, OperandList,
+	OperandQueue, Scalar, TrackReport, Value,
 };
 use std::{borrow::BorrowMut, fmt::Debug};
 
@@ -266,6 +267,152 @@ fn instruction_constant(
 				(Metric::QueuedValues, 1),
 				(Metric::QueuedValueBytes, typ.size()),
 				(Metric::ReorderedOperands, old_op_count),
+			]
+			.into()
+		},
+	)
+}
+
+/// Tests the Grow instruction on values
+#[quickcheck]
+fn instruction_grow(
+	mut state: NoCF<ExecState>,
+	foli: ArbValue<false, false>,
+	immediate: u8,
+) -> TestResult
+{
+	let mut result = foli
+		.0
+		.first
+		.bytes()
+		.unwrap()
+		.iter()
+		.cloned()
+		.take(foli.0.scale() - 1)
+		.collect::<Vec<u8>>();
+	result.insert(0, immediate);
+	let result_value = Value::singleton_typed(foli.0.typ, Scalar::Val(result.into_boxed_slice()));
+
+	state.0.foli = foli.0.clone();
+
+	test_simple_instruction(
+		state,
+		Instruction::Grow(Bits {
+			value: immediate as i32,
+		}),
+		|old_op_queue| {
+			let mut new_op_q = old_op_queue.clone();
+
+			// Expect all inputs to be discarded
+			let _ = new_op_q.remove(&0);
+
+			// Put the produced value on the next queue
+			if let Some(q) = new_op_q.get_mut(&1)
+			{
+				q.rest.push(result_value.clone());
+			}
+			else
+			{
+				new_op_q.insert(1, OperandList::new(result_value.clone(), Vec::new()));
+			}
+
+			(new_op_q, Some(result_value))
+		},
+		|_| {
+			[
+				(Metric::QueuedValues, 1),
+				(Metric::QueuedValueBytes, foli.0.scale()),
+				(Metric::ConsumedOperands, 1),
+				(Metric::ConsumedBytes, foli.0.scale()),
+			]
+			.into()
+		},
+	)
+}
+
+/// Tests the Grow instruction on Nan
+#[quickcheck]
+fn instruction_grow_nan(mut state: NoCF<ExecState>, immediate: u8) -> TestResult
+{
+	let scale = state.0.foli.typ.scale();
+	let result_value = Value::new_nan_typed(state.0.foli.typ);
+
+	state.0.foli = result_value.clone();
+
+	test_simple_instruction(
+		state,
+		Instruction::Grow(Bits {
+			value: immediate as i32,
+		}),
+		|old_op_queue| {
+			let mut new_op_q = old_op_queue.clone();
+
+			// Expect all inputs to be discarded
+			let _ = new_op_q.remove(&0);
+
+			// Put the produced value on the next queue
+			if let Some(q) = new_op_q.get_mut(&1)
+			{
+				q.rest.push(result_value.clone());
+			}
+			else
+			{
+				new_op_q.insert(1, OperandList::new(result_value.clone(), Vec::new()));
+			}
+
+			(new_op_q, Some(result_value))
+		},
+		|_| {
+			[
+				(Metric::QueuedValues, 1),
+				(Metric::QueuedValueBytes, scale),
+				(Metric::ConsumedOperands, 1),
+				(Metric::ConsumedBytes, scale),
+			]
+			.into()
+		},
+	)
+}
+
+/// Tests the Grow instruction on Nar
+#[quickcheck]
+fn instruction_grow_nar(mut state: NoCF<ExecState>, immediate: u8, nar_payload: usize)
+	-> TestResult
+{
+	let scale = state.0.foli.typ.scale();
+	let result_value = Value::new_nar_typed(state.0.foli.typ, nar_payload);
+
+	state.0.foli = result_value.clone();
+
+	test_simple_instruction(
+		state,
+		Instruction::Grow(Bits {
+			value: immediate as i32,
+		}),
+		|old_op_queue| {
+			let mut new_op_q = old_op_queue.clone();
+
+			// Expect all inputs to be discarded
+			let _ = new_op_q.remove(&0);
+
+			// Put the produced value on the next queue
+			if let Some(q) = new_op_q.get_mut(&1)
+			{
+				q.rest.push(result_value.clone());
+			}
+			else
+			{
+				new_op_q.insert(1, OperandList::new(result_value.clone(), Vec::new()));
+			}
+
+			(new_op_q, Some(result_value))
+		},
+		|_| {
+			[
+				(Metric::QueuedValues, 1),
+				(Metric::QueuedValueBytes, scale),
+				(Metric::ConsumedOperands, 1),
+				(Metric::ConsumedBytes, scale),
 			]
 			.into()
 		},
