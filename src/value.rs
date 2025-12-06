@@ -2,7 +2,7 @@ use byteorder::{ByteOrder, LittleEndian};
 use duplicate::duplicate_item;
 use num_traits::PrimInt;
 use scry_isa::{Bits, Type};
-use std::iter::once;
+use std::{cmp::max, iter::once};
 
 /// The type of a value
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -94,6 +94,21 @@ impl ValueType
 		else
 		{
 			ValueType::Int(log2)
+		}
+	}
+
+	/// Returns the effective type between this and the other.
+	pub fn get_effective_type(&self, other: &Self) -> Self
+	{
+		let unsigned = !self.is_signed_integer() || !other.is_signed_integer();
+		let pow = max(self.power(), other.power());
+		if unsigned
+		{
+			ValueType::Uint(pow)
+		}
+		else
+		{
+			ValueType::Int(pow)
 		}
 	}
 }

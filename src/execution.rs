@@ -726,18 +726,6 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 		}
 	}
 
-	fn fail_if_diff_types(v1: ValueType, v2: ValueType) -> Result<(), ExecError>
-	{
-		if v1 != v2
-		{
-			Err(ExecError::Exception("Mismatched types".into()))
-		}
-		else
-		{
-			Ok(())
-		}
-	}
-
 	/// Executes an Alu instruction, consuming the needed inputs and putting the
 	/// result in the relevant list.
 	///
@@ -770,14 +758,13 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 						"Alu instruction missing first operand".into(),
 					))?;
 					Self::fail_if_nan_nar(&in1)?;
-					let typ = in1.value_type();
 
 					let in2 = in2.unwrap_or_else(|| {
 						let mut scalars: Vec<_> = in1
 							.iter()
 							.map(|_| {
 								let mut bytes = Vec::new();
-								bytes.resize(typ.scale(), 0);
+								bytes.resize(in1.value_type().scale(), 0);
 								match variant
 								{
 									Add | Sub => bytes[0] = 1,                      // implicit 1
@@ -791,14 +778,15 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 								Scalar::Val(bytes.into_boxed_slice())
 							})
 							.collect();
-						Value::new_typed(typ, scalars.remove(0), scalars).unwrap()
+						Value::new_typed(in1.value_type(), scalars.remove(0), scalars).unwrap()
 					});
 
 					Self::fail_if_nan_nar(&in2)?;
-					Self::fail_if_diff_types(typ, in2.value_type())?;
 
-					let in1 = in1.iter();
-					let in2 = in2.iter();
+					let (effective_typ, in1_eff, in2_eff) = Self::effective_type(&in1, &in2);
+
+					let in1 = in1_eff.iter();
+					let in2 = in2_eff.iter();
 
 					let func = match variant
 					{
@@ -819,7 +807,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 
 					let typ_out = match variant
 					{
-						Add | Sub | BitAnd | BitOr => typ,
+						Add | Sub | BitAnd | BitOr => effective_typ,
 						Equal | LessThan | GreaterThan => ValueType::Uint(0),
 						_ =>
 						{
@@ -831,7 +819,9 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 
 					for (sc1, sc2) in in1.zip(in2)
 					{
-						result_scalars.push(Scalar::Val(func(sc1, sc2, typ).into_boxed_slice()));
+						result_scalars.push(Scalar::Val(
+							func(sc1, sc2, effective_typ).into_boxed_slice(),
+						));
 					}
 					typ_out
 				},
@@ -876,6 +866,22 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 		Ok(())
 	}
 
+	/// Determines the effective type of the two values, returns it and the
+	/// two values (in order) extended to the effective type where necessary.
+	fn effective_type(in1: &Value, in2: &Value) -> (ValueType, Value, Value)
+	{
+		let effective_typ = in1.typ.get_effective_type(&in2.typ);
+		let in1_eff = Value::singleton_typed(
+			effective_typ,
+			in1.first.extend(effective_typ.scale(), &in1.typ),
+		);
+		let in2_eff = Value::singleton_typed(
+			effective_typ,
+			in2.first.extend(effective_typ.scale(), &in2.typ),
+		);
+		(effective_typ, in1_eff, in2_eff)
+	}
+
 	/// Executes an Alu2 instruction, consuming the needed inputs and putting
 	/// the results in the relevant operand lists.
 	///
@@ -902,7 +908,6 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 				variant, current_addr
 			)))?;
 			Self::fail_if_nan_nar(&in1)?;
-			let typ = in1.value_type();
 
 			let in2 = ins.next();
 			let in2 = in2.unwrap_or({
@@ -912,7 +917,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 						use Alu2Variant::*;
 
 						let mut bytes = Vec::new();
-						bytes.resize(typ.scale(), 0);
+						bytes.resize(in1.typ.scale(), 0);
 						match variant
 						{
 							Add | Sub | ShiftLeft | ShiftRight => bytes[0] = 1,
@@ -922,13 +927,14 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 						Scalar::Val(bytes.into_boxed_slice())
 					})
 					.collect();
-				Value::new_typed(typ, scalars.remove(0), scalars).unwrap()
+				Value::new_typed(in1.typ, scalars.remove(0), scalars).unwrap()
 			});
 			Self::fail_if_nan_nar(&in2)?;
-			Self::fail_if_diff_types(typ, in2.value_type())?;
 
-			let in1 = in1.iter();
-			let in2 = in2.iter();
+			let (effective_typ, in1_eff, in2_eff) = Self::effective_type(&in1, &in2);
+
+			let in1 = in1_eff.iter();
+			let in2 = in2_eff.iter();
 
 			let func = match variant
 			{
@@ -941,19 +947,19 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 			};
 			let (out_typ_1, out_typ_2) = match variant
 			{
-				Alu2Variant::Add => (typ, ValueType::new::<u8>()),
-				Alu2Variant::Sub => (typ, ValueType::new::<u8>()),
-				Alu2Variant::Multiply => (typ, typ),
-				Alu2Variant::ShiftLeft => (typ, typ),
-				Alu2Variant::ShiftRight => (typ, typ),
-				Alu2Variant::Division => (typ, ValueType::Uint(typ.power())),
+				Alu2Variant::Add | Alu2Variant::Sub => (effective_typ, ValueType::new::<u8>()),
+				Alu2Variant::Multiply | Alu2Variant::ShiftLeft | Alu2Variant::ShiftRight =>
+				{
+					(effective_typ, effective_typ)
+				},
+				Alu2Variant::Division => (effective_typ, ValueType::Uint(effective_typ.power())),
 			};
 
 			let mut result_scalars_low = Vec::new();
 			let mut result_scalars_high = Vec::new();
 			for (sc1, sc2) in in1.zip(in2)
 			{
-				let (low, high) = func(sc1, typ, sc2, typ);
+				let (low, high) = func(sc1, effective_typ, sc2, effective_typ);
 				result_scalars_low.push(low);
 				result_scalars_high.push(high);
 			}
@@ -1436,6 +1442,12 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 	fn alu_divide(sc1: &Scalar, typ1: ValueType, sc2: &Scalar, typ2: ValueType)
 		-> (Scalar, Scalar)
 	{
+		if sc2.bytes().unwrap().iter().all(|b| b == &0)
+		{
+			// divide by zero
+			return (Scalar::Nar(0), Scalar::Nar(0));
+		}
+
 		let sc1_ext = sc1.extend(size_of::<u128>(), &typ1);
 		let sc2_ext = sc2.extend(size_of::<u128>(), &typ2);
 

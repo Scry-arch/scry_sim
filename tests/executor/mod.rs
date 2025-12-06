@@ -91,20 +91,39 @@ pub fn test_execution_step<M: Memory + Debug>(
 	{
 		Ok(exec) =>
 		{
-			if exec.state() != *expected_state
-			{
-				TestResult::error(format!(
-					"Unexpected end state (actual != expected):\n{:?}\n !=\n {:?}",
-					exec.state(),
-					expected_state
-				))
-			}
-			else
-			{
-				test_metrics(expected_metrics, &actual_metrics)
-			}
+			check_expected(
+				&exec.state(),
+				expected_state,
+				|| test_metrics(expected_metrics, &actual_metrics),
+				"end state",
+			)
 		},
 		err => TestResult::error(format!("Test step failed: {:?}", err)),
+	}
+}
+
+/// Checks that the actual value is equal to the given.
+///
+/// If not, returns a relevant error message.
+/// If equal, runs the given closure and returns its result.
+/// The message should describe what was unexpected.
+pub fn check_expected<P: PartialEq + Debug>(
+	actual: P,
+	expected: P,
+	then: impl Fn() -> TestResult,
+	msg: &str,
+) -> TestResult
+{
+	if actual != expected
+	{
+		TestResult::error(format!(
+			"Unexpected {} (actual != expected):\n{:?}\n !=\n {:?}",
+			msg, actual, expected
+		))
+	}
+	else
+	{
+		then()
 	}
 }
 

@@ -1,5 +1,5 @@
 use crate::{
-	executor::test_execution_step,
+	executor::{check_expected, test_execution_step, test_metrics},
 	misc::{advance_queue, RepeatingMem},
 };
 use byteorder::{ByteOrder, LittleEndian};
@@ -9,8 +9,8 @@ use quickcheck::TestResult;
 use quickcheck_macros::quickcheck;
 use scry_isa::{Alu2OutputVariant, Alu2Variant, AluVariant, Bits, Instruction};
 use scry_sim::{
-	arbitrary::{LimitedOps, NoCF, SimpleOps},
-	ExecState, Metric, OperandList, Scalar, TrackReport, Value,
+	arbitrary::{ArbValue, LimitedOps, NoCF, SimpleOps},
+	ExecState, Executor, Metric, MetricTracker, OperandList, Scalar, TrackReport, Value, ValueType,
 };
 use std::{
 	cmp::min,
@@ -764,5 +764,223 @@ fn name(
 				[order]
 			)
 		}
+	)
+}
+
+/// Tests instructions using effective types.
+///
+/// Converts the given values into their mutual effective type and checks
+/// that running the given instruction produces the same result when using their
+/// original types as their effective type.
+fn test_effective_types(
+	state: LimitedOps<NoCF<ExecState>, 0, 2>,
+	v1: Value,
+	v2: Value,
+	instr: Instruction,
+) -> TestResult
+{
+	if
+	// Testing only different types
+	v1.typ == v2.typ
+	{
+		return TestResult::discard();
+	}
+
+	let effective_typ = v1.typ.get_effective_type(&v2.typ);
+
+	let v1_ext = Value::singleton_typed(
+		effective_typ,
+		v1.first.extend(effective_typ.scale(), &v1.typ),
+	);
+	let v2_ext = Value::singleton_typed(
+		effective_typ,
+		v2.first.extend(effective_typ.scale(), &v2.typ),
+	);
+
+	let mem = RepeatingMem::<false>(instr.encode(), instr.encode() as u8);
+
+	// Execute instruction using effective types as baseline
+	let mut expected_state_start = state.0 .0.clone();
+
+	if let Some(q) = expected_state_start.frame.op_queue.get_mut(&0)
+	{
+		q.push_first(v2_ext.clone());
+		q.push_first(v1_ext.clone());
+	}
+	else
+	{
+		expected_state_start
+			.frame
+			.op_queue
+			.insert(0, OperandList::new(v1_ext, vec![v2_ext]));
+	}
+
+	let mut expected_metrics = TrackReport::new();
+	let expected_result = Executor::from_state(&expected_state_start, mem)
+		.step(&mut expected_metrics)
+		.map(|ex| ex.state());
+	expected_metrics.reset_stat(Metric::ConsumedBytes);
+	expected_metrics.add_stat(Metric::ConsumedBytes, v1.typ.scale() + v2.typ.scale());
+
+	// Run the original values and test the expected state
+	let mut test_state = state.0 .0.clone();
+
+	if let Some(q) = test_state.frame.op_queue.get_mut(&0)
+	{
+		q.push_first(v2);
+		q.push_first(v1);
+	}
+	else
+	{
+		test_state
+			.frame
+			.op_queue
+			.insert(0, OperandList::new(v1, vec![v2]));
+	}
+
+	let mut actual_metrics = TrackReport::new();
+	let actual_result = Executor::from_state(&test_state, mem)
+		.step(&mut actual_metrics)
+		.map(|ex| ex.state());
+
+	check_expected(
+		actual_result,
+		expected_result,
+		|| test_metrics(&expected_metrics, &actual_metrics),
+		"end state",
+	)
+}
+
+/// Tests ALU instructions coerce types correctly.
+#[quickcheck]
+fn alu_type_coercions(
+	state: LimitedOps<NoCF<ExecState>, 0, 2>,
+	ArbValue(v1): ArbValue<false, false>,
+	ArbValue(v2): ArbValue<false, false>,
+	alu_op: AluVariant,
+	target: Bits<5, false>,
+) -> TestResult
+{
+	// Ignore ALU ops with only one input
+	if vec![
+		AluVariant::NarTo,
+		AluVariant::IsNar,
+		AluVariant::RotateLeft,
+		AluVariant::RotateRight,
+	]
+	.contains(&alu_op)
+	{
+		return TestResult::discard();
+	}
+
+	test_effective_types(state, v1, v2, Instruction::Alu(alu_op, target))
+}
+
+/// Tests ALU2 instructions coerce types correctly.
+#[quickcheck]
+fn alu2_type_coercions(
+	state: LimitedOps<NoCF<ExecState>, 0, 2>,
+	ArbValue(v1): ArbValue<false, false>,
+	ArbValue(v2): ArbValue<false, false>,
+	alu_op: Alu2Variant,
+	out_typ: Alu2OutputVariant,
+	target: Bits<5, false>,
+) -> TestResult
+{
+	// Ignore ALU ops that don't use effective types
+	if vec![Alu2Variant::ShiftRight, Alu2Variant::ShiftLeft].contains(&alu_op)
+	{
+		return TestResult::discard();
+	}
+	test_effective_types(state, v1, v2, Instruction::Alu2(alu_op, out_typ, target))
+}
+
+/// Tests dividing by zero results in NaR
+#[quickcheck]
+fn divide_by_0(
+	state: LimitedOps<NoCF<ExecState>, 0, 2>,
+	ArbValue(v1): ArbValue<false, false>,
+	out_var: Alu2OutputVariant,
+	target: Bits<5, false>,
+) -> TestResult
+{
+	let instr = Instruction::Alu2(Alu2Variant::Division, out_var, target.clone());
+
+	let mut expected_state = state.0 .0.clone();
+	expected_state.frame.op_queue.remove(&0);
+	expected_state.frame.op_queue = advance_queue(expected_state.frame.op_queue);
+
+	let out_low = Value::new_nar_typed(v1.typ, 0);
+	let out_high = Value::new_nar_typed(ValueType::Uint(v1.typ.power()), 0);
+	let (tar1, tar2, out_next) = match out_var
+	{
+		Alu2OutputVariant::FirstHigh => (out_high, Some(out_low), None),
+		Alu2OutputVariant::FirstLow => (out_low, Some(out_high), None),
+		Alu2OutputVariant::High => (out_high, None, None),
+		Alu2OutputVariant::Low => (out_low, None, None),
+		Alu2OutputVariant::NextHigh => (out_low, None, Some(out_high)),
+		Alu2OutputVariant::NextLow => (out_high, None, Some(out_low)),
+	};
+	if let Some(out_next) = out_next.as_ref()
+	{
+		if let Some(q) = expected_state.frame.op_queue.get_mut(&0)
+		{
+			q.push(out_next.clone());
+		}
+		else
+		{
+			expected_state
+				.frame
+				.op_queue
+				.insert(0, OperandList::new(out_next.clone(), vec![]));
+		}
+	}
+	if let Some(q) = expected_state
+		.frame
+		.op_queue
+		.get_mut(&(target.value as usize))
+	{
+		q.push(tar1);
+		tar2.clone().into_iter().for_each(|t| q.push(t));
+	}
+	else
+	{
+		expected_state.frame.op_queue.insert(
+			target.value as usize,
+			OperandList::new(tar1, tar2.iter().cloned().collect()),
+		);
+	}
+	expected_state.address += 2;
+
+	let mut test_state = state.0 .0.clone();
+	let mut v0_bytes = Vec::new();
+	v0_bytes.resize(v1.typ.scale(), 0);
+	let v0 = Value::singleton_typed(v1.typ, Scalar::Val(v0_bytes.into_boxed_slice()));
+	if let Some(q) = test_state.frame.op_queue.get_mut(&0)
+	{
+		q.push_first(v0);
+		q.push_first(v1.clone());
+	}
+	else
+	{
+		test_state
+			.frame
+			.op_queue
+			.insert(0, OperandList::new(v1.clone(), vec![v0]));
+	}
+
+	let queued_values = 1 + tar2.iter().count() + out_next.iter().count();
+	test_execution_step(
+		&test_state,
+		RepeatingMem::<false>(instr.encode(), 0),
+		&expected_state,
+		&[
+			(Metric::ConsumedOperands, 2),
+			(Metric::ConsumedBytes, v1.typ.scale() * 2),
+			(Metric::QueuedValues, queued_values),
+			(Metric::QueuedValueBytes, v1.typ.scale() * (queued_values)),
+			(Metric::InstructionReads, 1),
+		]
+		.into(),
 	)
 }

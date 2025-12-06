@@ -3,6 +3,7 @@ use std::{
 	collections::HashMap,
 	fmt::Debug,
 	iter::{once, Chain, Once},
+	mem::replace,
 	vec::IntoIter,
 };
 
@@ -58,10 +59,16 @@ impl OperandList
 		once(&mut self.first).chain(self.rest.iter_mut())
 	}
 
-	/// Adds an operands to the end of the list
+	/// Adds an operand to the end of the list
 	pub fn push(&mut self, op: Value)
 	{
 		self.rest.push(op)
+	}
+
+	/// Adds an operand to the front of the list
+	pub fn push_first(&mut self, val: Value)
+	{
+		self.rest.insert(0, replace(&mut self.first, val));
 	}
 
 	/// Gets the number of operands in the list
