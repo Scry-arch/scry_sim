@@ -52,6 +52,9 @@ pub trait Memory
 		tracker: &mut impl MetricTracker,
 	) -> Result<[u8; 2], MemError>;
 
+	/// Sets the byte value at the given address to the given byte
+	fn write_raw(&mut self, addr: usize, data: u8) -> Result<(), MemError>;
+
 	/// Write to the given address from the given value.
 	///
 	/// Updates the report as data is written
@@ -193,6 +196,12 @@ pub struct BlockedMemory
 
 impl BlockedMemory
 {
+	/// Constructs a new memory object with no blocks
+	pub fn empty() -> Self
+	{
+		Self { blocks: vec![] }
+	}
+
 	/// Construct a new memory object with only the given block
 	pub fn new(mem: impl Iterator<Item = u8>, offset: usize) -> Self
 	{
@@ -215,18 +224,46 @@ impl BlockedMemory
 			.and_then(|(offset, mem)| mem.read(addr - offset, size))
 	}
 
-	pub fn add_block(&mut self, mem: impl Iterator<Item = u8>, offset: usize)
+	/// Asserts that the given block offset and size does not overlap with an
+	/// existing block.
+	///
+	/// Causes an assertion error if overlapping.
+	fn assert_non_overlapping(&self, offset: usize, size: usize)
 	{
-		let end_addr = offset + mem.size_hint().0;
+		let end_addr = offset + size;
 		// Non-overlapping. TODO: handle overlapping
 		assert!(self.blocks.iter().all(|(other_offset, other_block)| {
 			let other_end_addr = other_offset + other_block.data.len();
 			end_addr <= *other_offset || offset >= other_end_addr
 		}));
+	}
 
-		self.blocks.push((offset, mem.collect::<Vec<_>>().into()));
+	/// Sort all the blocks by their offset, from low to high
+	fn sort_blocks(&mut self)
+	{
 		self.blocks
 			.sort_by(|(offset1, _), (offset2, _)| offset1.partial_cmp(offset2).unwrap())
+	}
+
+	/// Adds a new block to the memory at the given offset and with the given
+	/// size.
+	///
+	/// All memory is zeroed and initialized
+	pub fn add_block_zeroed(&mut self, offset: usize, size: usize)
+	{
+		self.assert_non_overlapping(offset, size);
+
+		self.blocks.push((offset, MemBlock::from(size)));
+		self.sort_blocks();
+	}
+
+	/// Adds a new block to the memory with the given data and offset
+	pub fn add_block(&mut self, mem: impl Iterator<Item = u8>, offset: usize)
+	{
+		self.assert_non_overlapping(offset, mem.size_hint().0);
+
+		self.blocks.push((offset, mem.collect::<Vec<_>>().into()));
+		self.sort_blocks();
 	}
 }
 impl Memory for BlockedMemory
@@ -302,6 +339,20 @@ impl Memory for BlockedMemory
 				})
 				.or_else(|err| Err(err.0))
 		}
+	}
+
+	fn write_raw(&mut self, addr: usize, data: u8) -> Result<(), MemError>
+	{
+		let (offset, mem) = self
+			.blocks
+			.iter_mut()
+			.rev()
+			.find(|(offset, _)| *offset <= addr)
+			.ok_or((MemError::InvalidAddr, addr))
+			.map_err(|err| err.0)?;
+
+		let idx = addr - *offset;
+		mem.write(idx, &[data]).map_err(|err| err.0)
 	}
 
 	fn write(

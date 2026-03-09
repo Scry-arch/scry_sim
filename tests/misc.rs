@@ -18,6 +18,8 @@ use std::mem::size_of;
 /// If `MAY_STORE` is true, writes will succeed and update metric. If not,
 /// writes will fail.
 ///
+/// `write_raw` will do nothing.
+///
 /// Meant for testing.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub struct RepeatingMem<const MAY_STORE: bool>(pub u16, pub u8);
@@ -63,6 +65,11 @@ impl<const MAY_STORE: bool> Memory for RepeatingMem<MAY_STORE>
 		Ok(result)
 	}
 
+	fn write_raw(&mut self, _: usize, _: u8) -> Result<(), MemError>
+	{
+		Ok(())
+	}
+
 	fn write(
 		&mut self,
 		addr: usize,
@@ -82,7 +89,7 @@ impl<const MAY_STORE: bool> Memory for RepeatingMem<MAY_STORE>
 }
 
 /// Wrapper around a memory that accept all writes and allows them to succeed
-/// regardless og address.
+/// regardless of address.
 #[derive(Debug)]
 pub struct AllowWrite<'a, M: Memory>(pub &'a mut M);
 impl<'a, M: Memory> Memory for AllowWrite<'a, M>
@@ -102,6 +109,7 @@ impl<'a, M: Memory> Memory for AllowWrite<'a, M>
 				addr: usize,
 				tracker: &mut impl MetricTracker,
 			) -> Result<[u8; 2], MemError>;
+			fn write_raw(&mut self, addr: usize, size: u8) -> Result<(), MemError>;
 		}
 	}
 
