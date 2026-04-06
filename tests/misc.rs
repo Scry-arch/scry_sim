@@ -25,9 +25,9 @@ use std::mem::size_of;
 pub struct RepeatingMem<const MAY_STORE: bool>(pub u16, pub u8);
 impl<const MAY_STORE: bool> Memory for RepeatingMem<MAY_STORE>
 {
-	fn read_raw(&mut self, _: usize) -> Option<u8>
+	fn read_raw(&mut self, _: usize) -> Result<u8, (MemError, usize)>
 	{
-		Some(self.1)
+		Ok(self.1)
 	}
 
 	fn read_data(
@@ -96,7 +96,7 @@ impl<'a, M: Memory> Memory for AllowWrite<'a, M>
 {
 	delegate::delegate! {
 		to self.0{
-			fn read_raw(&mut self, addr: usize) -> Option<u8>;
+			fn read_raw(&mut self, addr: usize) -> Result<u8, (MemError, usize)>;
 			fn read_data(
 				&mut self,
 				addr: usize,

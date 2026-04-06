@@ -19,10 +19,13 @@ pub enum MemError
 }
 
 /// Trait for operations on memory.
+///
+/// Required methods only need directly access to individual bytes, with
+/// provided methods implementing accesses patterns and metric tracking.
 pub trait Memory
 {
 	/// Gets the byte value at the given address (if a valid address).
-	fn read_raw(&mut self, addr: usize) -> Option<u8>;
+	fn read_raw(&mut self, addr: usize) -> Result<u8, (MemError, usize)>;
 
 	/// Read from the given address, into the given value, the given number of
 	/// elements.
@@ -35,13 +38,52 @@ pub trait Memory
 	///
 	/// If an error is thrown, the first element describes it and the second is
 	/// the relevant address.
+	#[allow(unused_variables)]
 	fn read_data(
 		&mut self,
 		addr: usize,
 		into: &mut Value,
 		len: usize,
 		tracker: &mut impl MetricTracker,
-	) -> Result<(), (MemError, usize)>;
+	) -> Result<(), (MemError, usize)>
+	{
+		let mut found_uninit = None;
+		let scale = into.scale();
+		'a: for (idx, val) in into.iter_mut().enumerate()
+		{
+			let start_addr = addr + (idx * scale);
+			let mut bytes = Vec::with_capacity(scale);
+			for b in 0..scale
+			{
+				match self.read_raw(start_addr + b)
+				{
+					Err(err) =>
+					{
+						if let (MemError::Uninitialized, addr) = err
+						{
+							found_uninit = Some(addr);
+						}
+						*val = Scalar::Nar(0);
+						continue 'a;
+					},
+					Ok(byte) =>
+					{
+						bytes.push(byte);
+					},
+				}
+			}
+
+			val.set_val(bytes.as_slice());
+
+			tracker.add_stat(Metric::DataReads, 1);
+			tracker.add_stat(Metric::DataReadBytes, scale);
+			if (addr % scale) != 0
+			{
+				tracker.add_stat(Metric::UnalignedReads, 1);
+			}
+		}
+		found_uninit.map_or(Ok(()), |addr| Err((MemError::Uninitialized, addr)))
+	}
 
 	/// Read 2 bytes from the given address into the slice.
 	///
@@ -50,7 +92,22 @@ pub trait Memory
 		&mut self,
 		addr: usize,
 		tracker: &mut impl MetricTracker,
-	) -> Result<[u8; 2], MemError>;
+	) -> Result<[u8; 2], MemError>
+	{
+		if addr % 2 != 0
+		{
+			Err(MemError::UnalignedAddr)
+		}
+		else
+		{
+			let bytes = [
+				self.read_raw(addr).map_err(|e| e.0)?,
+				self.read_raw(addr + 1).map_err(|e| e.0)?,
+			];
+			tracker.add_stat(Metric::InstructionReads, 1);
+			Ok(bytes)
+		}
+	}
 
 	/// Sets the byte value at the given address to the given byte
 	fn write_raw(&mut self, addr: usize, data: u8) -> Result<(), MemError>;
@@ -63,7 +120,36 @@ pub trait Memory
 		addr: usize,
 		from: &Value,
 		tracker: &mut impl MetricTracker,
-	) -> Result<(), (MemError, usize)>;
+	) -> Result<(), (MemError, usize)>
+	{
+		for (idx, val) in from.iter().enumerate()
+		{
+			let element_addr = addr + (idx * from.scale());
+			if let Scalar::Val(bytes) = val
+			{
+				for (i, b) in bytes.iter().enumerate()
+				{
+					self.write_raw(element_addr + i, *b)
+						.map_err(|e| (e, element_addr))?;
+				}
+
+				tracker.add_stat(Metric::DataWriteBytes, bytes.len());
+				if addr % from.scale() != 0
+				{
+					tracker.add_stat(Metric::UnalignedWrites, 1);
+				}
+			}
+			else if let Scalar::Nar(_) = val
+			{
+				return Err((MemError::NarWrite, element_addr));
+			}
+			else
+			{
+				// For Nan, nothing should be written
+			}
+		}
+		Ok(())
+	}
 }
 
 #[derive(Debug)]
@@ -210,20 +296,6 @@ impl BlockedMemory
 		}
 	}
 
-	/// Read from the given address, putting the read values into the given
-	/// slice
-	///
-	/// This read does not update the read report in any way
-	fn read_no_report(&self, addr: usize, size: usize) -> Result<&[u8], (MemError, usize)>
-	{
-		self.blocks
-			.iter()
-			.rev()
-			.find(|(offset, _)| *offset <= addr)
-			.ok_or((MemError::InvalidAddr, addr))
-			.and_then(|(offset, mem)| mem.read(addr - offset, size))
-	}
-
 	/// Asserts that the given block offset and size does not overlap with an
 	/// existing block.
 	///
@@ -268,77 +340,15 @@ impl BlockedMemory
 }
 impl Memory for BlockedMemory
 {
-	fn read_raw(&mut self, addr: usize) -> Option<u8>
+	fn read_raw(&mut self, addr: usize) -> Result<u8, (MemError, usize)>
 	{
-		self.read_no_report(addr, 1)
-			.map_or(None, |byte| Some(byte[0]))
-	}
-
-	/// Read from the given address, into the given value, the given number of
-	/// elements
-	///
-	/// Updates the report as a data read.
-	fn read_data(
-		&mut self,
-		addr: usize,
-		into: &mut Value,
-		_len: usize,
-		tracker: &mut impl MetricTracker,
-	) -> Result<(), (MemError, usize)>
-	{
-		let mut found_uninit = None;
-		let scale = into.scale();
-		for (idx, val) in into.iter_mut().enumerate()
-		{
-			self.read_no_report(addr + (idx * scale), scale)
-				.and_then(|bytes| {
-					val.set_val(bytes);
-					Ok(())
-				})
-				.and_then(|_| {
-					tracker.add_stat(Metric::DataReads, 1);
-					tracker.add_stat(Metric::DataReadBytes, scale);
-					if (addr % scale) != 0
-					{
-						tracker.add_stat(Metric::UnalignedReads, 1);
-					}
-					Ok(())
-				})
-				.err()
-				.map(|err| {
-					if let (MemError::Uninitialized, addr) = err
-					{
-						found_uninit = Some(addr);
-					}
-					*val = Scalar::Nar(0);
-				});
-		}
-		found_uninit.map_or(Ok(()), |addr| Err((MemError::Uninitialized, addr)))
-	}
-
-	/// Read 2 bytes from the given address into the slice.
-	///
-	/// Updates the report as an instruction read.
-	fn read_instr(
-		&mut self,
-		addr: usize,
-		tracker: &mut impl MetricTracker,
-	) -> Result<[u8; 2], MemError>
-	{
-		if addr % 2 != 0
-		{
-			Err(MemError::UnalignedAddr)
-		}
-		else
-		{
-			self.read_no_report(addr, 2)
-				.and_then(|bytes| Ok([bytes[0], bytes[1]]))
-				.and_then(|bytes| {
-					tracker.add_stat(Metric::InstructionReads, 1);
-					Ok(bytes)
-				})
-				.or_else(|err| Err(err.0))
-		}
+		self.blocks
+			.iter()
+			.rev()
+			.find(|(offset, _)| *offset <= addr)
+			.ok_or((MemError::InvalidAddr, addr))
+			.and_then(|(offset, mem)| mem.read(addr - offset, 1))
+			.map(|byte| byte[0])
 	}
 
 	fn write_raw(&mut self, addr: usize, data: u8) -> Result<(), MemError>
@@ -353,43 +363,5 @@ impl Memory for BlockedMemory
 
 		let idx = addr - *offset;
 		mem.write(idx, &[data]).map_err(|err| err.0)
-	}
-
-	fn write(
-		&mut self,
-		addr: usize,
-		from: &Value,
-		tracker: &mut impl MetricTracker,
-	) -> Result<(), (MemError, usize)>
-	{
-		let (offset, mem) = self
-			.blocks
-			.iter_mut()
-			.rev()
-			.find(|(offset, _)| *offset <= addr)
-			.ok_or((MemError::InvalidAddr, addr))?;
-
-		for (idx, val) in from.iter().enumerate()
-		{
-			let element_addr = (addr - *offset) + (idx * from.scale());
-			if let Scalar::Val(bytes) = val
-			{
-				mem.write(element_addr, bytes.as_ref())?;
-				tracker.add_stat(Metric::DataWriteBytes, bytes.len());
-				if addr % from.scale() != 0
-				{
-					tracker.add_stat(Metric::UnalignedWrites, 1);
-				}
-			}
-			else if let Scalar::Nar(_) = val
-			{
-				return Err((MemError::NarWrite, element_addr));
-			}
-			else
-			{
-				// For Nan, nothing should be written
-			}
-		}
-		Ok(())
 	}
 }
