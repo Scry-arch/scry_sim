@@ -3,8 +3,9 @@ use crate::{
 	Metric, MetricTracker,
 };
 use bitvec::vec::BitVec;
+use std::cmp::PartialEq;
 
-#[derive(Debug)]
+#[derive(Debug, Eq, PartialEq)]
 pub enum MemError
 {
 	/// Memory being read has not been initialized
@@ -25,7 +26,7 @@ pub enum MemError
 pub trait Memory
 {
 	/// Gets the byte value at the given address (if a valid address).
-	fn read_raw(&mut self, addr: usize) -> Result<u8, (MemError, usize)>;
+	fn read_raw(&mut self, addr: usize) -> Result<u8, MemError>;
 
 	/// Read from the given address, into the given value, the given number of
 	/// elements.
@@ -59,9 +60,9 @@ pub trait Memory
 				{
 					Err(err) =>
 					{
-						if let (MemError::Uninitialized, addr) = err
+						if MemError::Uninitialized == err
 						{
-							found_uninit = Some(addr);
+							found_uninit = Some(start_addr + b);
 						}
 						*val = Scalar::Nar(0);
 						continue 'a;
@@ -100,10 +101,7 @@ pub trait Memory
 		}
 		else
 		{
-			let bytes = [
-				self.read_raw(addr).map_err(|e| e.0)?,
-				self.read_raw(addr + 1).map_err(|e| e.0)?,
-			];
+			let bytes = [self.read_raw(addr)?, self.read_raw(addr + 1)?];
 			tracker.add_stat(Metric::InstructionReads, 1);
 			Ok(bytes)
 		}
@@ -340,14 +338,14 @@ impl BlockedMemory
 }
 impl Memory for BlockedMemory
 {
-	fn read_raw(&mut self, addr: usize) -> Result<u8, (MemError, usize)>
+	fn read_raw(&mut self, addr: usize) -> Result<u8, MemError>
 	{
 		self.blocks
 			.iter()
 			.rev()
 			.find(|(offset, _)| *offset <= addr)
-			.ok_or((MemError::InvalidAddr, addr))
-			.and_then(|(offset, mem)| mem.read(addr - offset, 1))
+			.ok_or(MemError::InvalidAddr)
+			.and_then(|(offset, mem)| mem.read(addr - offset, 1).map_err(|e| e.0))
 			.map(|byte| byte[0])
 	}
 
@@ -363,5 +361,28 @@ impl Memory for BlockedMemory
 
 		let idx = addr - *offset;
 		mem.write(idx, &[data]).map_err(|err| err.0)
+	}
+}
+
+/// Used to access the host machine memory directly.
+///
+/// Has no guardrails, use with care.
+/// Invalid accesses may cause crashes.
+/// Has no synchronization between instances.
+pub struct HostMemory();
+
+impl Memory for HostMemory
+{
+	fn read_raw(&mut self, addr: usize) -> Result<u8, MemError>
+	{
+		let ptr = addr as *mut u8;
+		Ok(unsafe { *ptr })
+	}
+
+	fn write_raw(&mut self, addr: usize, data: u8) -> Result<(), MemError>
+	{
+		let ptr = addr as *mut u8;
+		unsafe { *ptr = data }
+		Ok(())
 	}
 }
