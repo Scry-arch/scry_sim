@@ -825,33 +825,6 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 					}
 					typ_out
 				},
-				RotateLeft | RotateRight =>
-				{
-					// Variants with 1 input
-					let in1 = in1.ok_or(ExecError::Exception(
-						"Alu instruction missing operand".into(),
-					))?;
-					Self::fail_if_nan_nar(&in1)?;
-					let typ = in1.value_type();
-					let in1 = in1.iter();
-					let func = match variant
-					{
-						RotateLeft => Self::alu_rotate_left_once,
-						RotateRight => Self::alu_rotate_right_once,
-						_ =>
-						{
-							return Err(ExecError::Err(
-								"Unsupported ALU (single input) instruction".into(),
-							))
-						},
-					};
-
-					for sc1 in in1
-					{
-						result_scalars.push(Scalar::Val(func(sc1, typ).into_boxed_slice()));
-					}
-					typ
-				},
 			};
 
 			(typ, result_scalars)
@@ -920,7 +893,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 						bytes.resize(in1.typ.scale(), 0);
 						match variant
 						{
-							Add | Sub | ShiftLeft | ShiftRight => bytes[0] = 1,
+							Add | Sub | Shift => bytes[0] = 1,
 							Multiply => bytes[0] = addr_size,
 							Division => bytes[0] = 2,
 						}
@@ -933,31 +906,28 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 
 			let (effective_typ, in1_eff, in2_eff) = Self::effective_type(&in1, &in2);
 
-			let in1 = in1_eff.iter();
-			let in2 = in2_eff.iter();
+			let in1_iter = in1_eff.iter();
+			let in2_iter = in2_eff.iter();
 
 			let func = match variant
 			{
 				Alu2Variant::Add => Self::alu_add_overflowing,
 				Alu2Variant::Sub => Self::alu_sub_overflowing,
 				Alu2Variant::Multiply => Self::alu_multiply,
-				Alu2Variant::ShiftLeft => Self::alu_shift_left,
-				Alu2Variant::ShiftRight => Self::alu_shift_right,
+				Alu2Variant::Shift => Self::alu_shift,
 				Alu2Variant::Division => Self::alu_divide,
 			};
 			let (out_typ_1, out_typ_2) = match variant
 			{
 				Alu2Variant::Add | Alu2Variant::Sub => (effective_typ, ValueType::new::<u8>()),
-				Alu2Variant::Multiply | Alu2Variant::ShiftLeft | Alu2Variant::ShiftRight =>
-				{
-					(effective_typ, effective_typ)
-				},
+				Alu2Variant::Shift => (in1.typ, in1.typ),
+				Alu2Variant::Multiply => (effective_typ, effective_typ),
 				Alu2Variant::Division => (effective_typ, ValueType::Uint(effective_typ.power())),
 			};
 
 			let mut result_scalars_low = Vec::new();
 			let mut result_scalars_high = Vec::new();
-			for (sc1, sc2) in in1.zip(in2)
+			for (sc1, sc2) in in1_iter.zip(in2_iter)
 			{
 				let (low, high) = func(sc1, effective_typ, sc2, effective_typ);
 				result_scalars_low.push(low);
@@ -987,12 +957,12 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 		use Alu2OutputVariant::*;
 		let (first_offset, first_op, second_op) = match out_var
 		{
-			High => (offset, high, None),
-			Low => (offset, low, None),
-			FirstLow => (offset, low, Some(high)),
-			FirstHigh => (offset, high, Some(low)),
-			NextHigh => (0, high, Some(low)),
-			NextLow => (0, low, Some(high)),
+			HighOnly => (offset, high, None),
+			LowOnly => (offset, low, None),
+			LowFirst => (offset, low, Some(high)),
+			HighFirst => (offset, high, Some(low)),
+			HighNext => (0, high, Some(low)),
+			LowNext => (0, low, Some(high)),
 		};
 		self.operands.push_operand(first_offset, first_op, tracker);
 		if let Some(op) = second_op
@@ -1282,48 +1252,6 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 		Self::alu_bitwise_op(in1, in2, |b1, b2| b1 | b2)
 	}
 
-	/// Performs a rotate-left by 1 of the given scalar.
-	///
-	/// Ignores the given type.
-	///
-	/// Returns the resulting bytes of the same length as the input.
-	fn alu_rotate_left_once(in1: &Scalar, _: ValueType) -> Vec<u8>
-	{
-		let bytes = in1.bytes().unwrap();
-
-		bytes
-			.iter()
-			.fold(
-				(bytes.last().unwrap() >> 7, Vec::new()),
-				|(carry, mut result), b| {
-					result.push((b << 1) + carry);
-					(b >> 7, result)
-				},
-			)
-			.1
-	}
-
-	/// Performs a rotate-right by 1 of the given scalar.
-	///
-	/// Ignores the given type.
-	///
-	/// Returns the resulting bytes of the same length as the input.
-	fn alu_rotate_right_once(in1: &Scalar, _: ValueType) -> Vec<u8>
-	{
-		let bytes = in1.bytes().unwrap();
-
-		let mut result = bytes
-			.iter()
-			.rev()
-			.fold((bytes[0] << 7, Vec::new()), |(carry, mut result), b| {
-				result.push((b >> 1) + carry);
-				(b << 7, result)
-			})
-			.1;
-		result.reverse();
-		result
-	}
-
 	/// Performs multiplication on the given scalars, returning the lower-order
 	/// result
 	fn alu_multiply(sc1: &Scalar, typ: ValueType, sc2: &Scalar, typ2: ValueType)
@@ -1377,65 +1305,89 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 		)
 	}
 
-	/// Performs left shift
-	fn alu_shift_left(
-		sc1: &Scalar,
-		typ1: ValueType,
-		sc2: &Scalar,
-		typ2: ValueType,
-	) -> (Scalar, Scalar)
+	/// Performs unified shift
+	fn alu_shift(sc1: &Scalar, typ1: ValueType, sc2: &Scalar, typ2: ValueType) -> (Scalar, Scalar)
 	{
-		let sc1_ext = sc1.extend(size_of::<u128>(), &typ1);
-
 		let mut shift_bytes: Vec<_> = sc2.bytes().unwrap().iter().cloned().collect();
 
-		assert!(
-			!typ2.is_signed_integer() || shift_bytes.last().unwrap() < &0b1000_0000,
-			"Cannot shift negative amount"
-		);
+		let shift_amount_negative =
+			typ2.is_signed_integer() && shift_bytes.last().unwrap() >= &0b1000_0000;
 
-		shift_bytes.resize(size_of::<u128>(), 0);
-		let sc2_ext = Scalar::Val(shift_bytes.into_boxed_slice());
-
-		Self::alu_op_u128(&sc1_ext, &sc2_ext, std::ops::Shl::shl, typ1)
-	}
-
-	/// Performs right shift
-	fn alu_shift_right(
-		sc1: &Scalar,
-		typ1: ValueType,
-		sc2: &Scalar,
-		typ2: ValueType,
-	) -> (Scalar, Scalar)
-	{
 		let mut sc1_prep_bytes = Vec::from(sc1.bytes().unwrap());
-		for _ in 0..typ1.scale()
+
+		if shift_amount_negative
 		{
-			sc1_prep_bytes.insert(0, 0);
+			// On a right shift, we shift the initial value to the left by its width
+			// so that it can be shifted right
+			for _ in 0..typ1.scale()
+			{
+				sc1_prep_bytes.insert(0, 0);
+			}
 		}
 		let sc1_shifted = Scalar::Val(sc1_prep_bytes.into_boxed_slice());
 		let sc1_ext = sc1_shifted.extend(size_of::<u128>(), &typ1);
 
-		let mut shift_bytes: Vec<_> = sc2.bytes().unwrap().iter().cloned().collect();
-
-		assert!(
-			!typ2.is_signed_integer() || shift_bytes.last().unwrap() < &0b1000_0000,
-			"Cannot shift negative amount"
+		shift_bytes.resize(
+			size_of::<u128>(),
+			if shift_amount_negative
+			{
+				0b1111_1111
+			}
+			else
+			{
+				0
+			},
 		);
 
-		shift_bytes.resize(size_of::<u128>(), 0);
-		let sc2_ext = Scalar::Val(shift_bytes.into_boxed_slice());
-
-		let (low, high) = if typ1.is_signed_integer()
+		if typ2.is_signed_integer()
 		{
-			Self::alu_op_i128(&sc1_ext, &sc2_ext, std::ops::Shr::shr, typ1)
+			let (shift_fn_u, shift_fn_i): (fn(u128, u128) -> u128, fn(i128, i128) -> i128) =
+				if shift_amount_negative
+				{
+					// Negative shift amount, we need to get the absolute shift amount
+					// dbg!(&shift_bytes);
+					// First negate all shift amount bits
+					shift_bytes.iter_mut().for_each(|b| *b = *b ^ 0b1111_1111u8);
+					// Add one
+					shift_bytes.iter_mut().fold(1, |carry, b| {
+						let (new_b, new_carry) = b.carrying_add(0, carry != 0);
+						*b = new_b;
+						new_carry as i32
+					});
+					// dbg!(&shift_bytes);
+					(std::ops::Shr::shr, std::ops::Shr::shr)
+				}
+				else
+				{
+					// Non-negative shift amount
+					(std::ops::Shl::shl, std::ops::Shl::shl)
+				};
+
+			let sc2_ext = Scalar::Val(shift_bytes.into_boxed_slice());
+			let (low, high) = if typ1.is_signed_integer()
+			{
+				Self::alu_op_i128(&sc1_ext, &sc2_ext, shift_fn_i, typ1)
+			}
+			else
+			{
+				Self::alu_op_u128(&sc1_ext, &sc2_ext, shift_fn_u, typ1)
+			};
+
+			if shift_amount_negative
+			{
+				(high, low)
+			}
+			else
+			{
+				(low, high)
+			}
 		}
 		else
 		{
-			Self::alu_op_u128(&sc1_ext, &sc2_ext, std::ops::Shr::shr, typ1)
-		};
-
-		(high, low)
+			let sc2_ext = Scalar::Val(shift_bytes.into_boxed_slice());
+			// Unsigned shift amount can only left shift
+			Self::alu_op_u128(&sc1_ext, &sc2_ext, std::ops::Shl::shl, typ1)
+		}
 	}
 
 	/// Performs division and remainder

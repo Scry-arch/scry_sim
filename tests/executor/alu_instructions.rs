@@ -277,7 +277,7 @@ fn test_alu2_instruction<const OPS: usize>(
 	substitute! { [not_used []]
 		match out_var {
 			duplicate!{
-				[var idx; [High] [1] ; [Low] [0];]
+				[var idx; [HighOnly] [1] ; [LowOnly] [0];]
 				var => test_arithmetic_instruction(
 					state,
 					instr,
@@ -297,10 +297,10 @@ fn test_alu2_instruction<const OPS: usize>(
 			duplicate!{
 				[
 					var 		order				first_offset;
-					[FirstLow] 	[res.0.into(), res.1.into()] 	[offset];
-					[FirstHigh]	[res.1.into(), res.0.into()] 	[offset];
-					[NextLow] 	[res.0.into(), res.1.into()] 	[0];
-					[NextHigh]	[res.1.into(), res.0.into()] 	[0];
+					[LowFirst] 	[res.0.into(), res.1.into()] 	[offset];
+					[HighFirst]	[res.1.into(), res.0.into()] 	[offset];
+					[LowNext] 	[res.0.into(), res.1.into()] 	[0];
+					[HighNext]	[res.1.into(), res.0.into()] 	[0];
 				]
 				var => {
 					test_arithmetic_instruction(
@@ -398,36 +398,6 @@ fn test_name(state: AluTestState<inputs>, offset: Bits<5, false>) -> TestResult
 	)
 }
 
-/// Test the Alu instruction variants that take one input, whose
-/// second input is implicitly '1', and where there is a std function
-/// that does the same for all data types
-#[duplicate_item(
-	test_name 	alu_var			std_fn;
-	// [shl]		[ShiftLeft]		[shl];
-	// [shr]		[ShiftRight]	[shr];
-	[rol_once]	[RotateLeft]	[rotate_left];
-	[ror_once]	[RotateRight]	[rotate_right];
-)]
-#[quickcheck]
-fn test_name(state: AluTestState<1>, offset: Bits<5, false>) -> TestResult
-{
-	test_alu_instruction(
-		state,
-		offset,
-		AluVariant::alu_var,
-		|sc| u8::std_fn(sc[0], 1),
-		|sc| u16::std_fn(sc[0], 1),
-		|sc| u32::std_fn(sc[0], 1),
-		|sc| u64::std_fn(sc[0], 1),
-		|sc| u128::std_fn(sc[0], 1),
-		|sc| i8::std_fn(sc[0], 1),
-		|sc| i16::std_fn(sc[0], 1),
-		|sc| i32::std_fn(sc[0], 1),
-		|sc| i64::std_fn(sc[0], 1),
-		|sc| i128::std_fn(sc[0], 1),
-	)
-}
-
 fn conv<I: Copy>(inputs: [I; 2], semantic_fn: impl Fn(I, I) -> (I, bool)) -> (I, u8)
 {
 	let result = semantic_fn(inputs[0], inputs[1]);
@@ -494,9 +464,10 @@ fn name(state: AluTestState<2>, offset: Bits<5, false>, out_var: Alu2OutputVaria
 	)
 }
 
-/// Checks that the second ready operand is a shift amount of valid size
-/// compared to the size of the first operand.
-fn valid_shift<const OPS_IN: usize>(state: &AluTestState<OPS_IN>) -> Option<()>
+/// Checks that the second ready operand is a valid shift amount for the size of
+/// the first operand (i.e. doesn't shift more than the width) and the type of
+/// shift
+fn valid_shift<const OPS_IN: usize>(state: &AluTestState<OPS_IN>, shift_left: bool) -> Option<()>
 {
 	let state = &state.0 .0 .0;
 	let ready = state.frame.op_queue.get(&0)?;
@@ -505,30 +476,51 @@ fn valid_shift<const OPS_IN: usize>(state: &AluTestState<OPS_IN>) -> Option<()>
 	let shift_amount = if shift_type.is_signed_integer()
 	{
 		let amount = ready.rest.first()?.first.i128_value()?;
-		if amount < 0
+		if (shift_left && amount < 0) || // Negative shift amount cannot result in left shift
+				(!shift_left && amount >= 0)
+		// Non-negative shift amount cannot result in right shift
 		{
 			return None;
 		}
-		amount as u128
+		amount
+	}
+	else if shift_left
+	{
+		// All unsigned shift amount are valid
+		ready.rest.first()?.first.u128_value()? as i128
 	}
 	else
 	{
-		ready.rest.first()?.first.u128_value()?
+		// Right shift cannot be done using unsigned shift amount
+		return None;
 	};
 
-	if (width as u128) <= shift_amount
+	if (width as i128) <= shift_amount.abs()
 	{
 		return None;
 	}
 	Some(())
 }
 
+/// Returns the absolute values of the given integer
+fn abs<T: PrimInt>(x: T) -> T
+{
+	if x < T::zero()
+	{
+		T::zero() - x
+	}
+	else
+	{
+		x
+	}
+}
+
 #[duplicate_item(
 	name				variant		func	inputs	second_input	validate;
 	[multiply_carry]	[Multiply]	[mul]	[2]		[x[1]]			[Some(())];
 	[multiply_implicit]	[Multiply]	[mul]	[1]		[_addr_size]	[Some(())];
-	[shift_left]		[ShiftLeft]	[shl]	[2]		[x[1]]			[valid_shift(&state)];
-	[shift_left_once]	[ShiftLeft]	[shl]	[1]		[1u8]			[Some(())];
+	[shift_left]		[Shift]		[shl]	[2]		[x[1]]			[valid_shift(&state, true)];
+	[shift_left_once]	[Shift]		[shl]	[1]		[1u8]			[Some(())];
 )]
 #[quickcheck]
 fn name(
@@ -565,11 +557,11 @@ fn name(
 			},
 		]
 	]
-		if out_var == High || out_var == Low {
+		if out_var == HighOnly || out_var == LowOnly {
 			fn order<T>(out1: T, out2: T, var: Alu2OutputVariant) -> [T; 1] {
 				match var {
-					Low => [out1],
-					High => [out2],
+					LowOnly => [out1],
+					HighOnly => [out2],
 					_ => unreachable!()
 				}
 			}
@@ -603,10 +595,10 @@ fn name(
 		} else {
 			fn order<T>(out1: T, out2: T, var: Alu2OutputVariant) -> [T; 2] {
 				match var {
-					FirstLow => [out1, out2],
-					FirstHigh => [out2, out1],
-					NextLow => [out1, out2],
-					NextHigh => [out2, out1],
+					LowFirst => [out1, out2],
+					HighFirst => [out2, out1],
+					LowNext => [out1, out2],
+					HighNext => [out2, out1],
 					_ => unreachable!()
 				}
 			}
@@ -614,7 +606,7 @@ fn name(
 				state,
 				Instruction::Alu2(Alu2Variant::variant, out_var, offset),
 				[
-					if out_var == FirstLow || out_var == FirstHigh { offset.value as usize}else {0},
+					if out_var == LowFirst || out_var == HighFirst { offset.value as usize}else {0},
 					offset.value as usize
 				],
 				closure([u8],[u16]),
@@ -644,7 +636,8 @@ fn name(
 	)
 }
 
-/// Returns the High result of shifting right by the amount of the second input
+/// Returns the HighOnly result of shifting right by the amount of the second
+/// input
 fn shr_high<T: PrimInt + OverflowingSub>(in1: T, in2: T) -> T
 {
 	let shift_amount = in2.to_usize().unwrap();
@@ -704,8 +697,7 @@ impl ScryRem<typ_out> for typ_in
 
 #[duplicate_item(
 	name				variant		func_low(typ)		func_high(typ)	inputs	second_input	validate;
-	[shift_right_once]	[ShiftRight][Shr::shr]			[shr_high]		[1]		[1]				[Some(())];
-	[shift_right]		[ShiftRight][Shr::shr]			[shr_high]		[2]		[x[1]]			[valid_shift(&state)];
+	[shift_right]		[Shift]		[Shr::shr]			[shr_high]		[2]		[abs(x[1])]		[valid_shift(&state, false)];
 	[division]			[Division]	[typ::div_euclid]	[typ::scry_rem]	[2]		[x[1]]			[valid_div(&state)];
 	[divide_by_two]		[Division]	[typ::div_euclid]	[typ::scry_rem]	[1]		[2]				[Some(())];
 )]
@@ -741,24 +733,24 @@ fn name(
 			)
 		];
 	]
-		if out_var == High || out_var == Low {
+		if out_var == HighOnly || out_var == LowOnly {
 			let order = |out1, out2| match out_var {
-					Low => [out1],
-					High => [out2],
+					LowOnly => [out1],
+					HighOnly => [out2],
 					_ => unreachable!()
 				};
 			run_test([offset.value as usize], [order])
 		} else {
 			let order = |out1, out2| match out_var {
-					FirstLow => [out1, out2],
-					FirstHigh => [out2, out1],
-					NextLow => [out1, out2],
-					NextHigh => [out2, out1],
+					LowFirst => [out1, out2],
+					HighFirst => [out2, out1],
+					LowNext => [out1, out2],
+					HighNext => [out2, out1],
 					_ => unreachable!()
 				};
 			run_test(
 				[
-					if out_var == FirstLow || out_var == FirstHigh { offset.value as usize}else {0},
+					if out_var == LowFirst || out_var == HighFirst { offset.value as usize}else {0},
 					offset.value as usize
 				],
 				[order]
@@ -862,13 +854,7 @@ fn alu_type_coercions(
 ) -> TestResult
 {
 	// Ignore ALU ops with only one input
-	if vec![
-		AluVariant::NarTo,
-		AluVariant::IsNar,
-		AluVariant::RotateLeft,
-		AluVariant::RotateRight,
-	]
-	.contains(&alu_op)
+	if vec![AluVariant::NarTo, AluVariant::IsNar].contains(&alu_op)
 	{
 		return TestResult::discard();
 	}
@@ -888,7 +874,7 @@ fn alu2_type_coercions(
 ) -> TestResult
 {
 	// Ignore ALU ops that don't use effective types
-	if vec![Alu2Variant::ShiftRight, Alu2Variant::ShiftLeft].contains(&alu_op)
+	if vec![Alu2Variant::Shift].contains(&alu_op)
 	{
 		return TestResult::discard();
 	}
@@ -914,12 +900,12 @@ fn divide_by_0(
 	let out_high = Value::new_nar_typed(ValueType::Uint(v1.typ.power()), 0);
 	let (tar1, tar2, out_next) = match out_var
 	{
-		Alu2OutputVariant::FirstHigh => (out_high, Some(out_low), None),
-		Alu2OutputVariant::FirstLow => (out_low, Some(out_high), None),
-		Alu2OutputVariant::High => (out_high, None, None),
-		Alu2OutputVariant::Low => (out_low, None, None),
-		Alu2OutputVariant::NextHigh => (out_low, None, Some(out_high)),
-		Alu2OutputVariant::NextLow => (out_high, None, Some(out_low)),
+		Alu2OutputVariant::HighFirst => (out_high, Some(out_low), None),
+		Alu2OutputVariant::LowFirst => (out_low, Some(out_high), None),
+		Alu2OutputVariant::HighOnly => (out_high, None, None),
+		Alu2OutputVariant::LowOnly => (out_low, None, None),
+		Alu2OutputVariant::HighNext => (out_low, None, Some(out_high)),
+		Alu2OutputVariant::LowNext => (out_high, None, Some(out_low)),
 	};
 	if let Some(out_next) = out_next.as_ref()
 	{
