@@ -14,7 +14,7 @@ use scry_sim::{
 };
 use std::{
 	cmp::min,
-	ops::{BitAnd, BitOr, Mul, Shl, Shr},
+	ops::{BitAnd, BitOr, BitXor, Mul, Shl, Shr},
 };
 
 /// Manages the calculation of applying the given semantic function to the given
@@ -347,6 +347,7 @@ fn test_alu2_instruction<const OPS: usize>(
 	[dec_sat]		[Sub]		[saturating_sub]	[1]		[1];
 	[bit_and]		[BitAnd]	[bitand]			[2]		[sc[1]];
 	[bit_or]		[BitOr]		[bitor]				[2]		[sc[1]];
+	[bit_xor]		[BitXor]	[bitxor]				[2]		[sc[1]];
 )]
 #[quickcheck]
 fn test_name(state: AluTestState<inputs>, offset: Bits<5, false>) -> TestResult

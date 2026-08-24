@@ -794,6 +794,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 						Sub => Self::alu_sub_saturated,
 						BitAnd => Self::alu_bitwise_and,
 						BitOr => Self::alu_bitwise_or,
+						BitXor => Self::alu_bitwise_xor,
 						Equal => Self::alu_equal,
 						LessThan => Self::alu_less_than,
 						GreaterThan => Self::alu_greater_than,
@@ -807,7 +808,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 
 					let typ_out = match variant
 					{
-						Add | Sub | BitAnd | BitOr => effective_typ,
+						Add | Sub | BitAnd | BitOr | BitXor => effective_typ,
 						Equal | LessThan | GreaterThan => ValueType::Uint(0),
 						_ =>
 						{
@@ -1250,6 +1251,18 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 	fn alu_bitwise_or(in1: &Scalar, in2: &Scalar, _: ValueType) -> Vec<u8>
 	{
 		Self::alu_bitwise_op(in1, in2, |b1, b2| b1 | b2)
+	}
+
+	/// Performs a bitwise 'xor' on the given scalars.
+	///
+	/// Ignores the given type.
+	///
+	/// Returns the resulting bytes. Assumes the two given scalars are valid
+	/// values (not Nan or Nar) and have the same length. The result then has
+	/// the same length.
+	fn alu_bitwise_xor(in1: &Scalar, in2: &Scalar, _: ValueType) -> Vec<u8>
+	{
+		Self::alu_bitwise_op(in1, in2, |b1, b2| b1 ^ b2)
 	}
 
 	/// Performs multiplication on the given scalars, returning the lower-order
