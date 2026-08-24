@@ -1,13 +1,19 @@
-use crate::misc::{advance_queue, RepeatingMem};
+use crate::misc::{
+	add_list_to_queue_idx, add_to_queue_idx, add_value_to_queue_idx, advance_queue, RepeatingMem,
+};
 use quickcheck::{Arbitrary, Gen, TestResult};
 use quickcheck_macros::quickcheck;
 use scry_isa::{Alu2Variant, AluVariant, Bits, CallVariant, Instruction, Type};
 use scry_sim::{
 	arbitrary::{LimitedOps, NoCF, SimpleOps},
-	ExecError, ExecState, Executor, Memory, Metric, MetricReporter, MetricTracker, OperandList,
-	OperandQueue, Scalar, TrackReport, Value, ValueType,
+	ExecError, ExecState, Executor, Memory, Metric, MetricReporter, MetricTracker, OperandQueue,
+	Scalar, TrackReport, Value, ValueType,
 };
-use std::{borrow::BorrowMut, fmt::Debug, mem::replace};
+use std::{
+	borrow::BorrowMut,
+	fmt::Debug,
+	iter::{once, repeat},
+};
 
 mod alu_instructions;
 mod cast;
@@ -206,6 +212,62 @@ fn import_export_executor(state: ExecState) -> bool
 	new_state == state
 }
 
+#[quickcheck]
+fn max_operands_in_list(
+	NoCF(mut state): NoCF<ExecState>,
+	inst: Instruction,
+	v: Value,
+	rand: usize,
+) -> TestResult
+{
+	if inst.out_refs().len() == 0
+	{
+		return TestResult::discard();
+	}
+
+	// Immediately triggering control flow may replace the current frame or
+	// merge the target list into the caller's ready list, so the target list
+	// cannot be expected to survive unchanged
+	match inst
+	{
+		Instruction::Call(_, offset) | Instruction::Jump(_, offset) if offset.value == 0 =>
+		{
+			return TestResult::discard()
+		},
+		_ => (),
+	}
+
+	let out_ref = inst.out_refs()[rand % inst.out_refs().len()];
+
+	// Fill the target operand list with values so that the instruction output to it
+	// is discarded
+	add_to_queue_idx(&mut state, out_ref + 1, repeat(v));
+	let expected_list = state.frame.op_queue.get(&(out_ref + 1)).unwrap().clone();
+
+	match std::panic::catch_unwind(|| {
+		Executor::from_state(&state, RepeatingMem::<true>(inst.encode(), 0))
+			.step(&mut TrackReport::new())
+	})
+	{
+		Ok(Ok(exec)) =>
+		{
+			let actual_list = exec.state().frame.op_queue.get(&out_ref).unwrap().clone();
+			if actual_list == expected_list
+			{
+				TestResult::passed()
+			}
+			else
+			{
+				TestResult::error(format!(
+					"actual != expected:\n {:?}\n !=\n {:?}",
+					actual_list, expected_list
+				))
+			}
+		},
+		_ => TestResult::discard(),
+	}
+}
+
 /// Tests that the Nop instruction does nothing (discarding any operands)
 #[quickcheck]
 fn instruction_nop(state: NoCF<ExecState>) -> TestResult
@@ -231,6 +293,8 @@ fn instruction_constant(
 	immediate: u8,
 ) -> TestResult
 {
+	let op_list_depth = state.0.op_list_depth();
+
 	let typ: Type = typ_bits.try_into().unwrap();
 	let mut bytes = vec![immediate];
 	// The remaining bytes are sign extended if needed.
@@ -262,19 +326,11 @@ fn instruction_constant(
 			let new_const =
 				Value::singleton_typed(typ.clone().into(), Scalar::Val(bytes.into_boxed_slice()));
 
-			let ops_rest = if let Some(ops) = new_op_q.get_mut(&1)
-			{
-				ops.push(new_const);
-				ops
-			}
-			else
-			{
-				new_op_q.insert(1, OperandList::new(new_const, Vec::new()));
-				new_op_q.get_mut(&1).unwrap()
-			};
+			add_value_to_queue_idx(&mut new_op_q, op_list_depth, 1, new_const);
+
 			if let Some(old_ops) = old_operands
 			{
-				ops_rest.extend(old_ops.into_iter());
+				add_list_to_queue_idx(&mut new_op_q, op_list_depth, 1, old_ops.into_iter());
 			}
 			new_op_q
 		},
@@ -297,6 +353,7 @@ fn instruction_grow(
 	immediate: u8,
 ) -> TestResult
 {
+	let op_list_depth = state.0 .0 .0.op_list_depth();
 	let ready_q = state.0 .0 .0.frame.op_queue.get(&0).unwrap();
 	let in_val = ready_q.first.clone();
 	let mut result = in_val
@@ -321,15 +378,12 @@ fn instruction_grow(
 			let ready_q = new_op_q.remove(&0).unwrap();
 
 			// Put the produced value on the next queue with the rest
-			if let Some(q) = new_op_q.get_mut(&1)
-			{
-				q.rest.push(result_value.clone());
-				q.rest.extend(ready_q.rest.into_iter());
-			}
-			else
-			{
-				new_op_q.insert(1, OperandList::new(result_value.clone(), ready_q.rest));
-			}
+			add_list_to_queue_idx(
+				&mut new_op_q,
+				op_list_depth,
+				1,
+				once(result_value).chain(ready_q.rest.into_iter()),
+			);
 
 			new_op_q
 		},
@@ -346,31 +400,29 @@ fn instruction_grow(
 	)
 }
 
-/// Tests the Grow instruction on values
-#[quickcheck]
-fn instruction_grow_nan(
+/// Tests growing the given value does not change it
+fn instruction_grow_nop(
 	mut state: LimitedOps<NoCF<ExecState>, 0, 3>,
-	nan_type: ValueType,
+	value: Value,
 	immediate: u8,
 ) -> TestResult
 {
+	let op_list_depth = state.0 .0.op_list_depth();
 	let ready_q_len = state.0 .0.frame.op_queue.get(&0).map_or(0, |l| l.len());
-	let result_value = Value::new_nan_typed(nan_type);
 
-	if let Some(q) = state.0 .0.frame.op_queue.get_mut(&0)
-	{
-		let old_first = replace(&mut q.first, result_value.clone());
-		q.rest.insert(0, old_first);
-	}
-	else
-	{
-		state
-			.0
-			 .0
-			.frame
-			.op_queue
-			.insert(0, OperandList::new(result_value.clone(), Vec::new()));
-	}
+	let old_ops = state
+		.0
+		 .0
+		.frame
+		.op_queue
+		.remove(&0)
+		.map(|ops| ops.into_iter().collect())
+		.unwrap_or(vec![]);
+	add_to_queue_idx(
+		&mut state.0 .0,
+		0,
+		once(value.clone()).chain(old_ops.into_iter()),
+	);
 
 	test_simple_instruction(
 		state.0,
@@ -383,90 +435,61 @@ fn instruction_grow_nan(
 			let ready_q = new_op_q.remove(&0).unwrap();
 
 			// Put the produced value on the next queue with the rest
-			if let Some(q) = new_op_q.get_mut(&1)
-			{
-				q.rest.push(result_value.clone());
-				q.rest.extend(ready_q.rest.into_iter());
-			}
-			else
-			{
-				new_op_q.insert(1, OperandList::new(result_value.clone(), ready_q.rest));
-			}
+			add_list_to_queue_idx(
+				&mut new_op_q,
+				op_list_depth,
+				1,
+				once(value.clone()).chain(ready_q.rest.into_iter()),
+			);
 
 			new_op_q
 		},
 		|_| {
 			[
 				(Metric::QueuedValues, 1),
-				(Metric::QueuedValueBytes, nan_type.scale()),
+				(Metric::QueuedValueBytes, value.typ.scale()),
 				(Metric::ConsumedOperands, 1),
-				(Metric::ConsumedBytes, nan_type.scale()),
-				(Metric::ReorderedOperands, ready_q_len),
+				(Metric::ConsumedBytes, value.typ.scale()),
+				(
+					Metric::ReorderedOperands,
+					if ready_q_len >= op_list_depth
+					{
+						ready_q_len - 1
+					}
+					else
+					{
+						ready_q_len
+					},
+				),
 			]
 			.into()
 		},
 	)
 }
 
-/// Tests the Grow instruction on values
+/// Tests the Grow instruction on NaNs
+#[quickcheck]
+fn instruction_grow_nan(
+	state: LimitedOps<NoCF<ExecState>, 0, 3>,
+	nan_type: ValueType,
+	immediate: u8,
+) -> TestResult
+{
+	instruction_grow_nop(state, Value::new_nan_typed(nan_type), immediate)
+}
+
+/// Tests the Grow instruction on NaRs
 #[quickcheck]
 fn instruction_grow_nar(
-	mut state: LimitedOps<NoCF<ExecState>, 0, 3>,
+	state: LimitedOps<NoCF<ExecState>, 0, 3>,
 	nar_type: ValueType,
 	immediate: u8,
 	nar_payload: usize,
 ) -> TestResult
 {
-	let ready_q_len = state.0 .0.frame.op_queue.get(&0).map_or(0, |l| l.len());
-	let result_value = Value::new_nar_typed(nar_type, nar_payload);
-
-	if let Some(q) = state.0 .0.frame.op_queue.get_mut(&0)
-	{
-		let old_first = replace(&mut q.first, result_value.clone());
-		q.rest.insert(0, old_first);
-	}
-	else
-	{
-		state
-			.0
-			 .0
-			.frame
-			.op_queue
-			.insert(0, OperandList::new(result_value.clone(), Vec::new()));
-	}
-
-	test_simple_instruction(
-		state.0,
-		Instruction::Grow(Bits {
-			value: immediate as i32,
-		}),
-		|old_op_queue| {
-			let mut new_op_q = old_op_queue.clone();
-
-			let ready_q = new_op_q.remove(&0).unwrap();
-
-			// Put the produced value on the next queue with the rest
-			if let Some(q) = new_op_q.get_mut(&1)
-			{
-				q.rest.push(result_value.clone());
-				q.rest.extend(ready_q.rest.into_iter());
-			}
-			else
-			{
-				new_op_q.insert(1, OperandList::new(result_value.clone(), ready_q.rest));
-			}
-
-			new_op_q
-		},
-		|_| {
-			[
-				(Metric::QueuedValues, 1),
-				(Metric::QueuedValueBytes, nar_type.scale()),
-				(Metric::ConsumedOperands, 1),
-				(Metric::ConsumedBytes, nar_type.scale()),
-				(Metric::ReorderedOperands, ready_q_len),
-			]
-			.into()
-		},
+	instruction_grow_nop(
+		state,
+		Value::new_nar_typed(nar_type, nar_payload),
+		immediate,
 	)
 }

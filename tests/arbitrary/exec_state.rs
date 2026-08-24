@@ -66,3 +66,9 @@ fn no_cf_simple_ops_limited_ops_2_2(state: NoCF<SimpleOps<LimitedOps<ExecState, 
 		&& SimpleOps::restriction_holds(&state)
 		&& LimitedOps::<_, 2, 2>::restriction_holds(&state)
 }
+
+#[quickcheck]
+fn operand_list_depth(state: ExecState) -> bool
+{
+	state.op_list_depth() >= scry_sim::MAX_INSTR_INPUTS
+}

@@ -1,7 +1,10 @@
 use byteorder::{ByteOrder, LittleEndian};
 use duplicate::duplicate_item;
 use quickcheck_macros::quickcheck;
-use scry_sim::{MemError, Memory, Metric, MetricTracker, OperandQueue, Scalar, Value, ValueType};
+use scry_sim::{
+	ExecState, MemError, Memory, Metric, MetricTracker, OperandList, OperandQueue, Scalar, Value,
+	ValueType,
+};
 use std::mem::size_of;
 
 /// A memory that always produces the same instruction and data.
@@ -129,6 +132,54 @@ impl<'a, M: Memory> Memory for AllowWrite<'a, M>
 pub fn advance_queue(from: OperandQueue) -> OperandQueue
 {
 	from.into_iter().map(|(idx, ops)| (idx - 1, ops)).collect()
+}
+
+pub fn add_value_to_queue_idx(
+	queue: &mut OperandQueue,
+	op_list_depth: usize,
+	idx: usize,
+	v: Value,
+) -> bool
+{
+	if let Some(list) = queue.get_mut(&idx)
+	{
+		if list.len() < op_list_depth
+		{
+			list.push(v);
+			true
+		}
+		else
+		{
+			false
+		}
+	}
+	else
+	{
+		queue.insert(idx, OperandList::new(v, vec![]));
+		true
+	}
+}
+
+pub fn add_list_to_queue_idx(
+	queue: &mut OperandQueue,
+	op_list_depth: usize,
+	idx: usize,
+	mut iter: impl Iterator<Item = Value>,
+)
+{
+	while let Some(v) = iter.next()
+	{
+		if !add_value_to_queue_idx(queue, op_list_depth, idx, v)
+		{
+			break;
+		}
+	}
+}
+
+pub fn add_to_queue_idx(state: &mut ExecState, idx: usize, iter: impl Iterator<Item = Value>)
+{
+	let depth = state.op_list_depth();
+	add_list_to_queue_idx(&mut state.frame.op_queue, depth, idx, iter);
 }
 
 /// Regress the given operand queue by 1, i.e. all indices increased by 1

@@ -1,6 +1,6 @@
 use crate::{
 	executor::{check_expected, test_execution_step, test_metrics},
-	misc::{advance_queue, RepeatingMem},
+	misc::{add_to_queue_idx, advance_queue, RepeatingMem},
 };
 use byteorder::{ByteOrder, LittleEndian};
 use duplicate::{duplicate_item, substitute};
@@ -14,6 +14,7 @@ use scry_sim::{
 };
 use std::{
 	cmp::min,
+	iter::once,
 	ops::{BitAnd, BitOr, BitXor, Mul, Shl, Shr},
 };
 
@@ -184,19 +185,7 @@ fn test_arithmetic_instruction<const OPS_IN: usize, const OPS_OUT: usize>(
 	for (idx, result_value) in out_idx.iter().zip(result_values.into_iter())
 	{
 		// Put expected result in correct expected state list
-		if let Some(op_list) = expected_state.frame.op_queue.get_mut(idx)
-		{
-			// Push on end of list
-			op_list.push(result_value);
-		}
-		else
-		{
-			// No existing list, create it
-			expected_state
-				.frame
-				.op_queue
-				.insert(*idx, OperandList::new(result_value, vec![]));
-		}
+		add_to_queue_idx(&mut expected_state, *idx, once(result_value));
 	}
 
 	// Expected metrics
@@ -469,9 +458,8 @@ fn name(state: AluTestState<2>, offset: Bits<5, false>, out_var: Alu2OutputVaria
 }
 
 /// Checks that the second ready operand is a valid shift amount for the size of
-/// the first operand (i.e. doesn't shift more than the width) and the type of
-/// shift
-fn valid_shift<const OPS_IN: usize>(state: &AluTestState<OPS_IN>, shift_left: bool) -> Option<()>
+/// the first operand (i.e. doesn't shift more than the width)
+fn valid_left_shift<const OPS_IN: usize>(state: &AluTestState<OPS_IN>) -> Option<()>
 {
 	let state = &state.0 .0 .0;
 	let ready = state.frame.op_queue.get(&0)?;
@@ -480,23 +468,17 @@ fn valid_shift<const OPS_IN: usize>(state: &AluTestState<OPS_IN>, shift_left: bo
 	let shift_amount = if shift_type.is_signed_integer()
 	{
 		let amount = ready.rest.first()?.first.i128_value()?;
-		if (shift_left && amount < 0) || // Negative shift amount cannot result in left shift
-				(!shift_left && amount >= 0)
-		// Non-negative shift amount cannot result in right shift
+		if amount < 0
 		{
+			// Negative shift amount cannot result in left shift
 			return None;
 		}
 		amount
 	}
-	else if shift_left
-	{
-		// All unsigned shift amount are valid
-		ready.rest.first()?.first.u128_value()? as i128
-	}
 	else
 	{
-		// Right shift cannot be done using unsigned shift amount
-		return None;
+		// All unsigned shift amounts are valid
+		ready.rest.first()?.first.u128_value()? as i128
 	};
 
 	if (width as i128) <= shift_amount.abs()
@@ -506,24 +488,11 @@ fn valid_shift<const OPS_IN: usize>(state: &AluTestState<OPS_IN>, shift_left: bo
 	Some(())
 }
 
-/// Returns the absolute values of the given integer
-fn abs<T: PrimInt>(x: T) -> T
-{
-	if x < T::zero()
-	{
-		T::zero() - x
-	}
-	else
-	{
-		x
-	}
-}
-
 #[duplicate_item(
 	name				variant		func	inputs	second_input	validate;
 	[multiply_carry]	[Multiply]	[mul]	[2]		[x[1]]			[Some(())];
 	[multiply_implicit]	[Multiply]	[mul]	[1]		[_addr_size]	[Some(())];
-	[shift_left]		[Shift]		[shl]	[2]		[x[1]]			[valid_shift(&state, true)];
+	[shift_left]		[Shift]		[shl]	[2]		[x[1]]			[valid_left_shift(&state)];
 	[shift_left_once]	[Shift]		[shl]	[1]		[1u8]			[Some(())];
 )]
 #[quickcheck]
@@ -699,23 +668,82 @@ impl ScryRem<typ_out> for typ_in
 	}
 }
 
+/// Checks that the second ready operand is a valid shift amount for the size of
+/// the first operand (i.e. doesn't shift more than the width) and the type of
+/// shift
+fn ensure_right_shift<const OPS_IN: usize>(state: &mut AluTestState<OPS_IN>) -> Option<u128>
+{
+	let state = &mut state.0 .0 .0;
+	let ready = state.frame.op_queue.get_mut(&0)?;
+	let width = ready.first.typ.scale() * 8;
+
+	if !ready.rest.first()?.typ.is_signed_integer()
+	{
+		// Right shift cannot be done using unsigned shift amount, so make it signed
+		ready.rest.first_mut()?.typ = ValueType::Int(ready.rest.first()?.typ.power());
+	};
+
+	let amount = ready.rest.first()?.first.i128_value()?;
+	if amount == 0
+	{
+		// A zero amount stays zero after negation, which the simulator
+		// treats as a left shift, so it cannot become a right shift
+		return None;
+	}
+	let shift_amount = if amount >= 0
+	{
+		// This is shift left, negate it
+		let mut negated = ready
+			.rest
+			.first()?
+			.first
+			.bytes()?
+			.iter()
+			.map(|b| b ^ u8::MAX)
+			.collect::<Vec<_>>();
+		negated.iter_mut().fold(true, |carry, b| {
+			let (new_b, new_carry) = b.carrying_add(0, carry);
+			*b = new_b;
+			new_carry
+		});
+		ready.rest.first_mut()?.first = Scalar::Val(negated.into_boxed_slice());
+		assert!(ready.rest.first()?.first.i128_value()? <= 0);
+		ready.rest.first()?.first.i128_value()?
+	}
+	else
+	{
+		amount
+	};
+
+	if (width as i128) <= shift_amount.abs()
+	{
+		return None;
+	}
+	Some(shift_amount.abs() as u128)
+}
+
 #[duplicate_item(
 	name				variant		func_low(typ)				func_high(typ)	inputs	second_input	validate;
-	[shift_right]		[Shift]		[Shr::shr]					[shr_high]		[2]		[abs(x[1])]		[valid_shift(&state, false)];
+	[shift_right]		[Shift]		[Shr::shr]					[shr_high]		[2]		[valid_result]	[ensure_right_shift(&mut state)];
 	[division]			[Division]	[typ::wrapping_div_euclid]	[typ::scry_rem]	[2]		[x[1]]			[valid_div(&state)];
 	[divide_by_two]		[Division]	[typ::wrapping_div_euclid]	[typ::scry_rem]	[1]		[2]				[Some(())];
 )]
 #[quickcheck]
 fn name(
-	state: AluTestState<inputs>,
+	#[allow(unused_mut)] mut state: AluTestState<inputs>,
 	offset: Bits<5, false>,
 	out_var: Alu2OutputVariant,
 ) -> TestResult
 {
-	if validate.is_none()
+	#[allow(unused_variables)]
+	let valid_result = if let Some(x) = { validate }
+	{
+		x
+	}
+	else
 	{
 		return TestResult::discard();
-	}
+	};
 
 	use Alu2OutputVariant::*;
 	substitute! ( [
@@ -730,7 +758,7 @@ fn name(
 						[u8]; [u16]; [u32]; [u64];
 						[i8]; [i16]; [i32]; [i64];
 					]
-					|x| order(func_low([typ])(x[0], second_input as typ).into(), func_high([typ])(x[0], second_input).into()),
+					|x| order(func_low([typ])(x[0], second_input as typ).into(), func_high([typ])(x[0], second_input as typ).into()),
 				)
 				None::<fn(_) -> _>,
 				None::<fn(_) -> _>,
@@ -913,51 +941,29 @@ fn divide_by_0(
 	};
 	if let Some(out_next) = out_next.as_ref()
 	{
-		if let Some(q) = expected_state.frame.op_queue.get_mut(&0)
-		{
-			q.push(out_next.clone());
-		}
-		else
-		{
-			expected_state
-				.frame
-				.op_queue
-				.insert(0, OperandList::new(out_next.clone(), vec![]));
-		}
+		add_to_queue_idx(&mut expected_state, 0, once(out_next.clone()));
 	}
-	if let Some(q) = expected_state
-		.frame
-		.op_queue
-		.get_mut(&(target.value as usize))
-	{
-		q.push(tar1);
-		tar2.clone().into_iter().for_each(|t| q.push(t));
-	}
-	else
-	{
-		expected_state.frame.op_queue.insert(
-			target.value as usize,
-			OperandList::new(tar1, tar2.iter().cloned().collect()),
-		);
-	}
+	add_to_queue_idx(
+		&mut expected_state,
+		target.value as usize,
+		once(tar1).chain(tar2.clone().into_iter()),
+	);
+
 	expected_state.address += 2;
 
 	let mut test_state = state.0 .0.clone();
 	let mut v0_bytes = Vec::new();
 	v0_bytes.resize(v1.typ.scale(), 0);
 	let v0 = Value::singleton_typed(v1.typ, Scalar::Val(v0_bytes.into_boxed_slice()));
-	if let Some(q) = test_state.frame.op_queue.get_mut(&0)
-	{
-		q.push_first(v0);
-		q.push_first(v1.clone());
-	}
-	else
-	{
-		test_state
-			.frame
-			.op_queue
-			.insert(0, OperandList::new(v1.clone(), vec![v0]));
-	}
+
+	let existing_ops = test_state.frame.op_queue.remove(&0).map_or(vec![], |q| {
+		once(q.first).chain(q.rest.into_iter()).collect()
+	});
+	add_to_queue_idx(
+		&mut test_state,
+		0,
+		[v1.clone(), v0].into_iter().chain(existing_ops.into_iter()),
+	);
 
 	let queued_values = 1 + tar2.iter().count() + out_next.iter().count();
 	test_execution_step(

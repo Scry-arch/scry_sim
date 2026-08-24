@@ -1,14 +1,15 @@
 use crate::{
 	executor::{load::idx_address, test_execution_step},
-	misc::{advance_queue, regress_queue, RepeatingMem},
+	misc::{add_to_queue_idx, advance_queue, regress_queue, RepeatingMem},
 };
 use quickcheck::TestResult;
 use quickcheck_macros::quickcheck;
 use scry_isa::{Bits, Instruction};
 use scry_sim::{
 	arbitrary::{LimitedOps, NoCF},
-	BlockedMemory, ExecState, Metric, OperandList, Scalar, Value, ValueType,
+	BlockedMemory, ExecState, Metric, Scalar, Value, ValueType,
 };
+use std::iter::once;
 
 fn default_expected_state(
 	state: &ExecState,
@@ -194,17 +195,7 @@ fn stack_address_indexed_static(
 
 	let mut expected_state: ExecState = state.clone();
 	expected_state.address += 2;
-	if let Some(list) = expected_state.frame.op_queue.get_mut(&0)
-	{
-		list.push(result_addr);
-	}
-	else
-	{
-		expected_state
-			.frame
-			.op_queue
-			.insert(0, OperandList::new(result_addr, Vec::new()));
-	}
+	add_to_queue_idx(&mut expected_state, 0, once(result_addr));
 
 	let instruction = Instruction::StackAddr(size, idx);
 	let test_mem = BlockedMemory::new(

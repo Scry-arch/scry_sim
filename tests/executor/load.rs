@@ -1,6 +1,9 @@
 use crate::{
 	executor::test_execution_step,
-	misc::{get_absolute_address, get_indexed_address, get_relative_address, regress_queue},
+	misc::{
+		add_to_queue_idx, get_absolute_address, get_indexed_address, get_relative_address,
+		regress_queue,
+	},
 };
 use quickcheck::TestResult;
 use quickcheck_macros::quickcheck;
@@ -9,6 +12,7 @@ use scry_sim::{
 	arbitrary::{ArbScalarVal, ArbValue, NoCF},
 	BlockedMemory, ExecState, Metric, OperandList, Value, ValueType,
 };
+use std::iter::once;
 
 /// Returns whether the two address range given overlap in memory.
 fn overlap(addr1: usize, length1: usize, addr2: usize, length2: usize) -> bool
@@ -98,6 +102,7 @@ fn test_issue_load(
 				load_operands[1..].to_vec(),
 			),
 		);
+		assert!(test_state.frame.op_queue.get(&0).unwrap().len() <= state.op_list_depth());
 	}
 
 	let mut expected_state: ExecState = state.clone();
@@ -111,17 +116,7 @@ fn test_issue_load(
 	{
 		0
 	};
-	if let Some(list) = expected_state.frame.op_queue.get_mut(&target_offset)
-	{
-		list.push(loaded_op);
-	}
-	else
-	{
-		expected_state
-			.frame
-			.op_queue
-			.insert(target_offset, OperandList::new(loaded_op, Vec::new()));
-	}
+	add_to_queue_idx(&mut expected_state, target_offset, once(loaded_op));
 
 	let type_bits: Bits<4, false> = Into::<Type>::into(loaded_val.0.typ.clone())
 		.try_into()
@@ -233,7 +228,7 @@ fn load_relative_address(
 	)
 }
 
-// Test issuing a load with an relative address
+// Test issuing a load with a relative address
 #[quickcheck]
 fn load_indexed(
 	NoCF(state): NoCF<ExecState>,

@@ -1,4 +1,7 @@
-use crate::{executor::test_simple_instruction, misc::regress_queue};
+use crate::{
+	executor::test_simple_instruction,
+	misc::{add_value_to_queue_idx, regress_queue},
+};
 use quickcheck::TestResult;
 use quickcheck_macros::quickcheck;
 use scry_isa::{Bits, Instruction};
@@ -16,6 +19,7 @@ fn pick_2_inputs(
 	target: Bits<5, false>,
 ) -> TestResult
 {
+	let op_list_depth = state.op_list_depth();
 	let mut test_state = state.clone();
 	test_state.frame.op_queue = regress_queue(test_state.frame.op_queue);
 	test_state.frame.op_queue.insert(
@@ -42,14 +46,7 @@ fn pick_2_inputs(
 			let chosen = if choose_first { in1 } else { in2 };
 
 			let target_idx = (target.value + 1) as usize;
-			if let Some(list) = new_op_q.get_mut(&target_idx)
-			{
-				list.rest.push(chosen);
-			}
-			else
-			{
-				new_op_q.insert(target_idx, OperandList::new(chosen, vec![]));
-			}
+			add_value_to_queue_idx(&mut new_op_q, op_list_depth, target_idx, chosen);
 
 			new_op_q
 		},

@@ -1,4 +1,7 @@
-use crate::executor::test_simple_instruction;
+use crate::{
+	executor::test_simple_instruction,
+	misc::{add_list_to_queue_idx, add_value_to_queue_idx},
+};
 use quickcheck::TestResult;
 use quickcheck_macros::quickcheck;
 use scry_isa::{Bits, Instruction};
@@ -14,6 +17,7 @@ fn duplicate(
 	dup_next: bool,
 ) -> TestResult
 {
+	let op_list_depth = state.0.op_list_depth();
 	test_simple_instruction(
 		state,
 		Instruction::Duplicate(dup_next, target1, target2),
@@ -24,14 +28,12 @@ fn duplicate(
 			{
 				// Push a copy of old_ready_ops to the list of the given index
 				let mut push_idx = |idx| {
-					if let Some(ops) = new_op_q.get_mut(&idx)
-					{
-						ops.extend(old_ops.clone().into_iter());
-					}
-					else
-					{
-						new_op_q.insert(idx, old_ops.clone());
-					}
+					add_list_to_queue_idx(
+						&mut new_op_q,
+						op_list_depth,
+						idx,
+						old_ops.clone().into_iter(),
+					);
 				};
 
 				if dup_next
@@ -73,6 +75,7 @@ fn echo(
 	rest_next: bool,
 ) -> TestResult
 {
+	let op_list_depth = state.0.op_list_depth();
 	test_simple_instruction(
 		state,
 		Instruction::Echo(rest_next, target1, target2),
@@ -90,35 +93,14 @@ fn echo(
 					if let Some(second) = iter.next()
 					{
 						let tar2_idx = target2.value as usize + 1;
-						if let Some(list) = new_op_q.get_mut(&tar2_idx)
-						{
-							list.push(second);
-						}
-						else
-						{
-							new_op_q.insert(tar2_idx, OperandList::new(second, vec![]));
-						}
+						add_value_to_queue_idx(&mut new_op_q, op_list_depth, tar2_idx, second);
 					}
 					let tar1_idx = target1.value as usize + 1;
-					if let Some(list) = new_op_q.get_mut(&tar1_idx)
-					{
-						list.push(first);
-					}
-					else
-					{
-						new_op_q.insert(tar1_idx, OperandList::new(first, vec![]));
-					}
+					add_value_to_queue_idx(&mut new_op_q, op_list_depth, tar1_idx, first);
 					// handle the rest if needed
 					if rest_next
 					{
-						if let Some(list) = new_op_q.get_mut(&1)
-						{
-							list.extend(iter);
-						}
-						else if let Some(first_rest) = iter.next()
-						{
-							new_op_q.insert(1, OperandList::new(first_rest, iter.collect()));
-						}
+						add_list_to_queue_idx(&mut new_op_q, op_list_depth, 1, iter);
 					}
 				}
 			}
@@ -141,10 +123,11 @@ fn echo(
 	)
 }
 
-/// Tests the "echo" instruction
+/// Tests the long "echo" instruction
 #[quickcheck]
 fn echo_long(state: NoCF<ExecState>, target: Bits<10, false>) -> TestResult
 {
+	let op_list_depth = state.0.op_list_depth();
 	test_simple_instruction(
 		state,
 		Instruction::EchoLong(target),
@@ -153,17 +136,10 @@ fn echo_long(state: NoCF<ExecState>, target: Bits<10, false>) -> TestResult
 
 			if let Some(old_ops) = new_op_q.remove(&0)
 			{
-				let mut iter = old_ops.into_iter();
+				let iter = old_ops.into_iter();
 
 				let tar_idx = target.value as usize + 1;
-				if let Some(list) = new_op_q.get_mut(&tar_idx)
-				{
-					list.extend(iter);
-				}
-				else if let Some(first) = iter.next()
-				{
-					new_op_q.insert(tar_idx, OperandList::new(first, iter.collect()));
-				}
+				add_list_to_queue_idx(&mut new_op_q, op_list_depth, tar_idx, iter);
 			}
 
 			new_op_q

@@ -3,7 +3,7 @@ use crate::{
 	data::{Operand, OperandStack, ProgramStack},
 	memory::Memory,
 	value::Value,
-	ExecState, Metric, MetricTracker, Scalar, ValueType,
+	ExecState, Metric, MetricTracker, Scalar, ValueType, MAX_INSTR_INPUTS,
 };
 use byteorder::{ByteOrder, LittleEndian};
 use duplicate::duplicate_item;
@@ -45,11 +45,12 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 		start_addr: usize,
 		memory: B,
 		ready_ops: impl Iterator<Item = Value>,
+		more_depth: usize,
 	) -> Self
 	{
 		Self {
 			addr_space,
-			operands: OperandStack::new(ready_ops),
+			operands: OperandStack::new(ready_ops, more_depth),
 			control: ControlFlow::new(start_addr),
 			stack: ProgramStack::new(Default::default()),
 			stack_buffer: 0,
@@ -90,6 +91,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 			frame: frames.remove(0),
 			frame_stack: frames,
 			stack_buffer: self.stack_buffer.clone(),
+			more_depth: self.operands.op_list_depth() - MAX_INSTR_INPUTS,
 		}
 	}
 
@@ -135,7 +137,10 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 			{
 				Call(CallVariant::Call, offset) =>
 				{
-					let addr = self.get_ready_iter(tracker).next().unwrap();
+					let addr = self
+						.get_ready_iter(tracker)
+						.next()
+						.ok_or(ExecError::Err("Call instruction getting no inputs".into()))?;
 
 					let target_addr = Self::get_absolute_address(
 						self.control.next_addr,
@@ -272,7 +277,9 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 							next_addr,
 							typ.scale(),
 						)
-						.unwrap()
+						.map_err(|_| {
+							ExecError::Err("Load instruction could not calculate address".into())
+						})?
 					};
 
 					self.perform_load(typ, effective_address, offset.value as usize, tracker);
@@ -295,14 +302,18 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 				{
 					let choose_first = {
 						let mut ready_peek = self.operands.ready_peek();
-						let condition = ready_peek.next().unwrap();
+						let condition = ready_peek
+							.next()
+							.ok_or(ExecError::Err("Pick instruction getting no inputs".into()))?;
 						assert!(ready_peek.next().is_some());
 						assert!(ready_peek.next().is_some());
 						condition
 							.get_value()
 							.get_first()
 							.bytes()
-							.unwrap()
+							.ok_or(ExecError::Err(
+								"Pick instruction getting empty condition".into(),
+							))?
 							.iter()
 							.all(|b| *b == 0)
 					};
@@ -414,7 +425,10 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 				{
 					let target_typ: ValueType = typ.try_into().unwrap();
 
-					let to_cast = self.get_ready_iter(tracker).next().unwrap();
+					let to_cast = self
+						.get_ready_iter(tracker)
+						.next()
+						.ok_or(ExecError::Err("Cast instruction getting no inputs".into()))?;
 
 					let casted = Value::singleton_typed(
 						target_typ,
@@ -437,7 +451,10 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 				},
 				Grow(imm) =>
 				{
-					let to_grow = self.operands.pop_ready(tracker).unwrap();
+					let to_grow = self
+						.operands
+						.pop_ready(tracker)
+						.ok_or(ExecError::Err("Grow instruction getting no inputs".into()))?;
 					let scale = to_grow.scale();
 
 					let result: Operand = match to_grow.get_first()
@@ -466,8 +483,10 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 				},
 				instr =>
 				{
-					dbg!(instr);
-					todo!()
+					return Err(ExecError::Err(format!(
+						"Unsupported instruction: {:?}",
+						instr
+					)))
 				},
 			}
 		}
@@ -667,7 +686,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 		let to_add = add_offset.map_or(0, |(typ, bytes, scale)| {
 			if let ValueType::Int(_) = typ
 			{
-				unimplemented!()
+				// TODO: not implemented yet
 			}
 			LittleEndian::read_u128(&Self::extend_bytes_to_128(bytes, typ)) as usize * scale
 		});
@@ -920,6 +939,11 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 				Alu2Variant::Shift => Self::alu_shift,
 				Alu2Variant::Division => Self::alu_divide,
 			};
+			let (in1_typ, in2_typ) = match variant
+			{
+				Alu2Variant::Shift => (in1.typ, in2.typ),
+				_ => (effective_typ, effective_typ),
+			};
 			let (out_typ_1, out_typ_2) = match variant
 			{
 				Alu2Variant::Add | Alu2Variant::Sub => (effective_typ, ValueType::new::<u8>()),
@@ -932,7 +956,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 			let mut result_scalars_high = Vec::new();
 			for (sc1, sc2) in in1_iter.zip(in2_iter)
 			{
-				let (low, high) = func(sc1, effective_typ, sc2, effective_typ);
+				let (low, high) = func(sc1, in1_typ, sc2, in2_typ);
 				result_scalars_low.push(low);
 				result_scalars_high.push(high);
 			}
@@ -1360,7 +1384,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 				if shift_amount_negative
 				{
 					// Negative shift amount, we need to get the absolute shift amount
-					// dbg!(&shift_bytes);
+
 					// First negate all shift amount bits
 					shift_bytes.iter_mut().for_each(|b| *b = *b ^ 0b1111_1111u8);
 					// Add one
@@ -1369,7 +1393,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 						*b = new_b;
 						new_carry as i32
 					});
-					// dbg!(&shift_bytes);
+
 					(std::ops::Shr::shr, std::ops::Shr::shr)
 				}
 				else

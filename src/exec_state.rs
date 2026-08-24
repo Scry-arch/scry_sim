@@ -1,4 +1,4 @@
-use crate::Value;
+use crate::{Value, MAX_INSTR_INPUTS};
 use std::{
 	collections::HashMap,
 	fmt::Debug,
@@ -355,7 +355,7 @@ impl CallFrameState
 	/// * Any control flow target address is not 2-byte aligned and within given
 	///   address space
 	/// * Any operand list has more than supported number of operands (4)
-	pub fn validate(&self, max_addr: usize) -> Result<(), String>
+	pub fn validate(&self, max_addr: usize, more_depth: usize) -> Result<(), String>
 	{
 		if self.ret_addr % 2 != 0
 		{
@@ -389,7 +389,10 @@ impl CallFrameState
 			return Err("Control flow target address overflows address space".to_string());
 		}
 
-		if self.op_queue.iter().any(|(_, ops)| ops.len() > 4)
+		if self
+			.op_queue
+			.iter()
+			.any(|(_, ops)| ops.len() > MAX_INSTR_INPUTS + more_depth)
 		{
 			return Err("Too many operands in queue".to_string());
 		}
@@ -441,6 +444,10 @@ pub struct ExecState
 	///
 	/// The base address of the whole stack is given in the base stack frame.
 	pub stack_buffer: usize,
+
+	/// How many more operands in additional to [`MAX_INSTR_INPUTS`] each
+	/// operand list can hold
+	pub more_depth: usize,
 }
 impl ExecState
 {
@@ -457,7 +464,7 @@ impl ExecState
 		// Validate frames
 		for f in frames.clone()
 		{
-			if let Err(msg) = f.validate(self.max_addr())
+			if let Err(msg) = f.validate(self.max_addr(), self.more_depth)
 			{
 				return Err(format!("Invalid call frame: {}", msg));
 			}
@@ -516,5 +523,14 @@ impl ExecState
 	pub fn max_addr(&self) -> usize
 	{
 		2usize.saturating_pow((self.pointer_size() * 8) as u32)
+	}
+
+	/// The maximum number of operands an operand list can hold.
+	///
+	/// When adding another operand to a list while it's full will discard that
+	/// operand.
+	pub fn op_list_depth(&self) -> usize
+	{
+		MAX_INSTR_INPUTS + self.more_depth
 	}
 }

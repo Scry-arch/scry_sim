@@ -1,6 +1,6 @@
 use crate::{
 	executor::test_execution_step,
-	misc::{regress_queue, RepeatingMem},
+	misc::{add_to_queue_idx, regress_queue, RepeatingMem},
 };
 use duplicate::duplicate_item;
 use quickcheck::TestResult;
@@ -10,6 +10,7 @@ use scry_sim::{
 	arbitrary::{ArbValue, NoCF},
 	ExecState, Metric, OperandList, Scalar, Value, ValueType,
 };
+use std::iter::once;
 
 /// Tests the cast instruction
 #[duplicate_item(
@@ -68,20 +69,12 @@ fn name(
 	let target_value = Value::singleton::<to_typ>(Scalar::Val(target_bytes.into_boxed_slice()));
 
 	let mut expected_state = state.clone();
-	if let Some(list) = expected_state
-		.frame
-		.op_queue
-		.get_mut(&(out_off.value as usize))
-	{
-		list.rest.push(target_value)
-	}
-	else
-	{
-		expected_state.frame.op_queue.insert(
-			out_off.value as usize,
-			OperandList::new(target_value, vec![]),
-		);
-	}
+	add_to_queue_idx(
+		&mut expected_state,
+		out_off.value as usize,
+		once(target_value),
+	);
+
 	expected_state.address += 2;
 
 	state.frame.op_queue = regress_queue(state.frame.op_queue);

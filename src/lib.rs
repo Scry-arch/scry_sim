@@ -9,4 +9,6 @@ mod memory;
 mod metrics;
 mod value;
 
-pub use self::{exec_state::*, execution::*, memory::*, metrics::*, value::*};
+pub use self::{
+	data::MAX_INSTR_INPUTS, exec_state::*, execution::*, memory::*, metrics::*, value::*,
+};

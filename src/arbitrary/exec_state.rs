@@ -1,6 +1,6 @@
 use crate::{
 	arbitrary::WeightedArbitrary, Block, CallFrameState, ControlFlowType, ExecState, OperandList,
-	Scalar, StackFrame, Value,
+	Scalar, StackFrame, Value, MAX_INSTR_INPUTS,
 };
 use duplicate::duplicate_item;
 use num_traits::{PrimInt, Unsigned};
@@ -282,12 +282,13 @@ impl Arbitrary for StackFrame
 	}
 }
 
-/// The weight is the maximum pointer in the address space.
+/// The weight is the maximum pointer in the address space and the maximum input
+/// length.
 ///
 /// Any returned address with be lower than the max.
-impl WeightedArbitrary<usize> for CallFrameState
+impl WeightedArbitrary<(usize, usize)> for CallFrameState
 {
-	fn arbitrary_weighted(g: &mut Gen, max_addr: usize) -> Self
+	fn arbitrary_weighted(g: &mut Gen, (max_addr, more_depth): (usize, usize)) -> Self
 	{
 		let ret_addr: usize = InstrAddr::arbitrary_weighted(g, max_addr).0;
 		let mut branches = Vec::new();
@@ -305,7 +306,7 @@ impl WeightedArbitrary<usize> for CallFrameState
 		// How many operand lists
 		for i in 0..SmallInt::<usize>::arbitrary(g).0
 		{
-			let op_count = SmallInt::<u8>::arbitrary(g).0 % 5;
+			let op_count = SmallInt::<usize>::arbitrary(g).0 % (MAX_INSTR_INPUTS + more_depth);
 			if op_count > 1
 			{
 				let mut ops = Vec::new();
@@ -329,7 +330,7 @@ impl WeightedArbitrary<usize> for CallFrameState
 		}
 	}
 
-	fn shrink_weighted(&self, max_addr: usize) -> Box<dyn Iterator<Item = Self>>
+	fn shrink_weighted(&self, (max_addr, _): (usize, usize)) -> Box<dyn Iterator<Item = Self>>
 	{
 		let clone1 = self.clone();
 		let clone2 = self.clone();
@@ -468,12 +469,12 @@ impl Arbitrary for CallFrameState
 {
 	fn arbitrary(g: &mut Gen) -> Self
 	{
-		CallFrameState::arbitrary_weighted(g, usize::MAX)
+		CallFrameState::arbitrary_weighted(g, (usize::MAX, usize::MAX - MAX_INSTR_INPUTS))
 	}
 
 	fn shrink(&self) -> Box<dyn Iterator<Item = Self>>
 	{
-		CallFrameState::shrink_weighted(self, usize::MAX)
+		CallFrameState::shrink_weighted(self, (usize::MAX, usize::MAX - MAX_INSTR_INPUTS))
 	}
 }
 
@@ -497,10 +498,11 @@ impl Arbitrary for ExecState
 			},
 			frame_stack: vec![],
 			stack_buffer: 0,
+			more_depth: usize::arbitrary(g) % 16, // Keep it at a reasonable max
 		};
 		let max_addr = result.max_addr();
 
-		result.frame = CallFrameState::arbitrary_weighted(g, max_addr);
+		result.frame = CallFrameState::arbitrary_weighted(g, (max_addr, result.more_depth));
 		result.stack_buffer = usize::arbitrary(g) % max_addr;
 
 		let earliest_trigger = result
@@ -530,9 +532,10 @@ impl Arbitrary for ExecState
 		{
 			loop
 			{
-				result
-					.frame_stack
-					.push(CallFrameState::arbitrary_weighted(g, max_addr));
+				result.frame_stack.push(CallFrameState::arbitrary_weighted(
+					g,
+					(max_addr, result.more_depth),
+				));
 				result.frame_stack.last_mut().unwrap().stack.block.address = next_addr;
 
 				// Check new frame does not clash with others

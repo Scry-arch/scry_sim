@@ -11,6 +11,15 @@ use std::{
 	rc::Rc,
 };
 
+/// The highest number of inputs a non-call/dataflow instruction takes.
+///
+/// This is currently set to the maximum inputs a
+/// [`scry_isa::Instruction::Store`] takes:
+/// 1. value to store
+/// 2. base address
+/// 3. Index/offset amount
+pub const MAX_INSTR_INPUTS: usize = 3;
+
 /// An instruction operand.
 ///
 /// Differs from values in that they may not actually be available yet or may be
@@ -56,16 +65,25 @@ pub struct OperandStack
 
 	/// The operands that should be used by the next instruction
 	ready: VecDeque<Operand>,
+
+	/// The additional depth beyond [`MAX_INSTR_INPUTS`]
+	more_depth: usize,
 }
 impl OperandStack
 {
-	pub fn new(ready_ops: impl Iterator<Item = Value>) -> Self
+	pub fn new(ready_ops: impl Iterator<Item = Value>, more_depth: usize) -> Self
 	{
 		Self {
 			stack: VecDeque::new(),
 			queue: VecDeque::new(),
 			ready: VecDeque::from_iter(ready_ops.map(|v| v.into())),
+			more_depth,
 		}
+	}
+
+	pub fn op_list_depth(&self) -> usize
+	{
+		MAX_INSTR_INPUTS + self.more_depth
 	}
 
 	/// An iterator providing the operand list at the front of the operand
@@ -125,14 +143,18 @@ impl OperandStack
 		self.ready.iter()
 	}
 
-	/// Pushes the given operand to the back of the queue at the given index.
+	/// Pushes the given operand to the back of the queue at the given index if
+	/// the queue has not reached its operand limit
 	///
 	/// Doesn't update any report data
 	fn push_op_unreported(&mut self, mut idx: usize, op: Operand)
 	{
 		if idx == 0
 		{
-			self.ready.push_back(op);
+			if self.ready.len() < self.op_list_depth()
+			{
+				self.ready.push_back(op);
+			}
 		}
 		else
 		{
@@ -142,13 +164,20 @@ impl OperandStack
 			{
 				self.queue.resize_with(idx + 1, || VecDeque::new());
 			}
-			self.queue[idx].push_back(op);
+			if self.queue[idx].len() < self.op_list_depth()
+			{
+				self.queue[idx].push_back(op);
+			}
 		}
 	}
 
 	/// Pushes the given operand to the back of the list at the given index.
 	pub fn push_operand(&mut self, idx: usize, op: Operand, tracker: &mut impl MetricTracker)
 	{
+		// We report the operand as queued regardless of whether it actually is.
+		// This ensures that the difference between queued and consumed reflects those
+		// that were discarded because they were put on a full operand list and
+		// therefore dropped.
 		tracker.add_stat(Metric::QueuedValues, 1);
 		tracker.add_stat(Metric::QueuedValueBytes, op.get_value().size());
 		self.push_op_unreported(idx, op);
@@ -186,6 +215,7 @@ impl OperandStack
 		tracker: &mut impl MetricTracker,
 	)
 	{
+		let depth = self.op_list_depth();
 		if src_idx == dest_idx
 		{
 			return;
@@ -207,6 +237,10 @@ impl OperandStack
 		{
 			self.push_op_unreported(dest_idx, op);
 		}
+		self.queue
+			.get_mut(dest_idx)
+			.iter_mut()
+			.for_each(|list| list.truncate(depth))
 	}
 
 	/// Moves all operands on the ready list to the back of the `dest_idx`
@@ -241,6 +275,7 @@ impl OperandStack
 			ops.into_iter()
 				.rev()
 				.for_each(|op| self.ready.push_front(op));
+			self.ready.truncate(self.op_list_depth());
 		}
 	}
 
@@ -328,6 +363,7 @@ impl<'a> From<&'a ExecState> for OperandStack
 			),
 			queue: curr_frame_op_queue,
 			ready: first_list,
+			more_depth: state.more_depth,
 		}
 	}
 }

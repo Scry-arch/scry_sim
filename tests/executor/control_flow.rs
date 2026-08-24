@@ -1,7 +1,8 @@
 use crate::{
 	executor::{test_execution_step, SupportedInstruction},
 	misc::{
-		advance_queue, get_absolute_address, get_relative_address, regress_queue, RepeatingMem,
+		add_to_queue_idx, advance_queue, get_absolute_address, get_relative_address, regress_queue,
+		RepeatingMem,
 	},
 };
 use quickcheck::TestResult;
@@ -42,14 +43,7 @@ fn return_trigger_impl(
 	// Add operands and reads to expected state
 	if let Some(expected_ops) = expected_ready_ops
 	{
-		if let Some(op_list) = expected_state.frame.op_queue.get_mut(&0)
-		{
-			expected_ops.into_iter().for_each(|op| op_list.push(op));
-		}
-		else
-		{
-			expected_state.frame.op_queue.insert(0, expected_ops);
-		}
+		add_to_queue_idx(&mut expected_state, 0, expected_ops.into_iter());
 	}
 
 	// Because the order of pending reads affects equality, but we don't
@@ -83,6 +77,14 @@ fn return_trigger(
 	instr: SupportedInstruction,
 ) -> TestResult
 {
+	// Make sure the new frame adheres to the operand limit
+	frame.op_queue.iter_mut().for_each(|(_, list)| {
+		while list.len() > state.op_list_depth()
+		{
+			list.rest.remove(list.rest.len() - 1);
+		}
+	});
+
 	// Don't test the actually return instruction itself
 	if let Instruction::Call(CallVariant::Ret, _) = instr.0
 	{
@@ -98,11 +100,10 @@ fn return_trigger(
 	let mut expected_metrics = TrackReport::new();
 	let expected_ready_ops = match Executor::from_state(
 		&ExecState {
-			addr_space: state.addr_space,
-			address: state.address,
 			frame: frame.clone(),
 			frame_stack: Vec::new(),
 			stack_buffer: 0,
+			..state
 		},
 		RepeatingMem::<true>(instr_encoded, 0),
 	)
@@ -129,8 +130,16 @@ fn return_trigger(
 
 /// Test return instructions with 0-offset (return immediately)
 #[quickcheck]
-fn return_immediately(state: NoCF<ExecState>, frame: CallFrameState) -> TestResult
+fn return_immediately(state: NoCF<ExecState>, mut frame: CallFrameState) -> TestResult
 {
+	// Make sure the new frame adheres to the operand limit
+	frame.op_queue.iter_mut().for_each(|(_, list)| {
+		while list.len() > state.0.op_list_depth()
+		{
+			list.rest.remove(list.rest.len() - 1);
+		}
+	});
+
 	// The operands given to the branch location must be moved into the caller
 	// frame.
 	let expected_ready_ops = frame.op_queue.get(&1).cloned();
@@ -552,6 +561,7 @@ fn call_trigger_empty_stack()
 			frame: Default::default(),
 			frame_stack: vec![],
 			stack_buffer: 0,
+			more_depth: 0,
 		}),
 		SupportedInstruction(Instruction::NoOp),
 		InstrAddr(0x1000)
