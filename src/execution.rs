@@ -763,12 +763,14 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 						let mut scalars: Vec<_> = in1
 							.iter()
 							.map(|_| {
+								// Create implicit second operands
 								let mut bytes = Vec::new();
 								bytes.resize(in1.value_type().scale(), 0);
 								match variant
 								{
-									Add | Sub => bytes[0] = 1,                      // implicit 1
-									Equal | LessThan | GreaterThan => bytes[0] = 0, // implicit 0
+									Add | Sub | BitAnd => bytes[0] = 1,
+									Equal | LessThan | GreaterThan => bytes[0] = 0,
+									BitOr | BitXor => bytes.iter_mut().for_each(|b| *b = u8::MAX),
 									x =>
 									{
 										dbg!(x);

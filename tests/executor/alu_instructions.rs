@@ -340,14 +340,17 @@ fn test_alu2_instruction<const OPS: usize>(
 /// Tests the Alu instruction variants that have a std function doing the same
 /// thing.
 #[duplicate_item(
-	test_name 		alu_var		std_fn				inputs	second;
+	test_name 		alu_var		std_fn				inputs	second(t);
 	[add]			[Add]		[saturating_add]	[2]		[sc[1]];
 	[inc_sat]		[Add]		[saturating_add]	[1]		[1];
 	[sub]			[Sub]		[saturating_sub]	[2]		[sc[1]];
 	[dec_sat]		[Sub]		[saturating_sub]	[1]		[1];
 	[bit_and]		[BitAnd]	[bitand]			[2]		[sc[1]];
+	[is_odd]		[BitAnd]	[bitand]			[1]		[1];
 	[bit_or]		[BitOr]		[bitor]				[2]		[sc[1]];
-	[bit_xor]		[BitXor]	[bitxor]				[2]		[sc[1]];
+	[set_all]		[BitOr]		[bitor]				[1]		[(u128::MAX) as t];
+	[bit_xor]		[BitXor]	[bitxor]			[2]		[sc[1]];
+	[bit_not]		[BitXor]	[bitxor]			[1]		[(u128::MAX) as t];
 )]
 #[quickcheck]
 fn test_name(state: AluTestState<inputs>, offset: Bits<5, false>) -> TestResult
@@ -356,16 +359,16 @@ fn test_name(state: AluTestState<inputs>, offset: Bits<5, false>) -> TestResult
 		state,
 		offset,
 		AluVariant::alu_var,
-		|sc| u8::std_fn(sc[0], second),
-		|sc| u16::std_fn(sc[0], second),
-		|sc| u32::std_fn(sc[0], second),
-		|sc| u64::std_fn(sc[0], second),
-		|sc| u128::std_fn(sc[0], second),
-		|sc| i8::std_fn(sc[0], second),
-		|sc| i16::std_fn(sc[0], second),
-		|sc| i32::std_fn(sc[0], second),
-		|sc| i64::std_fn(sc[0], second),
-		|sc| i128::std_fn(sc[0], second),
+		|sc| u8::std_fn(sc[0], second([u8])),
+		|sc| u16::std_fn(sc[0], second([u16])),
+		|sc| u32::std_fn(sc[0], second([u32])),
+		|sc| u64::std_fn(sc[0], second([u64])),
+		|sc| u128::std_fn(sc[0], second([u128])),
+		|sc| i8::std_fn(sc[0], second([i8])),
+		|sc| i16::std_fn(sc[0], second([i16])),
+		|sc| i32::std_fn(sc[0], second([i32])),
+		|sc| i64::std_fn(sc[0], second([i64])),
+		|sc| i128::std_fn(sc[0], second([i128])),
 	)
 }
 
@@ -692,15 +695,15 @@ impl ScryRem<typ_out> for typ_in
 {
 	fn scry_rem(self, rhs: typ_in) -> typ_out
 	{
-		typ_in::rem_euclid(self, rhs) as typ_out
+		typ_in::wrapping_rem_euclid(self, rhs) as typ_out
 	}
 }
 
 #[duplicate_item(
-	name				variant		func_low(typ)		func_high(typ)	inputs	second_input	validate;
-	[shift_right]		[Shift]		[Shr::shr]			[shr_high]		[2]		[abs(x[1])]		[valid_shift(&state, false)];
-	[division]			[Division]	[typ::div_euclid]	[typ::scry_rem]	[2]		[x[1]]			[valid_div(&state)];
-	[divide_by_two]		[Division]	[typ::div_euclid]	[typ::scry_rem]	[1]		[2]				[Some(())];
+	name				variant		func_low(typ)				func_high(typ)	inputs	second_input	validate;
+	[shift_right]		[Shift]		[Shr::shr]					[shr_high]		[2]		[abs(x[1])]		[valid_shift(&state, false)];
+	[division]			[Division]	[typ::wrapping_div_euclid]	[typ::scry_rem]	[2]		[x[1]]			[valid_div(&state)];
+	[divide_by_two]		[Division]	[typ::wrapping_div_euclid]	[typ::scry_rem]	[1]		[2]				[Some(())];
 )]
 #[quickcheck]
 fn name(
