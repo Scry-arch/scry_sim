@@ -706,27 +706,40 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 			let mut ready_iter = self.get_ready_iter(tracker);
 			(ready_iter.next(), ready_iter.next())
 		};
-		assert!(op2.is_none()); // TODO: implement 2-operand jumps
 
 		// If no operands are given, it's an unconditional jump
 		let unconditional = op1.is_none();
+		let target_value = op2
+			.clone()
+			.map_or(target.value, |v| v.get_first().i128_value().unwrap() as i32);
+		let location_value = if op2.is_some()
+		{
+			let upper_7 = target.value & 0b111_1111;
+			let lower_6 = location.value & 0b11_1111;
+			(upper_7 << location.width()) | lower_6
+		}
+		else
+		{
+			location.value
+		};
+
 		let is_zero = op1.map_or(false, |val1| {
 			val1.get_first().bytes().unwrap().iter().all(|b| *b == 0)
 		});
 
-		if target.value <= 0 && (!is_zero || unconditional)
+		if target_value <= 0 && (!is_zero || unconditional)
 		{
 			self.control.branch(
-				self.control.next_addr + (location.value * 2) as usize,
-				self.control.next_addr - (target.value * -1 * 2) as usize,
+				self.control.next_addr + (location_value * 2) as usize,
+				self.control.next_addr - (target_value.wrapping_mul(-1)).wrapping_mul(2) as usize,
 				tracker,
 			);
 		}
-		else if target.value > 0 && (is_zero || unconditional)
+		else if target_value > 0 && (is_zero || unconditional)
 		{
 			self.control.branch(
-				self.control.next_addr + (location.value * 2) as usize,
-				self.control.next_addr + ((target.value + location.value + 1) * 2) as usize,
+				self.control.next_addr + (location_value * 2) as usize,
+				self.control.next_addr + ((target_value + location_value + 1) * 2) as usize,
 				tracker,
 			);
 		}

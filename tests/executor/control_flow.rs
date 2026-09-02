@@ -12,7 +12,7 @@ use scry_sim::{
 	arbitrary::{ArbValue, InstrAddr, NoCF},
 	Block, CallFrameState, ControlFlowType, ExecState, Executor, Metric,
 	Metric::{ConsumedBytes, ConsumedOperands, IssuedCalls},
-	MetricTracker, OperandList, Scalar, StackFrame, TrackReport, ValueType,
+	MetricTracker, OperandList, StackFrame, TrackReport, ValueType,
 };
 use std::collections::HashMap;
 
@@ -309,25 +309,30 @@ fn jmp_trigger_past_trigger(
 	)
 }
 
-/// Test the jump instruction when taking 1 operand (i.e. immediate target and
-/// location offsets).
+/// Test a jump instruction, regardless of variant.
 ///
-/// Takes the given start state and jump target, location, and condition.
-/// If no condition is given, will test the unconditional variant of the jump
-/// (no operands). Tests that the state almost doesn't change expect the
-/// following:
+/// Takes the given start state and the already-resolved pieces of the jump:
+///
+/// * `instr`: the jump instruction to execute (already carrying its
+///   immediates).
+/// * `ready_ops`: the operands to place on the ready list. `None` means an
+///   unconditional jump (no operands). The first operand is the condition and
+///   the second, if present, is the target.
+/// * `target`: the effective target value, whether immediate or operand.
+/// * `location`: the effective location offset, whether 6 or 13 bits.
+///
+/// Tests that the state almost doesn't change except the following:
 ///
 /// * If the jump is taken, `expect_jump` should alter the expected state given
-///   to it
-/// using the target and location addresses given.
+///   to it using the target and location addresses given.
 /// * If `may_trigger` is true, the expected state's address is only incremented
-///   by 2
-/// if the jump is not taken, otherwise it is always incremented.
-fn test_jump_immediate(
+///   by 2 if the jump is not taken, otherwise it is always incremented.
+fn test_jump(
 	NoCF(state): NoCF<ExecState>,
-	target: Bits<7, true>,
-	location: Bits<6, false>,
-	condition: Option<ArbValue<false, false>>,
+	instr: Instruction,
+	ready_ops: Option<OperandList>,
+	target: i128,
+	location: u32,
 	expect_jump: impl FnOnce(&mut ExecState, usize, usize),
 	may_trigger: bool,
 ) -> TestResult
@@ -335,14 +340,11 @@ fn test_jump_immediate(
 	// Construct test state
 	let mut test_state: ExecState = state.clone();
 	// Regress operand queue so that we can put our input as the
-	// the ready list.
+	// ready list.
 	test_state.frame.op_queue = regress_queue(test_state.frame.op_queue);
-	if let Some(condition) = &condition
+	if let Some(ops) = &ready_ops
 	{
-		test_state
-			.frame
-			.op_queue
-			.insert(0, OperandList::new(condition.0.clone(), vec![]));
+		test_state.frame.op_queue.insert(0, ops.clone());
 	}
 
 	// Expected state should be the same as the given one (since we first regressed
@@ -353,33 +355,24 @@ fn test_jump_immediate(
 		expected_state.address += 2;
 	}
 
-	let (unconditional, is_zero) = if let Some(condition) = &condition
-	{
-		if let Scalar::Val(s) = condition.0.get_first()
-		{
-			(false, s.iter().all(|b| *b == 0))
-		}
-		else
-		{
-			unreachable!()
-		}
-	}
-	else
-	{
-		(true, false)
-	};
-	let location_addr = if let Some(addr) = state.address.checked_add((location.value * 2) as usize)
-	{
-		addr
-	}
+	let unconditional = ready_ops.is_none();
+	let cond_is_zero = ready_ops.as_ref().map_or(false, |ops| {
+		ops.first
+			.get_first()
+			.bytes()
+			.unwrap()
+			.iter()
+			.all(|b| *b == 0)
+	});
+	let Some(location_addr) = state.address.checked_add((location * 2) as usize)
 	else
 	{
 		// Undefined behavior
 		return TestResult::discard();
 	};
-	let jump_taken = if target.value <= 0 && (!is_zero || unconditional)
+	let jump_taken = if target <= 0 && (!cond_is_zero || unconditional)
 	{
-		if let Some(target_addr) = state.address.checked_sub((target.value * -2) as usize)
+		if let Some(target_addr) = state.address.checked_sub((target * -2) as usize)
 		{
 			expect_jump(&mut expected_state, target_addr, location_addr);
 			true
@@ -390,12 +383,12 @@ fn test_jump_immediate(
 			return TestResult::discard();
 		}
 	}
-	else if target.value > 0 && (is_zero || unconditional)
+	else if target > 0 && (cond_is_zero || unconditional)
 	{
 		// location offset is 0, so no need to add
 		if let Some(target_addr) = state
 			.address
-			.checked_add(((target.value + location.value + 1) * 2) as usize)
+			.checked_add(((target as u32 + location + 1) * 2) as usize)
 		{
 			// Discard test if jumping past trigger location
 			if test_state
@@ -432,12 +425,14 @@ fn test_jump_immediate(
 		(Metric::IssuedBranches, jump_taken as usize),
 	]
 	.into();
-	if !unconditional
+	if let Some(ops) = &ready_ops
 	{
-		expected_metrics.add_stat(Metric::ConsumedOperands, 1);
+		expected_metrics.add_stat(Metric::ConsumedOperands, ops.len());
 		expected_metrics.add_stat(
 			Metric::ConsumedBytes,
-			condition.map_or(0, |c| c.0.get_first().bytes().unwrap().len()),
+			ops.iter()
+				.map(|v| v.get_first().bytes().unwrap().len())
+				.sum(),
 		);
 	}
 	if may_trigger
@@ -446,9 +441,69 @@ fn test_jump_immediate(
 	}
 	test_execution_step(
 		&test_state,
-		RepeatingMem::<true>(Instruction::encode(&Instruction::Jump(target, location)), 0),
+		RepeatingMem::<true>(Instruction::encode(&instr), 0),
 		&expected_state,
 		&expected_metrics,
+	)
+}
+
+/// Test the jump instruction when taking 1 operand (i.e. immediate target and
+/// location offsets).
+///
+/// If no condition is given, will test the unconditional variant of the jump
+/// (no operands). See [`test_jump`] for the remaining semantics.
+fn test_jump_immediate(
+	state: NoCF<ExecState>,
+	target: Bits<7, true>,
+	location: Bits<6, false>,
+	condition: Option<ArbValue<false, false>>,
+	expect_jump: impl FnOnce(&mut ExecState, usize, usize),
+	may_trigger: bool,
+) -> TestResult
+{
+	test_jump(
+		state,
+		Instruction::Jump(target, location),
+		condition.map(|c| OperandList::new(c.0, vec![])),
+		target.value as i128,
+		location.value as u32,
+		expect_jump,
+		may_trigger,
+	)
+}
+
+/// Test the jump instruction when taking 2 operand (i.e. immediate location
+/// offset and target from second operand).
+///
+/// The location (full 13-bits) is split across the two immediate fields of the
+/// instruction. See [`test_jump`] for the remaining semantics.
+fn test_jump_long(
+	state: NoCF<ExecState>,
+	target: ArbValue<false, false>,
+	location: Bits<13, false>,
+	condition: ArbValue<false, false>,
+	expect_jump: impl FnOnce(&mut ExecState, usize, usize),
+	may_trigger: bool,
+) -> TestResult
+{
+	let location_bits = location.value as u32;
+	let lower_6 = location_bits & 0b11_1111;
+	let upper_7 = location_bits >> 6;
+	test_jump(
+		state,
+		Instruction::Jump(
+			Bits {
+				value: upper_7 as i32,
+			},
+			Bits {
+				value: lower_6 as i32,
+			},
+		),
+		Some(OperandList::new(condition.0, vec![target.0.clone()])),
+		target.0.get_first().i128_value().unwrap(),
+		location_bits,
+		expect_jump,
+		may_trigger,
 	)
 }
 
@@ -465,6 +520,24 @@ fn jmp_imm_immediately(
 		target,
 		0.try_into().unwrap(),
 		Some(condition),
+		|expected_state, target_addr, _| expected_state.address = target_addr,
+		true,
+	)
+}
+
+/// Test the long jump instruction that triggers immediately
+#[quickcheck]
+fn jmp_long_immediately(
+	state: NoCF<ExecState>,
+	target: ArbValue<false, false>,
+	condition: ArbValue<false, false>,
+) -> TestResult
+{
+	test_jump_long(
+		state,
+		target,
+		0.try_into().unwrap(),
+		condition,
 		|expected_state, target_addr, _| expected_state.address = target_addr,
 		true,
 	)
@@ -488,6 +561,34 @@ fn jmp_imm_non_trigger(
 		target,
 		location,
 		Some(condition),
+		|expected_state, target_addr, location_addr| {
+			expected_state
+				.frame
+				.branches
+				.insert(location_addr, ControlFlowType::Branch(target_addr));
+		},
+		false,
+	)
+}
+
+/// Test the long jump instruction that doesn't trigger immediately
+#[quickcheck]
+fn jmp_long_non_trigger(
+	state: NoCF<ExecState>,
+	target: ArbValue<false, false>,
+	location: Bits<13, false>,
+	condition: ArbValue<false, false>,
+) -> TestResult
+{
+	if location.value == 0
+	{
+		return TestResult::discard();
+	}
+	test_jump_long(
+		state,
+		target,
+		location,
+		condition,
 		|expected_state, target_addr, location_addr| {
 			expected_state
 				.frame
