@@ -7,8 +7,8 @@ use quickcheck_macros::quickcheck;
 use scry_isa::{Bits, Instruction};
 use scry_sim::{
 	arbitrary::{LimitedOps, NoCF},
-	BlockedMemory, CallFrameState, Event, EventTracker, ExecState, IdEvent, Metric, OperandEvent,
-	Scalar, Value, ValueType,
+	BlockedMemory, CallFrameState, Event, EventTracker, ExecState, IdEvent, OperandEvent, Scalar,
+	Value, ValueType,
 };
 use std::iter::once;
 
@@ -79,12 +79,6 @@ fn static_reserve_shared(
 		&state.clone(),
 		test_mem,
 		&expected_state,
-		&[
-			(Metric::InstructionReads, 1),
-			(Metric::StackReserveTotal, 1),
-			(Metric::StackReserveTotalBytes, reserve_amount),
-		]
-		.into(),
 		&stack_change_events(state.address, instr, &expected_state.frame, false, true),
 	)
 }
@@ -122,13 +116,6 @@ fn static_reserve_private(
 		&state.clone(),
 		test_mem,
 		&expected_state,
-		&[
-			(Metric::InstructionReads, 1),
-			(Metric::StackReserveBase, 1),
-			(Metric::StackReserveTotalBytes, total_res),
-			(Metric::StackReserveBaseBytes, reserve_amount),
-		]
-		.into(),
 		&stack_change_events(
 			state.address,
 			instr,
@@ -170,13 +157,6 @@ fn static_free_shared(
 		&state.clone(),
 		test_mem,
 		&expected_state,
-		&[
-			(Metric::InstructionReads, 1),
-			(Metric::StackFreeTotal, 1),
-			(Metric::StackFreeTotalBytes, free_amount),
-			(Metric::StackFreeBaseBytes, private_free),
-		]
-		.into(),
 		&stack_change_events(
 			state.address,
 			instr,
@@ -210,12 +190,6 @@ fn static_free_private(
 		&state.clone(),
 		test_mem,
 		&expected_state,
-		&[
-			(Metric::InstructionReads, 1),
-			(Metric::StackFreeBase, 1),
-			(Metric::StackFreeBaseBytes, free_amount),
-		]
-		.into(),
 		&stack_change_events(state.address, instr, &expected_state.frame, true, false),
 	)
 }
@@ -262,16 +236,5 @@ fn stack_address_indexed_static(
 	{
 		expected_events.event(Event::Id(0, IdEvent::Operand(OperandEvent::Discard)));
 	}
-	test_execution_step(
-		&test_state,
-		test_mem,
-		&expected_state,
-		&[
-			(Metric::InstructionReads, 1),
-			(Metric::QueuedValues, 1),
-			(Metric::QueuedValueBytes, state.pointer_size() as usize),
-		]
-		.into(),
-		&expected_events,
-	)
+	test_execution_step(&test_state, test_mem, &expected_state, &expected_events)
 }

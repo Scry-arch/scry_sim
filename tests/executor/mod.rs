@@ -7,8 +7,8 @@ use quickcheck_macros::quickcheck;
 use scry_isa::{Alu2Variant, AluVariant, Bits, CallVariant, Instruction, Type};
 use scry_sim::{
 	arbitrary::{LimitedOps, NoCF, SimpleOps},
-	Event, EventTracker, ExecError, ExecState, Executor, IdEvent, Memory, Metric, MetricReporter,
-	MetricTracker, OperandEvent, OperandQueue, Scalar, TrackReport, Value, ValueType,
+	Event, EventTracker, ExecError, ExecState, Executor, IdEvent, Memory, OperandEvent,
+	OperandQueue, Scalar, Value, ValueType,
 };
 use std::{
 	borrow::BorrowMut,
@@ -119,27 +119,15 @@ impl Arbitrary for SupportedInstruction
 	}
 }
 
-/// Checks that the expected metrics are equal to the actual ones.
+/// Checks that the expected events are equivalent to the actual ones.
 /// If not, prints relevant error
-pub fn test_metrics(
-	expected: &TrackReport,
-	actual: &TrackReport,
-	expected_ev: &OneShotTracker,
-	actual_ev: &OneShotTracker,
-) -> TestResult
+pub fn test_events(expected: &OneShotTracker, actual: &OneShotTracker) -> TestResult
 {
 	if actual != expected
 	{
 		TestResult::error(format!(
-			"Unexpected step metrics (actual != expected):\n{:?}\n !=\n {:?}",
-			actual, expected
-		))
-	}
-	else if actual_ev != expected_ev
-	{
-		TestResult::error(format!(
 			"Unexpected step events (actual != expected):\n{:?}\n !=\n {:?}",
-			actual_ev, expected_ev
+			actual, expected
 		))
 	}
 	else
@@ -150,33 +138,24 @@ pub fn test_metrics(
 
 /// Performs 1 execution step with the given start state and memory.
 /// Then checks that the given expected state is achieved with the expected
-/// metrics reported.
+/// events reported.
 pub fn test_execution_step<M: Memory + Debug>(
 	start_state: &ExecState,
 	start_memory: impl BorrowMut<M> + Debug,
 	expected_state: &ExecState,
-	expected_metrics: &TrackReport,
 	expected_events: &OneShotTracker,
 ) -> TestResult
 {
-	let mut actual_metrics = TrackReport::new();
 	let mut actual_events = OneShotTracker::new();
 	match Executor::from_state(start_state, start_memory, &mut actual_events)
-		.step(&mut actual_metrics, &mut actual_events)
+		.step(&mut actual_events)
 	{
 		Ok(exec) =>
 		{
 			check_expected(
 				&exec.state(),
 				expected_state,
-				|| {
-					test_metrics(
-						expected_metrics,
-						&actual_metrics,
-						&expected_events,
-						&actual_events,
-					)
-				},
+				|| test_events(expected_events, &actual_events),
 				"end state",
 			)
 		},
@@ -210,28 +189,18 @@ pub fn check_expected<P: PartialEq + Debug>(
 }
 
 /// Tests that an execution step from the given state/memory results in an
-/// exception with the given expected metrics.
+/// exception with the given expected events.
 pub fn test_execution_step_exceptions<M: Memory + Debug>(
 	start_state: &ExecState,
 	start_memory: impl BorrowMut<M> + Debug,
-	expected_metrics: &TrackReport,
 	expected_events: &OneShotTracker,
 ) -> TestResult
 {
-	let mut actual_metrics = TrackReport::new();
 	let mut actual_events = OneShotTracker::new();
 	match Executor::from_state(start_state, start_memory, &mut actual_events)
-		.step(&mut actual_metrics, &mut actual_events)
+		.step(&mut actual_events)
 	{
-		Err(ExecError::Exception(_)) =>
-		{
-			test_metrics(
-				expected_metrics,
-				&actual_metrics,
-				expected_events,
-				&actual_events,
-			)
-		},
+		Err(ExecError::Exception(_)) => test_events(expected_events, &actual_events),
 		result =>
 		{
 			TestResult::error(format!(
@@ -253,17 +222,16 @@ pub fn test_execution_step_exceptions<M: Memory + Debug>(
 /// `expected_op_queue` (and that the program counter has incremented by 2). The
 /// returned operand queue should not be advanced before being returned.
 /// But, the ready list (index 0) must be removed. The queue will then  be
-/// advanced before the check. If so, will then check that the reported metrics
-/// match those returned by `expected_metrics` (plus that 1 instruction has been
-/// read).
+/// advanced before the check. If so, will then check that the reported events
+/// match those returned by `expected_events` (plus that the instruction has
+/// been executed).
 ///
-/// Both `expected_op_queue` and `expected_metrics` are given the current
+/// Both `expected_op_queue` and `expected_events` are given the current
 /// function's operand queue before the step is performed.
 fn test_simple_instruction(
 	NoCF(state): NoCF<ExecState>,
 	instr: Instruction,
 	expected_op_queue: impl FnOnce(&OperandQueue) -> OperandQueue,
-	expected_metrics: impl FnOnce(&OperandQueue) -> TrackReport,
 	expected_events: impl FnOnce(&OperandQueue) -> OneShotTracker,
 ) -> TestResult
 {
@@ -276,11 +244,6 @@ fn test_simple_instruction(
 	assert!(expected_state.frame.op_queue.get(&0).is_none());
 	expected_state.frame.op_queue = advance_queue(expected_state.frame.op_queue);
 
-	// Build expected metrics
-	let mut expected_mets = expected_metrics(&state.frame.op_queue);
-	assert_eq!(expected_mets.get_stat(Metric::InstructionReads), 0);
-	expected_mets.add_stat(Metric::InstructionReads, 1);
-
 	// Build expected events
 	let mut expected_evs = expected_events(&state.frame.op_queue);
 	expected_evs.event(Event::Instruction(state.address, instr.clone()));
@@ -289,7 +252,6 @@ fn test_simple_instruction(
 		&state,
 		RepeatingMem::<true>(instr.encode(), 0),
 		&expected_state,
-		&expected_mets,
 		&expected_evs,
 	)
 }
@@ -384,8 +346,7 @@ fn max_operands_in_list(
 	let expected_list = state.frame.op_queue.get(&(out_ref + 1)).unwrap().clone();
 
 	match std::panic::catch_unwind(|| {
-		Executor::from_state(&state, RepeatingMem::<true>(inst.encode(), 0), &mut ())
-			.step(&mut (), &mut ())
+		Executor::from_state(&state, RepeatingMem::<true>(inst.encode(), 0), &mut ()).step(&mut ())
 	})
 	{
 		Ok(Ok(exec)) =>
@@ -420,7 +381,6 @@ fn instruction_nop(state: NoCF<ExecState>) -> TestResult
 			new_op_q.remove(&0);
 			new_op_q
 		},
-		|_| [].into(),
 		|old_op_queue| {
 			let mut evs = OneShotTracker::new();
 			if let Some(list) = old_op_queue.get(&0)
@@ -484,15 +444,6 @@ fn instruction_constant(
 				add_list_to_queue_idx(&mut new_op_q, op_list_depth, 1, old_ops.into_iter());
 			}
 			new_op_q
-		},
-		|old_op_queue| {
-			let old_op_count = old_op_queue.get(&0).map_or(0, |ops| ops.len());
-			[
-				(Metric::QueuedValues, 1),
-				(Metric::QueuedValueBytes, typ.size()),
-				(Metric::ReorderedOperands, old_op_count),
-			]
-			.into()
 		},
 		|old_op_queue| {
 			let mut evs = OneShotTracker::new();
@@ -588,16 +539,6 @@ fn instruction_grow(
 
 			new_op_q
 		},
-		|_| {
-			[
-				(Metric::QueuedValues, 1),
-				(Metric::QueuedValueBytes, in_val.typ.scale()),
-				(Metric::ConsumedOperands, 1),
-				(Metric::ConsumedBytes, in_val.typ.scale()),
-				(Metric::ReorderedOperands, ready_q.rest.len()),
-			]
-			.into()
-		},
 		|q| grow_events(q, op_list_depth),
 	)
 }
@@ -610,7 +551,6 @@ fn instruction_grow_nop(
 ) -> TestResult
 {
 	let op_list_depth = state.0 .0.op_list_depth();
-	let ready_q_len = state.0 .0.frame.op_queue.get(&0).map_or(0, |l| l.len());
 
 	let old_ops = state
 		.0
@@ -645,26 +585,6 @@ fn instruction_grow_nop(
 			);
 
 			new_op_q
-		},
-		|_| {
-			[
-				(Metric::QueuedValues, 1),
-				(Metric::QueuedValueBytes, value.typ.scale()),
-				(Metric::ConsumedOperands, 1),
-				(Metric::ConsumedBytes, value.typ.scale()),
-				(
-					Metric::ReorderedOperands,
-					if ready_q_len >= op_list_depth
-					{
-						ready_q_len - 1
-					}
-					else
-					{
-						ready_q_len
-					},
-				),
-			]
-			.into()
 		},
 		|q| grow_events(q, op_list_depth),
 	)

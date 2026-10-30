@@ -1,6 +1,6 @@
 use crate::{
-	value::Value, CallFrameState, Event, EventTracker, ExecState, IdEvent, Metric, MetricTracker,
-	OperandEvent, OperandList, StackFrame,
+	value::Value, CallFrameState, Event, EventTracker, ExecState, IdEvent, OperandEvent,
+	OperandList, StackFrame,
 };
 use std::{
 	cell::RefCell,
@@ -90,33 +90,31 @@ impl OperandStack
 	/// An iterator providing the operand list at the front of the operand
 	/// queue.
 	///
-	/// Only when `next` is called, will a returned operand be treated as
-	/// "consumed" by the report.
+	/// Only when `next` is called, will a returned operand be reported as
+	/// consumed to the event tracker.
 	///
 	/// When the iterator is dropped, the queue discards the remaining operands
 	/// at the front of the queue, and moves the next operand list to the front.
-	pub fn ready_iter<'a, T: MetricTracker, E: EventTracker>(
+	pub fn ready_iter<'a, E: EventTracker>(
 		&'a mut self,
-		tracker: &'a mut T,
 		events: &'a mut E,
 	) -> impl 'a + Iterator<Item = Value>
 	{
-		struct RemoveIter<'b, Ti: MetricTracker, Ei: EventTracker>
+		struct RemoveIter<'b, Ei: EventTracker>
 		{
 			stack: &'b mut OperandStack,
-			tracker: &'b mut Ti,
 			events: &'b mut Ei,
 		}
-		impl<'b, Ti: MetricTracker, Ei: EventTracker> Iterator for RemoveIter<'b, Ti, Ei>
+		impl<'b, Ei: EventTracker> Iterator for RemoveIter<'b, Ei>
 		{
 			type Item = Value;
 
 			fn next(&mut self) -> Option<Self::Item>
 			{
-				self.stack.pop_ready(self.tracker, self.events)
+				self.stack.pop_ready(self.events)
 			}
 		}
-		impl<'b, Ti: MetricTracker, Ei: EventTracker> Drop for RemoveIter<'b, Ti, Ei>
+		impl<'b, Ei: EventTracker> Drop for RemoveIter<'b, Ei>
 		{
 			fn drop(&mut self)
 			{
@@ -129,22 +127,15 @@ impl OperandStack
 		}
 		RemoveIter {
 			stack: self,
-			tracker,
 			events,
 		}
 	}
 
 	/// Extracts the first operand on the ready queue
-	pub fn pop_ready<T: MetricTracker, E: EventTracker>(
-		&mut self,
-		tracker: &mut T,
-		event_tracker: &mut E,
-	) -> Option<Value>
+	pub fn pop_ready<E: EventTracker>(&mut self, event_tracker: &mut E) -> Option<Value>
 	{
 		self.ready.pop_front().and_then(|op: Operand| {
 			let val = op.get_value().clone();
-			tracker.add_stat(Metric::ConsumedOperands, 1);
-			tracker.add_stat(Metric::ConsumedBytes, val.size());
 			event_tracker.event(Event::Id(op.id, IdEvent::Operand(OperandEvent::Consume)));
 			Some(val)
 		})
@@ -160,7 +151,7 @@ impl OperandStack
 	/// the queue has not reached its operand limit. Returns whether the operand
 	/// was pushed. I.e. returns false if the queue is at its limit
 	///
-	/// Doesn't update any report data
+	/// Doesn't report any events
 	fn push_op_unreported(&mut self, mut idx: usize, op: Operand) -> bool
 	{
 		if idx == 0
@@ -197,20 +188,11 @@ impl OperandStack
 	}
 
 	/// Pushes the given operand to the back of the list at the given index.
-	pub fn push_operand(
-		&mut self,
-		idx: usize,
-		op: Operand,
-		tracker: &mut impl MetricTracker,
-		event_tracker: &mut impl EventTracker,
-	)
+	pub fn push_operand(&mut self, idx: usize, op: Operand, event_tracker: &mut impl EventTracker)
 	{
-		// We report the operand as queued regardless of whether it actually is.
-		// This ensures that the difference between queued and consumed reflects
-		// those that were discarded because they were put on a full operand
-		// list and therefore dropped.
-		tracker.add_stat(Metric::QueuedValues, 1);
-		tracker.add_stat(Metric::QueuedValueBytes, op.get_value().size());
+		// We report the operand as produced regardless of whether it is
+		// actually queued. If it is put on a full operand list and therefore
+		// dropped, a discard event is additionally reported.
 		let id = op.id;
 		event_tracker.event(Event::Id(id, IdEvent::Operand(OperandEvent::Produce)));
 		if !self.push_op_unreported(idx, op)
@@ -229,7 +211,6 @@ impl OperandStack
 		src_list_idx: usize,
 		src_idx: usize,
 		target_idx: usize,
-		tracker: &mut impl MetricTracker,
 		event_tracker: &mut impl EventTracker,
 	)
 	{
@@ -238,7 +219,6 @@ impl OperandStack
 			.nth(src_list_idx)
 			.and_then(|list| list.remove(src_idx))
 			.map(|op| {
-				tracker.add_stat(Metric::ReorderedOperands, 1);
 				let id = op.id;
 				event_tracker.event(Event::Id(id, IdEvent::Operand(OperandEvent::Forward)));
 				if !self.push_op_unreported(target_idx, op)
@@ -254,7 +234,6 @@ impl OperandStack
 		&mut self,
 		src_idx: usize,
 		dest_idx: usize,
-		tracker: &mut impl MetricTracker,
 		ev_tracker: &mut impl EventTracker,
 	)
 	{
@@ -273,7 +252,6 @@ impl OperandStack
 		}
 		.and_then(|list| list.remove(0))
 		.map(|op| {
-			tracker.add_stat(Metric::ReorderedOperands, 1);
 			ev_tracker.event(Event::Id(op.id, IdEvent::Operand(OperandEvent::Forward)));
 			op
 		})
@@ -288,14 +266,9 @@ impl OperandStack
 
 	/// Moves all operands on the ready list to the back of the `dest_idx`
 	/// queue.
-	pub fn reorder_ready(
-		&mut self,
-		dest_idx: usize,
-		tracker: &mut impl MetricTracker,
-		events: &mut impl EventTracker,
-	)
+	pub fn reorder_ready(&mut self, dest_idx: usize, events: &mut impl EventTracker)
 	{
-		self.reorder_list(0, dest_idx, tracker, events)
+		self.reorder_list(0, dest_idx, events)
 	}
 
 	/// Pushes the current operand queue onto the queue stack keeping the ready

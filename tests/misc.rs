@@ -3,8 +3,8 @@ use duplicate::duplicate_item;
 use quickcheck_macros::quickcheck;
 use scry_isa::Instruction;
 use scry_sim::{
-	Event, EventTracker, ExecState, IdEvent, MemError, Memory, Metric, MetricTracker, OperandEvent,
-	OperandList, OperandQueue, Scalar, Value, ValueType,
+	Event, EventTracker, ExecState, IdEvent, MemError, Memory, OperandEvent, OperandList,
+	OperandQueue, Scalar, Value, ValueType,
 };
 use std::{
 	cmp::max,
@@ -189,11 +189,7 @@ impl PartialEq for OneShotTracker
 /// should return from every `read_instr` while the second is what
 /// `read_data` will populate all read bytes with.
 ///
-/// Read metrics will be reported correctly, except alignment which will
-/// be ignored.
-///
-/// If `MAY_STORE` is true, writes will succeed and update metric. If not,
-/// writes will fail.
+/// If `MAY_STORE` is true, writes will succeed. If not, writes will fail.
 ///
 /// `write_raw` will do nothing.
 ///
@@ -207,13 +203,8 @@ impl<const MAY_STORE: bool> Memory for RepeatingMem<MAY_STORE>
 		Ok(self.1)
 	}
 
-	fn read_data(
-		&mut self,
-		_: usize,
-		into: &mut Value,
-		len: usize,
-		tracker: &mut impl MetricTracker,
-	) -> Result<(), (MemError, usize)>
+	fn read_data(&mut self, _: usize, into: &mut Value, len: usize)
+		-> Result<(), (MemError, usize)>
 	{
 		let mut scalar_bytes = Vec::with_capacity(into.scale());
 		scalar_bytes.resize(into.scale(), self.1);
@@ -223,22 +214,14 @@ impl<const MAY_STORE: bool> Memory for RepeatingMem<MAY_STORE>
 		scalars.resize_with(len, || scalar.clone());
 		let result = Value::new_typed(into.value_type(), scalars.remove(0), scalars).unwrap();
 
-		tracker.add_stat(Metric::DataReads, 1);
-		tracker.add_stat(Metric::DataReadBytes, result.size());
-
 		*into = result;
 		Ok(())
 	}
 
-	fn read_instr(
-		&mut self,
-		_: usize,
-		tracker: &mut impl MetricTracker,
-	) -> Result<[u8; 2], MemError>
+	fn read_instr(&mut self, _: usize) -> Result<[u8; 2], MemError>
 	{
 		let mut result = [0; 2];
 		LittleEndian::write_u16(&mut result, self.0);
-		tracker.add_stat(Metric::InstructionReads, 1);
 		Ok(result)
 	}
 
@@ -247,16 +230,11 @@ impl<const MAY_STORE: bool> Memory for RepeatingMem<MAY_STORE>
 		Ok(())
 	}
 
-	fn write(
-		&mut self,
-		addr: usize,
-		from: &Value,
-		tracker: &mut impl MetricTracker,
-	) -> Result<(), (MemError, usize)>
+	fn write(&mut self, addr: usize, from: &Value) -> Result<(), (MemError, usize)>
 	{
 		if MAY_STORE
 		{
-			AllowWrite(self).write(addr, from, tracker)
+			AllowWrite(self).write(addr, from)
 		}
 		else
 		{
@@ -279,25 +257,17 @@ impl<'a, M: Memory> Memory for AllowWrite<'a, M>
 				addr: usize,
 				into: &mut Value,
 				len: usize,
-				tracker: &mut impl MetricTracker,
 			) -> Result<(), (MemError, usize)>;
 			fn read_instr(
 				&mut self,
 				addr: usize,
-				tracker: &mut impl MetricTracker,
 			) -> Result<[u8; 2], MemError>;
 			fn write_raw(&mut self, addr: usize, size: u8) -> Result<(), MemError>;
 		}
 	}
 
-	fn write(
-		&mut self,
-		_: usize,
-		from: &Value,
-		tracker: &mut impl MetricTracker,
-	) -> Result<(), (MemError, usize)>
+	fn write(&mut self, _: usize, _: &Value) -> Result<(), (MemError, usize)>
 	{
-		tracker.add_stat(Metric::DataWriteBytes, from.size());
 		Ok(())
 	}
 }

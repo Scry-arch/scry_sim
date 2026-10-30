@@ -8,8 +8,7 @@ use quickcheck_macros::quickcheck;
 use scry_isa::{Bits, Instruction};
 use scry_sim::{
 	arbitrary::{ArbValue, NoCF},
-	Event, EventTracker, ExecState, IdEvent, Metric, OperandEvent, OperandList, Scalar, Value,
-	ValueType,
+	Event, EventTracker, ExecState, IdEvent, OperandEvent, OperandList, Scalar, Value, ValueType,
 };
 use std::iter::once;
 
@@ -108,14 +107,6 @@ fn name(
 		&state,
 		RepeatingMem::<true>(instr.encode(), 0),
 		&expected_state,
-		&([
-			(Metric::ConsumedBytes, to_cast_bytes.len()),
-			(Metric::ConsumedOperands, 1),
-			(Metric::QueuedValueBytes, size_of::<to_typ>()),
-			(Metric::QueuedValues, 1),
-			(Metric::InstructionReads, 1),
-		]
-		.into()),
 		&expected_events,
 	)
 }

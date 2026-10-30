@@ -11,9 +11,7 @@ use scry_isa::{BitValue, Bits, CallVariant, Instruction};
 use scry_sim::{
 	arbitrary::{ArbValue, InstrAddr, NoCF},
 	Block, CallFrameState, ControlEvent, ControlFlowType, Event, EventTracker, ExecState, Executor,
-	IdEvent, Metric,
-	Metric::{ConsumedBytes, ConsumedOperands, IssuedCalls},
-	MetricTracker, OperandEvent, OperandList, StackFrame, TrackReport, ValueType,
+	IdEvent, OperandEvent, OperandList, StackFrame, ValueType,
 };
 use std::collections::HashMap;
 
@@ -31,8 +29,6 @@ fn return_trigger_impl(
 	// Operands expected to be at the end of the ready list after the return trigger.
 	// They should be following any operands that were already there from before the call.
 	expected_ready_ops: Option<OperandList>,
-	// The metrics expected after the execution step
-	expected_metrics: TrackReport,
 	expected_events: OneShotTracker,
 ) -> TestResult
 {
@@ -68,7 +64,6 @@ fn return_trigger_impl(
 		&test_state,
 		RepeatingMem::<true>(instr_encoded, 0),
 		&expected_state,
-		&expected_metrics,
 		&expected_events,
 	)
 }
@@ -101,7 +96,6 @@ fn return_trigger(
 
 	// Execute one step on the frame to get the expected result of the next
 	// instruction
-	let mut expected_metrics = TrackReport::new();
 	let mut expected_events = OneShotTracker::new();
 	let expected_ready_ops = match Executor::from_state(
 		&ExecState {
@@ -113,7 +107,7 @@ fn return_trigger(
 		RepeatingMem::<true>(instr_encoded, 0),
 		&mut expected_events,
 	)
-	.step(&mut expected_metrics, &mut expected_events)
+	.step(&mut expected_events)
 	{
 		Ok(exec) =>
 		{
@@ -123,7 +117,6 @@ fn return_trigger(
 		},
 		_ => return TestResult::discard(),
 	};
-	expected_metrics.add_stat(Metric::TriggeredReturns, 1);
 	let id = expected_events.new_control_id();
 	expected_events.event(Event::Id(id, IdEvent::ControlTrigger(ControlEvent::Return)));
 
@@ -132,7 +125,6 @@ fn return_trigger(
 		frame,
 		instr.0,
 		expected_ready_ops,
-		expected_metrics,
 		expected_events,
 	)
 }
@@ -175,11 +167,6 @@ fn return_immediately(state: NoCF<ExecState>, mut frame: CallFrameState) -> Test
 		frame,
 		instr,
 		expected_ready_ops,
-		TrackReport::from([
-			(Metric::IssuedReturns, 1),
-			(Metric::TriggeredReturns, 1),
-			(Metric::InstructionReads, 1),
-		]),
 		expected_events.into(),
 	)
 }
@@ -206,9 +193,6 @@ fn return_non_trigger(NoCF(state): NoCF<ExecState>, offset: Bits<6, false>) -> T
 	);
 	expected_state.address += 2;
 
-	use Metric::*;
-	let expected_metrics = TrackReport::from([(IssuedReturns, 1), (InstructionReads, 1)]);
-
 	let mut expected_events = [
 		Event::Instruction(state.address, instr.clone()),
 		Event::Id(0, IdEvent::ControlIssue(ControlEvent::Return)),
@@ -227,7 +211,6 @@ fn return_non_trigger(NoCF(state): NoCF<ExecState>, offset: Bits<6, false>) -> T
 		&state,
 		RepeatingMem::<true>(instr_encoded, 0),
 		&expected_state,
-		&expected_metrics,
 		&expected_events,
 	)
 }
@@ -270,19 +253,17 @@ fn jmp_trigger(
 
 	// Execute one step on the frame to get the expected result of the next
 	// instruction
-	let mut expected_metrics = TrackReport::new();
 	let mut expected_events = OneShotTracker::new();
 	let mut expected_state = match Executor::from_state(
 		&state,
 		RepeatingMem::<true>(instr_encoded, 0),
 		&mut expected_events,
 	)
-	.step(&mut expected_metrics, &mut expected_events)
+	.step(&mut expected_events)
 	{
 		Ok(exec) => exec.state(),
 		_ => return TestResult::discard(),
 	};
-	expected_metrics.add_stat(Metric::TriggeredBranches, 1);
 	let id = expected_events.new_control_id();
 	expected_events.event(Event::Id(id, IdEvent::ControlTrigger(ControlEvent::Jump)));
 
@@ -300,7 +281,6 @@ fn jmp_trigger(
 		&test_state,
 		RepeatingMem::<true>(instr_encoded, 0),
 		&expected_state,
-		&expected_metrics,
 		&expected_events,
 	)
 }
@@ -355,7 +335,7 @@ fn jmp_trigger_past_trigger(
 
 	TestResult::from_bool(
 		Executor::from_state(&test_state, RepeatingMem::<true>(instr_encoded, 0), &mut ())
-			.step(&mut (), &mut ())
+			.step(&mut ())
 			.is_err(),
 	)
 }
@@ -471,12 +451,6 @@ fn test_jump(
 		false
 	};
 
-	let mut expected_metrics: TrackReport = [
-		(Metric::InstructionReads, 1),
-		(Metric::IssuedBranches, jump_taken as usize),
-	]
-	.into();
-
 	let mut expected_events: OneShotTracker =
 		[Event::Instruction(test_state.address, instr.clone())].into();
 	let ctrl_id = expected_events.new_control_id();
@@ -488,26 +462,16 @@ fn test_jump(
 		));
 	}
 
-	if let Some(ops) = &ready_ops
-	{
-		expected_metrics.add_stat(Metric::ConsumedOperands, ops.len());
-		expected_metrics.add_stat(
-			Metric::ConsumedBytes,
-			ops.iter()
-				.map(|v| v.get_first().bytes().unwrap().len())
-				.sum(),
-		);
-		ready_ops.map(|ops| {
-			for _ in ops
-			{
-				let id = expected_events.new_operand_id();
-				expected_events.event(Event::Id(id, IdEvent::Operand(OperandEvent::Consume)));
-			}
-		});
-	}
+	ready_ops.map(|ops| {
+		for _ in ops
+		{
+			let id = expected_events.new_operand_id();
+			expected_events.event(Event::Id(id, IdEvent::Operand(OperandEvent::Consume)));
+		}
+	});
+
 	if may_trigger
 	{
-		expected_metrics.add_stat(Metric::TriggeredBranches, jump_taken as usize);
 		if jump_taken
 		{
 			expected_events.event(Event::Id(
@@ -520,7 +484,6 @@ fn test_jump(
 		&test_state,
 		RepeatingMem::<true>(Instruction::encode(&instr), 0),
 		&expected_state,
-		&expected_metrics,
 		&expected_events,
 	)
 }
@@ -791,14 +754,13 @@ fn call_trigger_impl(
 
 	// Execute one step on the frame to get the expected result of the next
 	// instruction
-	let mut expected_metrics = TrackReport::new();
 	let mut expected_events = OneShotTracker::new();
 	let mut expected_state = match Executor::from_state(
 		&state,
 		RepeatingMem::<true>(instr_encoded, 0),
 		&mut expected_events,
 	)
-	.step(&mut expected_metrics, &mut expected_events)
+	.step(&mut expected_events)
 	{
 		Ok(exec) => exec.state(),
 		_ => return TestResult::discard(),
@@ -829,8 +791,7 @@ fn call_trigger_impl(
 	// Move the current address to the call target
 	expected_state.address = call_target.0;
 
-	// Add trigger metric
-	expected_metrics.add_stat(Metric::TriggeredCalls, 1);
+	// Add trigger event
 	let id = expected_events.new_control_id();
 	expected_events.event(Event::Id(id, IdEvent::ControlTrigger(ControlEvent::Call)));
 
@@ -845,7 +806,6 @@ fn call_trigger_impl(
 		&test_state,
 		RepeatingMem::<true>(instr_encoded, 0),
 		&expected_state,
-		&expected_metrics,
 		&expected_events,
 	)
 }
@@ -883,21 +843,17 @@ fn call_trigger_immediately(
 			},
 		),
 	);
-	let mut expected_metrics = TrackReport::new();
 	let mut expected_events = OneShotTracker::new();
 	let expected_state = match Executor::from_state(
 		&nop_call_state,
 		RepeatingMem::<true>(Instruction::NoOp.encode(), 0),
 		&mut expected_events,
 	)
-	.step(&mut expected_metrics, &mut expected_events)
+	.step(&mut expected_events)
 	{
 		Ok(exec) => exec.state(),
 		Err(_) => return TestResult::discard(),
 	};
-	expected_metrics.add_stat(IssuedCalls, 1);
-	expected_metrics.add_stat(ConsumedOperands, 1);
-	expected_metrics.add_stat(ConsumedBytes, addr.scale());
 
 	let mut test_state: ExecState = state.clone();
 	if let Some(list) = test_state.frame.op_queue.get_mut(&0)
@@ -946,7 +902,6 @@ fn call_trigger_immediately(
 		&test_state,
 		RepeatingMem::<true>(instr.encode(), 0),
 		&expected_state,
-		&expected_metrics,
 		&expected_events,
 	)
 }
@@ -995,14 +950,6 @@ fn call_non_trigger(
 	);
 	expected_state.address += 2;
 
-	use Metric::*;
-	let expected_metrics = TrackReport::from([
-		(IssuedCalls, 1),
-		(InstructionReads, 1),
-		(ConsumedOperands, 1),
-		(ConsumedBytes, addr.scale()),
-	]);
-
 	let mut test_state: ExecState = state.clone();
 	if let Some(list) = test_state.frame.op_queue.get_mut(&0)
 	{
@@ -1037,7 +984,6 @@ fn call_non_trigger(
 		&test_state,
 		RepeatingMem::<true>(instr_encoded, 0),
 		&expected_state,
-		&expected_metrics,
 		&expected_events,
 	)
 }

@@ -1,8 +1,7 @@
 use crate::{
 	data::{OperandStack, ProgramStack},
-	metrics::MetricTracker,
 	CallFrameState, ControlEvent, ControlFlowType, Event, EventTracker, ExecError, ExecState,
-	IdEvent, Metric,
+	IdEvent,
 };
 use std::collections::{HashMap, VecDeque};
 
@@ -96,7 +95,6 @@ impl ControlFlow
 		&mut self,
 		op_stack: &mut OperandStack,
 		prog_stack: &mut ProgramStack,
-		tracker: &mut impl MetricTracker,
 		event_tracker: &mut impl EventTracker,
 	) -> Result<bool, ExecError>
 	{
@@ -117,7 +115,6 @@ impl ControlFlow
 						)));
 					}
 					self.next_addr = tar;
-					tracker.add_stat(Metric::TriggeredBranches, 1);
 					event_tracker.event(Event::Id(id, IdEvent::ControlTrigger(ControlEvent::Jump)))
 				},
 				Call(tar) =>
@@ -134,7 +131,6 @@ impl ControlFlow
 						},
 					);
 					self.call_stack.push_front(old_frame);
-					tracker.add_stat(Metric::TriggeredCalls, 1);
 					event_tracker.event(Event::Id(id, IdEvent::ControlTrigger(ControlEvent::Call)))
 				},
 				Return =>
@@ -160,7 +156,6 @@ impl ControlFlow
 					{
 						return Ok(false);
 					};
-					tracker.add_stat(Metric::TriggeredReturns, 1);
 					event_tracker
 						.event(Event::Id(id, IdEvent::ControlTrigger(ControlEvent::Return)))
 				},
@@ -180,7 +175,6 @@ impl ControlFlow
 		&mut self,
 		location_addr: usize,
 		target_addr: usize,
-		tracker: &mut impl MetricTracker,
 		event_tracker: &mut impl EventTracker,
 	)
 	{
@@ -188,7 +182,6 @@ impl ControlFlow
 		self.call_frame
 			.branches
 			.insert(location_addr, (id, ControlFlowType::Branch(target_addr)));
-		tracker.add_stat(Metric::IssuedBranches, 1);
 		event_tracker.event(Event::Id(id, IdEvent::ControlIssue(ControlEvent::Jump)));
 	}
 
@@ -198,7 +191,6 @@ impl ControlFlow
 		&mut self,
 		location_addr: usize,
 		target_addr: usize,
-		tracker: &mut impl MetricTracker,
 		event_tracker: &mut impl EventTracker,
 	)
 	{
@@ -206,23 +198,16 @@ impl ControlFlow
 		self.call_frame
 			.branches
 			.insert(location_addr, (id, ControlFlowType::Call(target_addr)));
-		tracker.add_stat(Metric::IssuedCalls, 1);
 		event_tracker.event(Event::Id(id, IdEvent::ControlIssue(ControlEvent::Call)));
 	}
 
 	/// Issue a return to trigger at the given location
-	pub fn ret(
-		&mut self,
-		location_addr: usize,
-		tracker: &mut impl MetricTracker,
-		event_tracker: &mut impl EventTracker,
-	)
+	pub fn ret(&mut self, location_addr: usize, event_tracker: &mut impl EventTracker)
 	{
 		let id = event_tracker.new_control_id();
 		self.call_frame
 			.branches
 			.insert(location_addr, (id, ControlFlowType::Return));
-		tracker.add_stat(Metric::IssuedReturns, 1);
 		event_tracker.event(Event::Id(id, IdEvent::ControlIssue(ControlEvent::Return)))
 	}
 

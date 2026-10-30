@@ -1,7 +1,4 @@
-use crate::{
-	value::{Scalar, Value},
-	Metric, MetricTracker,
-};
+use crate::value::{Scalar, Value};
 use bitvec::vec::BitVec;
 use std::cmp::PartialEq;
 
@@ -22,7 +19,7 @@ pub enum MemError
 /// Trait for operations on memory.
 ///
 /// Required methods only need directly access to individual bytes, with
-/// provided methods implementing accesses patterns and metric tracking.
+/// provided methods implementing access patterns.
 pub trait Memory
 {
 	/// Gets the byte value at the given address (if a valid address).
@@ -35,8 +32,6 @@ pub trait Memory
 	/// to the value type. The read value will be valid compared to the type and
 	/// the given length.
 	///
-	/// Updates the report as a data read.
-	///
 	/// If an error is thrown, the first element describes it and the second is
 	/// the relevant address.
 	#[allow(unused_variables)]
@@ -45,7 +40,6 @@ pub trait Memory
 		addr: usize,
 		into: &mut Value,
 		len: usize,
-		tracker: &mut impl MetricTracker,
 	) -> Result<(), (MemError, usize)>
 	{
 		let mut found_uninit = None;
@@ -75,25 +69,12 @@ pub trait Memory
 			}
 
 			val.set_val(bytes.as_slice());
-
-			tracker.add_stat(Metric::DataReads, 1);
-			tracker.add_stat(Metric::DataReadBytes, scale);
-			if (addr % scale) != 0
-			{
-				tracker.add_stat(Metric::UnalignedReads, 1);
-			}
 		}
 		found_uninit.map_or(Ok(()), |addr| Err((MemError::Uninitialized, addr)))
 	}
 
 	/// Read 2 bytes from the given address into the slice.
-	///
-	/// Updates the report as an instruction read.
-	fn read_instr(
-		&mut self,
-		addr: usize,
-		tracker: &mut impl MetricTracker,
-	) -> Result<[u8; 2], MemError>
+	fn read_instr(&mut self, addr: usize) -> Result<[u8; 2], MemError>
 	{
 		if addr % 2 != 0
 		{
@@ -102,7 +83,6 @@ pub trait Memory
 		else
 		{
 			let bytes = [self.read_raw(addr)?, self.read_raw(addr + 1)?];
-			tracker.add_stat(Metric::InstructionReads, 1);
 			Ok(bytes)
 		}
 	}
@@ -111,14 +91,7 @@ pub trait Memory
 	fn write_raw(&mut self, addr: usize, data: u8) -> Result<(), MemError>;
 
 	/// Write to the given address from the given value.
-	///
-	/// Updates the report as data is written
-	fn write(
-		&mut self,
-		addr: usize,
-		from: &Value,
-		tracker: &mut impl MetricTracker,
-	) -> Result<(), (MemError, usize)>
+	fn write(&mut self, addr: usize, from: &Value) -> Result<(), (MemError, usize)>
 	{
 		for (idx, val) in from.iter().enumerate()
 		{
@@ -129,12 +102,6 @@ pub trait Memory
 				{
 					self.write_raw(element_addr + i, *b)
 						.map_err(|e| (e, element_addr))?;
-				}
-
-				tracker.add_stat(Metric::DataWriteBytes, bytes.len());
-				if addr % from.scale() != 0
-				{
-					tracker.add_stat(Metric::UnalignedWrites, 1);
 				}
 			}
 			else if let Scalar::Nar(_) = val

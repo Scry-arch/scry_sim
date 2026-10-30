@@ -7,7 +7,7 @@ use quickcheck_macros::quickcheck;
 use scry_isa::{Bits, Instruction};
 use scry_sim::{
 	arbitrary::{ArbValue, NoCF},
-	Event, EventTracker, ExecState, IdEvent, Metric, OperandEvent, OperandList, Value,
+	Event, EventTracker, ExecState, IdEvent, OperandEvent, OperandList, Value,
 };
 
 #[quickcheck]
@@ -49,14 +49,6 @@ fn pick_2_inputs(
 			add_value_to_queue_idx(&mut new_op_q, op_list_depth, target_idx, chosen);
 
 			new_op_q
-		},
-		|_| {
-			[
-				(Metric::ReorderedOperands, 1),
-				(Metric::ConsumedOperands, 1),
-				(Metric::ConsumedBytes, condition.0.size()),
-			]
-			.into()
 		},
 		|old_op_queue| {
 			let mut evs: OneShotTracker = [

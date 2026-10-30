@@ -1,5 +1,5 @@
 use crate::{
-	executor::{check_expected, test_execution_step, test_metrics},
+	executor::{check_expected, test_events, test_execution_step},
 	misc::{add_to_queue_idx, advance_queue, OneShotTracker, RepeatingMem},
 };
 use byteorder::{ByteOrder, LittleEndian};
@@ -10,8 +10,8 @@ use quickcheck_macros::quickcheck;
 use scry_isa::{Alu2OutputVariant, Alu2Variant, AluVariant, Bits, Instruction};
 use scry_sim::{
 	arbitrary::{ArbValue, LimitedOps, NoCF, SimpleOps},
-	Event, EventTracker, ExecState, Executor, IdEvent, Metric, MetricTracker, OperandEvent,
-	OperandList, Scalar, TrackReport, Value, ValueType,
+	Event, EventTracker, ExecState, Executor, IdEvent, OperandEvent, OperandList, Scalar, Value,
+	ValueType,
 };
 use std::{
 	cmp::min,
@@ -61,7 +61,7 @@ type AluTestState<const OPS_IN: usize> = NoCF<SimpleOps<LimitedOps<ExecState, OP
 /// on.
 ///
 /// Tests both the resulting state after taking 1 step and that the reported
-/// metrics are correct
+/// events are correct
 fn test_arithmetic_instruction<const OPS_IN: usize, const OPS_OUT: usize>(
 	state: AluTestState<OPS_IN>,
 	instr: Instruction,
@@ -181,8 +181,6 @@ fn test_arithmetic_instruction<const OPS_IN: usize, const OPS_OUT: usize>(
 		.unwrap();
 	}
 
-	let result_bytes = result_values.iter().fold(0, |acc, v| acc + v.scale());
-
 	let mut expected_events = OneShotTracker::new();
 	expected_events.event(Event::Instruction(state.address, instr.clone()));
 	for _ in 0..OPS_IN
@@ -216,21 +214,10 @@ fn test_arithmetic_instruction<const OPS_IN: usize, const OPS_OUT: usize>(
 		}
 	}
 
-	// Expected metrics
-	let expected_mets: TrackReport = [
-		(Metric::InstructionReads, 1),
-		(Metric::QueuedValues, OPS_OUT),
-		(Metric::QueuedValueBytes, result_bytes),
-		(Metric::ConsumedOperands, OPS_IN),
-		(Metric::ConsumedBytes, input_typ.scale() * OPS_IN),
-	]
-	.into();
-
 	test_execution_step(
 		&state,
 		RepeatingMem::<false>(instr.encode(), 0),
 		&expected_state,
-		&expected_mets,
 		&expected_events,
 	)
 }
@@ -869,13 +856,10 @@ fn test_effective_types(
 			.insert(0, OperandList::new(v1_ext, vec![v2_ext]));
 	}
 
-	let mut expected_metrics = TrackReport::new();
 	let mut expected_events = OneShotTracker::new();
 	let expected_result = Executor::from_state(&expected_state_start, mem, &mut expected_events)
-		.step(&mut expected_metrics, &mut expected_events)
+		.step(&mut expected_events)
 		.map(|ex| ex.state());
-	expected_metrics.reset_stat(Metric::ConsumedBytes);
-	expected_metrics.add_stat(Metric::ConsumedBytes, v1.typ.scale() + v2.typ.scale());
 
 	// Run the original values and test the expected state
 	let mut test_state = state.0 .0.clone();
@@ -893,23 +877,15 @@ fn test_effective_types(
 			.insert(0, OperandList::new(v1, vec![v2]));
 	}
 
-	let mut actual_metrics = TrackReport::new();
 	let mut actual_events = OneShotTracker::new();
 	let actual_result = Executor::from_state(&test_state, mem, &mut actual_events)
-		.step(&mut actual_metrics, &mut actual_events)
+		.step(&mut actual_events)
 		.map(|ex| ex.state());
 
 	check_expected(
 		actual_result,
 		expected_result,
-		|| {
-			test_metrics(
-				&expected_metrics,
-				&actual_metrics,
-				&expected_events,
-				&actual_events,
-			)
-		},
+		|| test_events(&expected_events, &actual_events),
 		"end state",
 	)
 }
@@ -978,8 +954,6 @@ fn divide_by_0(
 		Alu2OutputVariant::HighNext => (out_low, None, Some(out_high)),
 		Alu2OutputVariant::LowNext => (out_high, None, Some(out_low)),
 	};
-
-	let queued_values = 1 + tar2.iter().count() + out_next.iter().count();
 
 	let mut expected_events = OneShotTracker::new();
 
@@ -1059,14 +1033,6 @@ fn divide_by_0(
 		&test_state,
 		RepeatingMem::<false>(instr.encode(), 0),
 		&expected_state,
-		&[
-			(Metric::ConsumedOperands, 2),
-			(Metric::ConsumedBytes, v1.typ.scale() * 2),
-			(Metric::QueuedValues, queued_values),
-			(Metric::QueuedValueBytes, v1.typ.scale() * (queued_values)),
-			(Metric::InstructionReads, 1),
-		]
-		.into(),
 		&expected_events,
 	)
 }

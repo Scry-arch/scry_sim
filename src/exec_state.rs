@@ -392,7 +392,7 @@ impl CallFrameState
 		if self
 			.op_queue
 			.iter()
-			.any(|(_, ops)| ops.len() > MAX_INSTR_INPUTS + more_depth)
+			.any(|(_, ops)| ops.len() > MAX_INSTR_INPUTS.saturating_add(more_depth))
 		{
 			return Err("Too many operands in queue".to_string());
 		}

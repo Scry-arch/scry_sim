@@ -13,8 +13,6 @@ quickcheck = "1.0.3"
 duplicate = { version = "2.0.1", default-features = false }
 paste = "1.0.11"
 delegate = "0.13.0"
-strum = { version = "0.27", features = ["derive"] }
-strum_macros = "0.27"
 syn = "2.0.1" # Does not compile with lower version, not directly needed
 syn_old = { version = "1.0.5", package = "syn" } # Does not compile with lower version, not directly needed
 

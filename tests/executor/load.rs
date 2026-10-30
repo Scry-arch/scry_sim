@@ -10,8 +10,8 @@ use quickcheck_macros::quickcheck;
 use scry_isa::{Bits, Instruction, Type};
 use scry_sim::{
 	arbitrary::{ArbScalarVal, ArbValue, NoCF},
-	BlockedMemory, Event, EventTracker, ExecState, IdEvent, Metric, OperandEvent, OperandList,
-	Value, ValueType,
+	BlockedMemory, Event, EventTracker, ExecState, IdEvent, OperandEvent, OperandList, Value,
+	ValueType,
 };
 use std::iter::once;
 
@@ -58,7 +58,7 @@ pub fn idx_address(stack_base: usize, value_size: usize, idx: usize) -> usize
 /// Given the initial state, regresses the operand queue and puts the given
 /// operand queue as the ready queue.
 /// Then tests that when the next instruction is a load the issued load has the
-/// given load type and will load from the given address. Also tests metrics.
+/// given load type and will load from the given address. Also tests events.
 ///
 /// If `output_offset` is `None`, then this is a stack load and `addr` is the
 /// encoded index.
@@ -140,8 +140,6 @@ fn test_load(
 		effective_address,
 	);
 
-	let is_stack = output_offset.is_none();
-
 	let mut evs = OneShotTracker::new();
 	evs.event(Event::Instruction(test_state.address, instruction));
 	for _ in 0..load_operands.len()
@@ -157,41 +155,7 @@ fn test_load(
 	let id = evs.new_operand_id();
 	evs.event(Event::Id(id, IdEvent::Operand(OperandEvent::Produce)));
 
-	test_execution_step(
-		&test_state,
-		test_mem,
-		&expected_state,
-		&[
-			(Metric::InstructionReads, 1),
-			(Metric::DataReads, 1),
-			(Metric::DataReadBytes, loaded_val.0.typ.scale()),
-			(Metric::StackReads, if !is_stack { 0 } else { 1 }),
-			(
-				Metric::StackReadBytes,
-				if !is_stack
-				{
-					0
-				}
-				else
-				{
-					loaded_val.0.typ.scale()
-				},
-			),
-			(Metric::QueuedValues, 1),
-			(Metric::QueuedValueBytes, loaded_val.0.typ.scale()),
-			(Metric::ConsumedOperands, load_operands.len()),
-			(
-				Metric::ConsumedBytes,
-				load_operands.iter().fold(0, |sum, op| sum + op.scale()),
-			),
-			(
-				Metric::UnalignedReads,
-				((effective_address % loaded_val.0.typ.scale()) != 0) as usize,
-			),
-		]
-		.into(),
-		&evs,
-	)
+	test_execution_step(&test_state, test_mem, &expected_state, &evs)
 }
 
 // Test issuing a load with an absolute address

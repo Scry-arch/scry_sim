@@ -14,8 +14,8 @@ use quickcheck_macros::quickcheck;
 use scry_isa::Instruction;
 use scry_sim::{
 	arbitrary::{ArbScalarVal, ArbValue, NoCF},
-	BlockedMemory, Event, EventTracker, ExecState, IdEvent, Memory, Metric, OperandEvent,
-	OperandList, Scalar, Value, ValueType,
+	BlockedMemory, Event, EventTracker, ExecState, IdEvent, Memory, OperandEvent, OperandList,
+	Scalar, Value, ValueType,
 };
 use std::cmp::max;
 
@@ -102,28 +102,8 @@ fn test_store_instruction<const ADDR_OPS: usize>(
 		to_store.scale() as u8,
 	));
 
-	let step_result = test_execution_step::<BlockedMemory>(
-		&test_state,
-		&mut mem,
-		&expected_state,
-		&[
-			(Metric::InstructionReads, 1),
-			(Metric::ConsumedOperands, 1 + ADDR_OPS),
-			(
-				Metric::ConsumedBytes,
-				to_store.scale() + address_operands.iter().fold(0, |sum, v| sum + v.scale()),
-			),
-			(Metric::DataWriteBytes, to_store.scale()),
-			(
-				Metric::UnalignedWrites,
-				!((store_address % to_store.scale()) == 0) as usize,
-			),
-			(Metric::StackWrites, is_stack as usize),
-			(Metric::StackWriteBytes, is_stack as usize * to_store.size()),
-		]
-		.into(),
-		&evs,
-	);
+	let step_result =
+		test_execution_step::<BlockedMemory>(&test_state, &mut mem, &expected_state, &evs);
 
 	// Check the stored value was actually stored in memory
 	if !step_result.is_failure()
@@ -294,15 +274,6 @@ fn store_nan_addr(
 		&test_state,
 		RepeatingMem::<false>(Instruction::Store.encode(), 0),
 		&expected_state,
-		&[
-			(Metric::InstructionReads, 1),
-			(Metric::ConsumedOperands, 2),
-			(
-				Metric::ConsumedBytes,
-				address_type.scale() + to_store.scale(),
-			),
-		]
-		.into(),
 		&nop_store_events(state.address),
 	)
 }
@@ -328,12 +299,6 @@ fn store_nan_value(NoCF(state): NoCF<ExecState>, address: Value, to_store: Value
 		&test_state,
 		RepeatingMem::<false>(Instruction::Store.encode(), 0),
 		&expected_state,
-		&[
-			(Metric::InstructionReads, 1),
-			(Metric::ConsumedOperands, 2),
-			(Metric::ConsumedBytes, address.scale() + to_store.scale()),
-		]
-		.into(),
 		&nop_store_events(state.address),
 	)
 }
@@ -356,15 +321,6 @@ fn store_nar_addr(
 	test_execution_step_exceptions(
 		&test_state,
 		RepeatingMem::<false>(Instruction::Store.encode(), 0),
-		&[
-			(Metric::InstructionReads, 1),
-			(Metric::ConsumedOperands, 2),
-			(
-				Metric::ConsumedBytes,
-				address_type.scale() + to_store.scale(),
-			),
-		]
-		.into(),
 		&nop_store_events(state.address),
 	)
 }
@@ -387,12 +343,6 @@ fn store_nar_value(
 	test_execution_step_exceptions(
 		&test_state,
 		RepeatingMem::<false>(Instruction::Store.encode(), 0),
-		&[
-			(Metric::InstructionReads, 1),
-			(Metric::ConsumedOperands, 2),
-			(Metric::ConsumedBytes, address.scale() + to_store.scale()),
-		]
-		.into(),
 		&nop_store_events(state.address),
 	)
 }
@@ -414,12 +364,6 @@ fn store_missing_addr(
 		&test_state,
 		RepeatingMem::<false>(instr.encode(), 0),
 		&[
-			(Metric::InstructionReads, 1),
-			(Metric::ConsumedOperands, 1),
-			(Metric::ConsumedBytes, to_store.0.scale()),
-		]
-		.into(),
-		&[
 			Event::Instruction(state.address, instr),
 			Event::Id(0, IdEvent::Operand(OperandEvent::Consume)),
 		]
@@ -438,7 +382,6 @@ fn store_missing_operands(NoCF(mut state): NoCF<ExecState>) -> TestResult
 	test_execution_step_exceptions(
 		&state,
 		RepeatingMem::<false>(instr.encode(), 0),
-		&[(Metric::InstructionReads, 1)].into(),
 		&[Event::Instruction(state.address, instr)].into(),
 	)
 }

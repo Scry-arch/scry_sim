@@ -5,10 +5,8 @@ use crate::{
 use quickcheck::TestResult;
 use quickcheck_macros::quickcheck;
 use scry_isa::{Bits, Instruction};
-use scry_sim::{
-	arbitrary::NoCF, Event, EventTracker, ExecState, IdEvent, Metric, OperandEvent, OperandList,
-};
-use std::{cmp::min, collections::HashMap};
+use scry_sim::{arbitrary::NoCF, Event, EventTracker, ExecState, IdEvent, OperandEvent};
+use std::collections::HashMap;
 
 /// Tests the "duplicate" instruction
 #[quickcheck]
@@ -49,24 +47,6 @@ fn duplicate(
 				push_idx(target2.value as usize + 1);
 			}
 			new_op_q
-		},
-		|old_op_queue| {
-			let (old_op_ready, old_op_ready_bytes) =
-				old_op_queue.get(&0).map_or((0, 0), |op_list| {
-					op_list.iter().fold((0, 0), |(ready, read_bytes), v| {
-						(ready + 1, v.value_type().scale() + read_bytes)
-					})
-				});
-			let double_if_dup_next = |val| if dup_next { val * 2 } else { val };
-			[
-				(Metric::QueuedValues, double_if_dup_next(old_op_ready)),
-				(
-					Metric::QueuedValueBytes,
-					double_if_dup_next(old_op_ready_bytes),
-				),
-				(Metric::ReorderedOperands, old_op_ready),
-			]
-			.into()
 		},
 		|old_op_queue| {
 			let mut evs = OneShotTracker::new();
@@ -156,19 +136,6 @@ fn echo(
 			new_op_q
 		},
 		|old_op_queue| {
-			let reordered = old_op_queue.get(&0).map_or(0, |list| {
-				if rest_next
-				{
-					list.len()
-				}
-				else
-				{
-					min(2, list.len())
-				}
-			});
-			[(Metric::ReorderedOperands, reordered)].into()
-		},
-		|old_op_queue| {
 			let mut evs = OneShotTracker::new();
 			let mut target_queues = HashMap::new();
 
@@ -231,10 +198,6 @@ fn echo_long(state: NoCF<ExecState>, target: Bits<10, false>) -> TestResult
 			new_op_q
 		},
 		|old_op_queue| {
-			let reordered = old_op_queue.get(&0).map_or(0, OperandList::len);
-			[(Metric::ReorderedOperands, reordered)].into()
-		},
-		|old_op_queue| {
 			let list_count = |idx| old_op_queue.get(&idx).map_or(0, |list| list.len());
 
 			let mut evs = OneShotTracker::new();
@@ -272,7 +235,6 @@ fn noop(state: NoCF<ExecState>) -> TestResult
 
 			new_op_q
 		},
-		|_| [].into(),
 		|old_op_queue| operand_events_for_list(old_op_queue, 0, 0, &[OperandEvent::Discard]),
 	)
 }
