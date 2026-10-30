@@ -1,11 +1,185 @@
 use byteorder::{ByteOrder, LittleEndian};
 use duplicate::duplicate_item;
 use quickcheck_macros::quickcheck;
+use scry_isa::Instruction;
 use scry_sim::{
-	ExecState, MemError, Memory, Metric, MetricTracker, OperandList, OperandQueue, Scalar, Value,
-	ValueType,
+	Event, EventTracker, ExecState, IdEvent, MemError, Memory, Metric, MetricTracker, OperandEvent,
+	OperandList, OperandQueue, Scalar, Value, ValueType,
 };
-use std::mem::size_of;
+use std::{
+	cmp::max,
+	collections::{HashMap, HashSet},
+	mem::size_of,
+};
+
+#[derive(Debug)]
+pub struct OneShotTracker
+{
+	pub events: Vec<Event>,
+	pub next_id: usize,
+}
+
+fn vec_eq_unordered<T: PartialEq + Clone>(v1: &Vec<T>, v2: &Vec<T>) -> bool
+{
+	let mut v2_clone = v2.clone();
+	for e in v1.clone()
+	{
+		if let Some((idx, _)) = v2_clone.iter().enumerate().find(|(_, e2)| **e2 == e)
+		{
+			v2_clone.remove(idx);
+		}
+		else
+		{
+			// Not found
+			return false;
+		}
+	}
+	v2_clone.is_empty()
+}
+
+impl OneShotTracker
+{
+	pub fn new() -> OneShotTracker
+	{
+		Self {
+			events: vec![],
+			next_id: 0,
+		}
+	}
+
+	pub fn new_id(&mut self) -> usize
+	{
+		let id = self.next_id;
+		self.next_id += 1;
+		id
+	}
+
+	/// Returns whether the given list of events is equivalent to the current
+	/// list of events.
+	///
+	/// Even IDs are allowed to be different as long as an equivalent mapping
+	/// can be found between self's and other's IDs
+	pub fn equivalent(&self, other: &Self) -> bool
+	{
+		if self.events.len() != other.events.len()
+		{
+			return false;
+		}
+
+		// First check that all non-id events are equivalent
+		let self_no_id = self
+			.events
+			.iter()
+			.filter(|e| !matches!(e, Event::Id(_, _)))
+			.cloned()
+			.collect::<Vec<_>>();
+		let other_no_id = other
+			.events
+			.iter()
+			.filter(|e| !matches!(e, Event::Id(_, _)))
+			.cloned()
+			.collect::<Vec<_>>();
+
+		if !vec_eq_unordered(&self_no_id, &other_no_id)
+		{
+			return false;
+		}
+
+		let group_by_id = |mut acc: HashMap<usize, HashSet<IdEvent>>, ev: &Event| {
+			if let Event::Id(id, ty) = ev
+			{
+				let was_new = acc.entry(*id).or_insert(HashSet::new()).insert(ty.clone());
+				assert!(was_new);
+			}
+			acc
+		};
+		let self_id_groups = self.events.iter().fold(HashMap::new(), group_by_id);
+		let mut other_id_groups = other.events.iter().fold(HashMap::new(), group_by_id);
+
+		for (_, group) in self_id_groups
+		{
+			if let Some(k) = other_id_groups
+				.iter()
+				.find(|(_, other_group)| **other_group == group)
+				.map(|(k, _)| *k)
+			{
+				other_id_groups.remove(&k);
+			}
+			else
+			{
+				// Could not find equivalent id group
+				return false;
+			}
+		}
+		if other_id_groups.len() > 0
+		{
+			// Has group without equivalent in self
+			return false;
+		}
+
+		true
+	}
+}
+
+impl<F: IntoIterator<Item = Event>> From<F> for OneShotTracker
+{
+	fn from(events: F) -> Self
+	{
+		let events: Vec<Event> = events.into_iter().collect();
+		// Find the highest id
+		let next_id = events.iter().fold(0, |acc, ev| {
+			match ev
+			{
+				Event::Id(id, _) => max(*id + 1, acc),
+				_ => acc,
+			}
+		});
+
+		Self { events, next_id }
+	}
+}
+
+#[test]
+fn one_shot_tracker_self_equivalence()
+{
+	let x = OneShotTracker {
+		events: vec![
+			Event::Instruction(0, Instruction::NoOp),
+			Event::Id(0, IdEvent::Operand(OperandEvent::Consume)),
+			Event::Id(1, IdEvent::Operand(OperandEvent::Consume)),
+			Event::Id(2, IdEvent::Operand(OperandEvent::Produce)),
+		],
+		next_id: 3,
+	};
+
+	assert_eq!(x, x);
+}
+
+impl EventTracker for OneShotTracker
+{
+	fn new_operand_id(&mut self) -> usize
+	{
+		self.new_id()
+	}
+
+	fn new_control_id(&mut self) -> usize
+	{
+		self.new_id()
+	}
+
+	fn event(&mut self, event: Event)
+	{
+		self.events.push(event);
+	}
+}
+
+impl PartialEq for OneShotTracker
+{
+	fn eq(&self, other: &Self) -> bool
+	{
+		self.equivalent(other)
+	}
+}
 
 /// A memory that always produces the same instruction and data.
 ///
@@ -134,6 +308,10 @@ pub fn advance_queue(from: OperandQueue) -> OperandQueue
 	from.into_iter().map(|(idx, ops)| (idx - 1, ops)).collect()
 }
 
+/// Adds the value to the queue at the given index
+///
+/// If the queue is already at the given depth, does not add the value and
+/// return false. Otherwise the value is added and returns true
 pub fn add_value_to_queue_idx(
 	queue: &mut OperandQueue,
 	op_list_depth: usize,
@@ -160,26 +338,41 @@ pub fn add_value_to_queue_idx(
 	}
 }
 
+/// Adds the given list of values to the queue
+///
+/// Stops adding once the queue reaches the given depths
+/// Returns how many elements were added to the queue
 pub fn add_list_to_queue_idx(
 	queue: &mut OperandQueue,
 	op_list_depth: usize,
 	idx: usize,
 	mut iter: impl Iterator<Item = Value>,
-)
+) -> usize
 {
+	let mut added = 0;
 	while let Some(v) = iter.next()
 	{
 		if !add_value_to_queue_idx(queue, op_list_depth, idx, v)
 		{
 			break;
 		}
+		added += 1;
 	}
+	added
 }
 
-pub fn add_to_queue_idx(state: &mut ExecState, idx: usize, iter: impl Iterator<Item = Value>)
+/// Adds the given list of values to the queue
+///
+/// Stops adding once the queue reaches the allowed depth
+/// Returns how many elements were added to the queue
+pub fn add_to_queue_idx(
+	state: &mut ExecState,
+	idx: usize,
+	iter: impl Iterator<Item = Value>,
+) -> usize
 {
 	let depth = state.op_list_depth();
-	add_list_to_queue_idx(&mut state.frame.op_queue, depth, idx, iter);
+	add_list_to_queue_idx(&mut state.frame.op_queue, depth, idx, iter)
 }
 
 /// Regress the given operand queue by 1, i.e. all indices increased by 1

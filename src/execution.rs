@@ -3,7 +3,7 @@ use crate::{
 	data::{Operand, OperandStack, ProgramStack},
 	memory::Memory,
 	value::Value,
-	ExecState, Metric, MetricTracker, Scalar, ValueType, MAX_INSTR_INPUTS,
+	Event, EventTracker, ExecState, Metric, MetricTracker, Scalar, ValueType, MAX_INSTR_INPUTS,
 };
 use byteorder::{ByteOrder, LittleEndian};
 use duplicate::duplicate_item;
@@ -44,7 +44,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 		addr_space: u8,
 		start_addr: usize,
 		memory: B,
-		ready_ops: impl Iterator<Item = Value>,
+		ready_ops: impl Iterator<Item = Operand>,
 		more_depth: usize,
 	) -> Self
 	{
@@ -61,12 +61,12 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 
 	/// Constructions a new executor that is equivalent to the given execution
 	/// state and uses the given memory.
-	pub fn from_state(state: &ExecState, memory: B) -> Self
+	pub fn from_state(state: &ExecState, memory: B, tracker: &mut impl EventTracker) -> Self
 	{
 		Self {
 			addr_space: state.addr_space,
-			operands: state.into(),
-			control: state.into(),
+			operands: OperandStack::from_exec_state(state, tracker),
+			control: ControlFlow::from_state(state, tracker),
 			stack: state.into(),
 			stack_buffer: state.stack_buffer.clone(),
 			memory,
@@ -96,24 +96,47 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 	}
 
 	/// Discard the current ready list
-	fn discard_ready_list(&mut self, tracker: &mut impl MetricTracker)
+	fn discard_ready_list(
+		&mut self,
+		tracker: &mut impl MetricTracker,
+		events: &mut impl EventTracker,
+	)
 	{
-		let _ = self.get_ready_iter(tracker);
+		let _ = self.get_ready_iter(tracker, events);
 	}
 
-	/// Get the address of the current stack frames base.
+	/// Get the address of the current stack frame's base.
 	fn get_stack_base(&self) -> usize
 	{
 		self.stack.top().block.address
+	}
+
+	/// Get the address of the current stack frame's split (between the private
+	/// and shared)
+	fn get_stack_split(&self) -> usize
+	{
+		self.get_stack_base() + self.stack.top().private_size
+	}
+
+	/// Get the address of the current stack frame's top (exclusive
+	fn get_stack_top(&self) -> usize
+	{
+		self.get_stack_base() + self.stack.top().block.size
 	}
 
 	/// Get the current ready list
 	fn get_ready_iter<'a>(
 		&'a mut self,
 		tracker: &'a mut impl MetricTracker,
+		events: &'a mut impl EventTracker,
 	) -> impl 'a + Iterator<Item = Value>
 	{
-		self.operands.ready_iter(tracker)
+		self.operands.ready_iter(tracker, events)
+	}
+
+	pub fn step_new(self, event_tracker: &mut impl EventTracker) -> Result<Self, ExecError>
+	{
+		self.step(&mut (), event_tracker)
 	}
 
 	/// Perform one execution step.
@@ -123,93 +146,125 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 	/// executed before the step ends.
 	///
 	/// Updated the given metric tracker accordingly.
-	pub fn step(mut self, tracker: &mut impl MetricTracker) -> Result<Self, ExecError>
+	pub fn step(
+		mut self,
+		tracker: &mut impl MetricTracker,
+		event_tracker: &mut impl EventTracker,
+	) -> Result<Self, ExecError>
 	{
+		let instr_addr = self.control.next_addr;
 		let raw_instr = self
 			.memory
 			.borrow_mut()
-			.read_instr(self.control.next_addr, tracker)
+			.read_instr(instr_addr, tracker)
 			.unwrap();
 		let instr = Instruction::decode(byteorder::LittleEndian::read_u16(&raw_instr));
 		{
 			use Instruction::*;
+			event_tracker.event(Event::Instruction(instr_addr, instr.clone()));
 			match instr
 			{
 				Call(CallVariant::Call, offset) =>
 				{
 					let addr = self
-						.get_ready_iter(tracker)
+						.get_ready_iter(tracker, event_tracker)
 						.next()
 						.ok_or(ExecError::Err("Call instruction getting no inputs".into()))?;
 
 					let target_addr = Self::get_absolute_address(
-						self.control.next_addr,
+						instr_addr,
 						(addr.value_type(), addr.get_first().bytes().unwrap()),
 						None,
 					)
 					.unwrap();
 
 					self.control.call(
-						self.control.next_addr + ((offset.value() * 2) as usize),
+						instr_addr + ((offset.value() * 2) as usize),
 						target_addr,
 						tracker,
+						event_tracker,
 					);
 				},
 				Call(CallVariant::Ret, offset) =>
 				{
 					self.control.ret(
-						self.control.next_addr + ((offset.value() * 2) as usize),
+						instr_addr + ((offset.value() * 2) as usize),
 						tracker,
+						event_tracker,
 					);
-					self.discard_ready_list(tracker);
+					self.discard_ready_list(tracker, event_tracker);
 				},
 				EchoLong(offset) =>
 				{
-					self.operands
-						.reorder_ready(offset.value() as usize + 1, tracker);
+					self.operands.reorder_ready(
+						offset.value() as usize + 1,
+						tracker,
+						event_tracker,
+					);
 					// Discard (now empty) ready list
-					self.discard_ready_list(tracker);
+					self.discard_ready_list(tracker, event_tracker);
 				},
 				Duplicate(to_next, tar1, tar2) =>
 				{
-					let ops: Vec<_> = self.operands.ready_peek().cloned().collect();
+					let mut ops: Vec<_> = self.operands.ready_peek().cloned().collect();
+
+					// Forward the original operands to the first target
+					self.operands
+						.reorder_ready(tar1.value() as usize + 1, tracker, event_tracker);
+
+					ops.iter_mut().for_each(|op| {
+						op.id = event_tracker.new_operand_id();
+					});
+
+					// Produce new operands for the second target
+					for op in ops.clone()
+					{
+						self.operands.push_operand(
+							tar2.value as usize + 1,
+							op,
+							tracker,
+							event_tracker,
+						);
+					}
+
+					// Produce new operands for the next target
 					if to_next
 					{
-						for op in ops.clone()
+						let mut ops_next = ops.clone();
+						for op in ops_next.iter_mut()
 						{
-							self.operands.push_operand(1, op, tracker);
+							op.id = event_tracker.new_operand_id();
+						}
+
+						for op in ops_next
+						{
+							self.operands.push_operand(1, op, tracker, event_tracker);
 						}
 					}
-					for op in ops
-					{
-						self.operands
-							.push_operand(tar1.value as usize + 1, op, tracker);
-					}
-					self.operands
-						.reorder_ready(tar2.value() as usize + 1, tracker);
+
 					// Discard (now empty) ready list
-					self.discard_ready_list(tracker);
+					self.discard_ready_list(tracker, event_tracker);
 				},
 				Echo(to_next, tar1, tar2) =>
 				{
 					self.operands
-						.reorder(0, 1, tar2.value as usize + 1, tracker);
+						.reorder(0, 1, tar2.value as usize + 1, tracker, event_tracker);
 					self.operands
-						.reorder(0, 0, tar1.value as usize + 1, tracker);
+						.reorder(0, 0, tar1.value as usize + 1, tracker, event_tracker);
 					if to_next
 					{
-						self.operands.reorder_ready(1, tracker);
+						self.operands.reorder_ready(1, tracker, event_tracker);
 					}
 					// Discard (maybe empty) ready list
-					self.discard_ready_list(tracker);
+					self.discard_ready_list(tracker, event_tracker);
 				},
 				Alu(variant, offset) =>
 				{
-					self.perform_alu(variant, offset, tracker)?;
+					self.perform_alu(variant, offset, tracker, event_tracker)?;
 				},
 				Alu2(variant, out, offset) =>
 				{
-					self.perform_alu2(variant, out, offset, tracker)?;
+					self.perform_alu2(variant, out, offset, tracker, event_tracker)?;
 				},
 				Constant(typ_bits, bits) =>
 				{
@@ -232,40 +287,66 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 					let new_val =
 						Value::singleton_typed(typ.into(), Scalar::Val(bytes.into_boxed_slice()));
 
-					self.operands.push_operand(1, new_val.into(), tracker);
+					self.operands.push_operand(
+						1,
+						new_val.into_operand(event_tracker),
+						tracker,
+						event_tracker,
+					);
 
 					// Forward any ready operands to the next list
-					self.operands.reorder_ready(1, tracker);
+					self.operands.reorder_ready(1, tracker, event_tracker);
 
 					// Discard (now empty) ready list
-					self.discard_ready_list(tracker);
+					self.discard_ready_list(tracker, event_tracker);
 				},
 				Jump(target, location) =>
 				{
-					self.handle_jump(target, location, tracker);
+					self.handle_jump(target, location, tracker, event_tracker);
 				},
 				Store =>
 				{
-					let next_addr = self.control.next_addr;
-					let (to_store, ready_iter) = self.get_store_val(tracker)?;
+					let next_addr = instr_addr;
+					let (to_store, ready_iter) = self.get_store_val(tracker, event_tracker)?;
 					let effective_address = Self::get_mem_instr_effective_addr(
 						ready_iter,
 						next_addr,
 						to_store.value_type().scale(),
 					);
 
-					self.store_val(tracker, &to_store, effective_address, false)?;
+					match effective_address
+					{
+						Err(None) => (), // Do nothing
+						Err(err) =>
+						{
+							Err(ExecError::Exception(format!(
+								"Store cannot calculate effective address: {:?}",
+								err
+							)))?
+						},
+						Ok(addr) =>
+						{
+							self.store_val(tracker, event_tracker, &to_store, addr, None)?
+						},
+					}
 				},
 				StoreStack(index) =>
 				{
-					let to_store = self.get_store_val(tracker)?.0;
+					let to_store = self.get_store_val(tracker, event_tracker)?.0;
+					let index = index.value as usize;
 					let effective_address = OperandStack::operand_stack_address(
 						self.get_stack_base(),
 						to_store.value_type().scale(),
-						index.value as usize,
+						index,
 					);
 
-					self.store_val(tracker, &to_store, Ok(effective_address), true)?;
+					self.store_val(
+						tracker,
+						event_tracker,
+						&to_store,
+						effective_address,
+						Some(index),
+					)?;
 				},
 				Load(typ, offset) =>
 				{
@@ -273,7 +354,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 					let next_addr = self.control.next_addr;
 					let effective_address = {
 						Self::get_mem_instr_effective_addr(
-							self.get_ready_iter(tracker),
+							self.get_ready_iter(tracker, event_tracker),
 							next_addr,
 							typ.scale(),
 						)
@@ -282,21 +363,34 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 						})?
 					};
 
-					self.perform_load(typ, effective_address, offset.value as usize, tracker);
+					self.perform_load(
+						typ,
+						effective_address,
+						offset.value as usize,
+						tracker,
+						event_tracker,
+					);
+					event_tracker.event(Event::Load(effective_address, None, typ.scale() as u8));
 				},
 				LoadStack(typ, index) =>
 				{
-					self.discard_ready_list(tracker);
+					self.discard_ready_list(tracker, event_tracker);
 					let read_typ: ValueType = typ.try_into().unwrap();
+					let idx = index.value as usize;
 					let effective_address = OperandStack::operand_stack_address(
 						self.get_stack_base(),
 						read_typ.scale(),
-						index.value as usize,
+						idx,
 					);
 
-					self.perform_load(read_typ, effective_address, 0, tracker);
+					self.perform_load(read_typ, effective_address, 0, tracker, event_tracker);
 					tracker.add_stat(Metric::StackReads, 1);
 					tracker.add_stat(Metric::StackReadBytes, read_typ.scale());
+					event_tracker.event(Event::Load(
+						effective_address,
+						Some(idx),
+						read_typ.scale() as u8,
+					));
 				},
 				Pick(target) =>
 				{
@@ -323,16 +417,17 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 						if choose_first { 1 } else { 2 },
 						(target.value + 1) as usize,
 						tracker,
+						event_tracker,
 					);
 
 					// Consume the condition, discard the remaining
-					self.get_ready_iter(tracker).next();
+					self.get_ready_iter(tracker, event_tracker).next();
 				},
 				NoOp =>
 				{
-					self.discard_ready_list(tracker);
+					self.discard_ready_list(tracker, event_tracker);
 				},
-				StackRes(reserving, amount, base) =>
+				StackRes(reserving, amount, private) =>
 				{
 					assert_eq!(
 						self.operands.ready_peek().count(),
@@ -341,13 +436,15 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 					);
 
 					let reserve_bytes = 2usize.pow(amount.value as u32);
+					let top_original = self.get_stack_top();
+					let split_original = self.get_stack_split();
 
 					if reserving
 					{
-						let (base_increase, total_increase) = if base
+						let (private_increase, total_increase) = if private
 						{
 							let total_free =
-								self.stack.top().block.size - self.stack.top().base_size;
+								self.stack.top().block.size - self.stack.top().private_size;
 							let total_missing = reserve_bytes.saturating_sub(total_free);
 							(reserve_bytes, total_missing)
 						}
@@ -363,23 +460,23 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 
 						self.stack_buffer -= total_increase;
 						self.stack.top_mut().block.size += total_increase;
-						self.stack.top_mut().base_size += base_increase;
+						self.stack.top_mut().private_size += private_increase;
 
-						tracker.add_stat(Metric::StackReserveTotal, (!base) as usize);
-						tracker.add_stat(Metric::StackReserveBase, base as usize);
+						tracker.add_stat(Metric::StackReserveTotal, (!private) as usize);
+						tracker.add_stat(Metric::StackReserveBase, private as usize);
 						tracker.add_stat(Metric::StackReserveTotalBytes, total_increase);
-						tracker.add_stat(Metric::StackReserveBaseBytes, base_increase);
+						tracker.add_stat(Metric::StackReserveBaseBytes, private_increase);
 					}
 					else
 					{
-						let (base_decrease, total_decrease) = if base
+						let (private_decrease, total_decrease) = if private
 						{
 							(reserve_bytes, 0)
 						}
 						else
 						{
 							let total_free =
-								self.stack.top().block.size - self.stack.top().base_size;
+								self.stack.top().block.size - self.stack.top().private_size;
 							let total_missing = reserve_bytes.saturating_sub(total_free);
 							(total_missing, reserve_bytes)
 						};
@@ -391,19 +488,27 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 
 						self.stack_buffer += total_decrease;
 						self.stack.top_mut().block.size -= total_decrease;
-						self.stack.top_mut().base_size -= base_decrease;
+						self.stack.top_mut().private_size -= private_decrease;
 
-						tracker.add_stat(Metric::StackFreeTotal, (!base) as usize);
-						tracker.add_stat(Metric::StackFreeBase, base as usize);
+						tracker.add_stat(Metric::StackFreeTotal, (!private) as usize);
+						tracker.add_stat(Metric::StackFreeBase, private as usize);
 						tracker.add_stat(Metric::StackFreeTotalBytes, total_decrease);
-						tracker.add_stat(Metric::StackFreeBaseBytes, base_decrease);
+						tracker.add_stat(Metric::StackFreeBaseBytes, private_decrease);
+					}
+					if split_original != self.get_stack_split()
+					{
+						event_tracker.event(Event::Stack(true, self.get_stack_split()));
+					}
+					if top_original != self.get_stack_top()
+					{
+						event_tracker.event(Event::Stack(false, self.get_stack_top()));
 					}
 
-					self.discard_ready_list(tracker);
+					self.discard_ready_list(tracker, event_tracker);
 				},
 				StackAddr(size, index) =>
 				{
-					self.discard_ready_list(tracker);
+					self.discard_ready_list(tracker, event_tracker);
 					let effective_address = OperandStack::operand_stack_address(
 						self.get_stack_base(),
 						2usize.pow(size.value as u32),
@@ -417,8 +522,9 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 							result_type,
 							Scalar::from_sized(effective_address, result_type.scale()),
 						)
-						.into(),
+						.into_operand(event_tracker),
 						tracker,
+						event_tracker,
 					);
 				},
 				Cast(typ, offset) =>
@@ -426,7 +532,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 					let target_typ: ValueType = typ.try_into().unwrap();
 
 					let to_cast = self
-						.get_ready_iter(tracker)
+						.get_ready_iter(tracker, event_tracker)
 						.next()
 						.ok_or(ExecError::Err("Cast instruction getting no inputs".into()))?;
 
@@ -446,14 +552,18 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 					);
 					let target = offset.value;
 
-					self.operands
-						.push_operand(target as usize, casted.into(), tracker)
+					self.operands.push_operand(
+						target as usize,
+						casted.into_operand(event_tracker),
+						tracker,
+						event_tracker,
+					)
 				},
 				Grow(imm) =>
 				{
 					let to_grow = self
 						.operands
-						.pop_ready(tracker)
+						.pop_ready(tracker, event_tracker)
 						.ok_or(ExecError::Err("Grow instruction getting no inputs".into()))?;
 					let scale = to_grow.scale();
 
@@ -475,11 +585,12 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 							to_grow
 						},
 					}
-					.into();
-					self.operands.push_operand(1, result, tracker);
-					self.operands.reorder_ready(1, tracker);
+					.into_operand(event_tracker);
+					self.operands
+						.push_operand(1, result, tracker, event_tracker);
+					self.operands.reorder_ready(1, tracker, event_tracker);
 
-					self.discard_ready_list(tracker);
+					self.discard_ready_list(tracker, event_tracker);
 				},
 				instr =>
 				{
@@ -492,7 +603,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 		}
 		if self
 			.control
-			.next_addr(&mut self.operands, &mut self.stack, tracker)?
+			.next_addr(&mut self.operands, &mut self.stack, tracker, event_tracker)?
 		{
 			Ok(self)
 		}
@@ -511,6 +622,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 		effective_address: usize,
 		offset: usize,
 		tracker: &mut impl MetricTracker,
+		event_tracker: &mut impl EventTracker,
 	)
 	{
 		let mut loaded = Value::new_nar_typed(typ, 0);
@@ -523,38 +635,43 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 		}
 		else
 		{
+			let operand = loaded.into_operand(event_tracker);
 			self.operands
-				.push_operand(offset, Operand::from(loaded), tracker);
+				.push_operand(offset, operand, tracker, event_tracker);
 		}
 	}
 
-	/// Stores the given value at the given address (if available)
-	/// If the address is a None error, will store nothing, if its an error with
-	/// a messge, will return that as an error
+	/// Stores the given value at the given address (if available).
+	/// Returns whether the value was stored
 	fn store_val(
 		&mut self,
 		tracker: &mut impl MetricTracker,
+		event_tracker: &mut impl EventTracker,
 		to_store: &Value,
-		effective_address: Result<usize, Option<ExecError>>,
-		is_stack: bool,
+		effective_address: usize,
+		stack_idx: Option<usize>,
 	) -> Result<(), ExecError>
 	{
-		match (to_store.get_first(), effective_address)
+		match to_store.get_first()
 		{
-			(Scalar::Nan, _) | (_, Err(None)) => Ok(()), // Do nothing
-			(Scalar::Val(_), Ok(address)) =>
+			Scalar::Nan => Ok(()), // Do nothing
+			Scalar::Val(_) =>
 			{
 				self.memory
 					.borrow_mut()
-					.write(address, &to_store, tracker)
+					.write(effective_address, &to_store, tracker)
 					.map_err(|err| ExecError::Exception(format!("Memory write error: {:?}", err)))
-					.map(|result| {
-						if is_stack
+					.map(|_| {
+						if stack_idx.is_some()
 						{
 							tracker.add_stat(Metric::StackWriteBytes, to_store.size());
 							tracker.add_stat(Metric::StackWrites, 1);
 						}
-						result
+						event_tracker.event(Event::Store(
+							effective_address,
+							stack_idx,
+							to_store.size() as u8,
+						));
 					})
 			},
 			_ => Err(ExecError::Exception("Cannot store".into())),
@@ -566,9 +683,10 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 	fn get_store_val<'a>(
 		&'a mut self,
 		tracker: &'a mut impl MetricTracker,
+		events: &'a mut impl EventTracker,
 	) -> Result<(Value, impl 'a + Iterator<Item = Value>), ExecError>
 	{
-		let mut ready_iter = self.get_ready_iter(tracker);
+		let mut ready_iter = self.get_ready_iter(tracker, events);
 
 		let to_store = ready_iter.next().ok_or(ExecError::Exception(
 			"Store instruction got no operands".into(),
@@ -622,12 +740,13 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 							"Failed to calculate absolute address".into(),
 						)))
 					},
-					_ =>
+					err =>
 					{
 						// If any is NaR, exception
-						Err(Some(ExecError::Exception(
-							"Memory instruction got NaR operand".into(),
-						)))
+						Err(Some(ExecError::Exception(format!(
+							"Memory instruction got NaR operand: {:?}",
+							err
+						))))
 					},
 				}
 			})
@@ -700,10 +819,11 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 		target: Bits<7, true>,
 		location: Bits<6, false>,
 		tracker: &mut impl MetricTracker,
+		event_tracker: &mut impl EventTracker,
 	)
 	{
 		let (op1, op2) = {
-			let mut ready_iter = self.get_ready_iter(tracker);
+			let mut ready_iter = self.get_ready_iter(tracker, event_tracker);
 			(ready_iter.next(), ready_iter.next())
 		};
 
@@ -733,6 +853,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 				self.control.next_addr + (location_value * 2) as usize,
 				self.control.next_addr - (target_value.wrapping_mul(-1)).wrapping_mul(2) as usize,
 				tracker,
+				event_tracker,
 			);
 		}
 		else if target_value > 0 && (is_zero || unconditional)
@@ -741,6 +862,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 				self.control.next_addr + (location_value * 2) as usize,
 				self.control.next_addr + ((target_value + location_value + 1) * 2) as usize,
 				tracker,
+				event_tracker,
 			);
 		}
 		else
@@ -769,13 +891,14 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 		variant: AluVariant,
 		offset: Bits<5, false>,
 		tracker: &mut impl MetricTracker,
+		event_tracker: &mut impl EventTracker,
 	) -> Result<(), ExecError>
 	{
 		let (typ, mut result_scalars) = {
 			use AluVariant::*;
 
 			// Extract operands
-			let mut ins = self.get_ready_iter(tracker);
+			let mut ins = self.get_ready_iter(tracker, event_tracker);
 			let mut result_scalars = Vec::new();
 			let in1 = ins.next();
 
@@ -868,8 +991,9 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 			offset.value as usize,
 			Value::new_typed(typ, result_scalars.remove(0), result_scalars)
 				.unwrap()
-				.into(),
+				.into_operand(event_tracker),
 			tracker,
+			event_tracker,
 		);
 		Ok(())
 	}
@@ -903,13 +1027,14 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 		out_var: Alu2OutputVariant,
 		offset: Bits<5, false>,
 		tracker: &mut impl MetricTracker,
+		event_tracker: &mut impl EventTracker,
 	) -> Result<(), ExecError>
 	{
 		let current_addr = self.control.next_addr;
 		let addr_size = self.addr_space;
 		let (out_typ_1, out_typ_2, mut result_scalars_low, mut result_scalars_high) = {
 			// Extract operands
-			let mut ins = self.get_ready_iter(tracker);
+			let mut ins = self.get_ready_iter(tracker, event_tracker);
 			let in1 = ins.next();
 			let in1 = in1.ok_or(ExecError::Exception(format!(
 				"Alu2 instruction missing first operand. Variant: {:?}, address: {:?}",
@@ -983,14 +1108,14 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 
 		let low = Value::new_typed(out_typ_1, result_scalars_low.remove(0), result_scalars_low)
 			.unwrap()
-			.into();
+			.into_operand(event_tracker);
 		let high = Value::new_typed(
 			out_typ_2,
 			result_scalars_high.remove(0),
 			result_scalars_high,
 		)
 		.unwrap()
-		.into();
+		.into_operand(event_tracker);
 		let offset = offset.value as usize;
 
 		// Propagate results according to output variant
@@ -1004,10 +1129,12 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 			HighNext => (0, high, Some(low)),
 			LowNext => (0, low, Some(high)),
 		};
-		self.operands.push_operand(first_offset, first_op, tracker);
+		self.operands
+			.push_operand(first_offset, first_op, tracker, event_tracker);
 		if let Some(op) = second_op
 		{
-			self.operands.push_operand(offset, op, tracker);
+			self.operands
+				.push_operand(offset, op, tracker, event_tracker);
 		}
 		Ok(())
 	}
@@ -1369,8 +1496,8 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 
 		if shift_amount_negative
 		{
-			// On a right shift, we shift the initial value to the left by its width
-			// so that it can be shifted right
+			// On a right shift, we shift the initial value to the left by its
+			// width so that it can be shifted right
 			for _ in 0..typ1.scale()
 			{
 				sc1_prep_bytes.insert(0, 0);
@@ -1396,7 +1523,8 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 			let (shift_fn_u, shift_fn_i): (fn(u128, u128) -> u128, fn(i128, i128) -> i128) =
 				if shift_amount_negative
 				{
-					// Negative shift amount, we need to get the absolute shift amount
+					// Negative shift amount, we need to get the absolute shift
+					// amount
 
 					// First negate all shift amount bits
 					shift_bytes.iter_mut().for_each(|b| *b = *b ^ 0b1111_1111u8);
@@ -1575,8 +1703,8 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 	/// a given operation and the result.
 	fn signed_sub_overflow(in1: u8, in2: u8, result: u8) -> Option<bool>
 	{
-		// If the inputs have different sign , then overflow occurs if and only if the
-		// result has the same sign as the second input.
+		// If the inputs have different sign , then overflow occurs if and only
+		// if the result has the same sign as the second input.
 		// Source: https://www.doc.ic.ac.uk/~eedwards/compsys/arithmetic/index.html (2022-07-29)
 		let in1_neg = Self::is_negative(in1);
 		let in2_neg = Self::is_negative(in2);

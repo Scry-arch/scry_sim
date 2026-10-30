@@ -2,7 +2,7 @@ use crate::{
 	executor::test_execution_step,
 	misc::{
 		add_to_queue_idx, get_absolute_address, get_indexed_address, get_relative_address,
-		regress_queue,
+		regress_queue, OneShotTracker,
 	},
 };
 use quickcheck::TestResult;
@@ -10,7 +10,8 @@ use quickcheck_macros::quickcheck;
 use scry_isa::{Bits, Instruction, Type};
 use scry_sim::{
 	arbitrary::{ArbScalarVal, ArbValue, NoCF},
-	BlockedMemory, ExecState, Metric, OperandList, Value, ValueType,
+	BlockedMemory, Event, EventTracker, ExecState, IdEvent, Metric, OperandEvent, OperandList,
+	Value, ValueType,
 };
 use std::iter::once;
 
@@ -61,7 +62,7 @@ pub fn idx_address(stack_base: usize, value_size: usize, idx: usize) -> usize
 ///
 /// If `output_offset` is `None`, then this is a stack load and `addr` is the
 /// encoded index.
-fn test_issue_load(
+fn test_load(
 	NoCF(state): NoCF<ExecState>,
 	load_operands: Vec<Value>,
 	loaded_val: ArbValue<false, false>,
@@ -72,7 +73,7 @@ fn test_issue_load(
 	let effective_address = if output_offset.is_none()
 	{
 		idx_address(
-			state.frame.stack.get_base_addres(),
+			state.frame.stack.get_base_address(),
 			loaded_val.0.size(),
 			addr,
 		)
@@ -140,6 +141,22 @@ fn test_issue_load(
 	);
 
 	let is_stack = output_offset.is_none();
+
+	let mut evs = OneShotTracker::new();
+	evs.event(Event::Instruction(test_state.address, instruction));
+	for _ in 0..load_operands.len()
+	{
+		let id = evs.new_operand_id();
+		evs.event(Event::Id(id, IdEvent::Operand(OperandEvent::Consume)));
+	}
+	evs.event(Event::Load(
+		effective_address,
+		output_offset.map_or(Some(addr), |_| None),
+		loaded_val.0.get_first().bytes().unwrap().len() as u8,
+	));
+	let id = evs.new_operand_id();
+	evs.event(Event::Id(id, IdEvent::Operand(OperandEvent::Produce)));
+
 	test_execution_step(
 		&test_state,
 		test_mem,
@@ -173,6 +190,7 @@ fn test_issue_load(
 			),
 		]
 		.into(),
+		&evs,
 	)
 }
 
@@ -185,7 +203,7 @@ fn load_absolute_address(
 	output: Bits<5, false>,
 ) -> TestResult
 {
-	test_issue_load(
+	test_load(
 		NoCF(state),
 		vec![Value::singleton_typed(
 			ValueType::Uint(addr_size_pow2),
@@ -216,7 +234,7 @@ fn load_relative_address(
 		return TestResult::discard();
 	};
 
-	test_issue_load(
+	test_load(
 		NoCF(state),
 		vec![Value::singleton_typed(
 			ValueType::Int(offset_size_pow2),
@@ -253,7 +271,7 @@ fn load_indexed(
 		return TestResult::discard();
 	};
 
-	test_issue_load(
+	test_load(
 		NoCF(state),
 		vec![
 			base_addr.clone(),
@@ -273,5 +291,5 @@ fn load_stack(
 	idx: Bits<5, false>,
 ) -> TestResult
 {
-	test_issue_load(NoCF(state), vec![], loaded, None, idx.value as usize)
+	test_load(NoCF(state), vec![], loaded, None, idx.value as usize)
 }

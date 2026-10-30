@@ -1,6 +1,6 @@
 use crate::{
 	executor::{check_expected, test_execution_step, test_metrics},
-	misc::{add_to_queue_idx, advance_queue, RepeatingMem},
+	misc::{add_to_queue_idx, advance_queue, OneShotTracker, RepeatingMem},
 };
 use byteorder::{ByteOrder, LittleEndian};
 use duplicate::{duplicate_item, substitute};
@@ -10,7 +10,8 @@ use quickcheck_macros::quickcheck;
 use scry_isa::{Alu2OutputVariant, Alu2Variant, AluVariant, Bits, Instruction};
 use scry_sim::{
 	arbitrary::{ArbValue, LimitedOps, NoCF, SimpleOps},
-	ExecState, Executor, Metric, MetricTracker, OperandList, Scalar, TrackReport, Value, ValueType,
+	Event, EventTracker, ExecState, Executor, IdEvent, Metric, MetricTracker, OperandEvent,
+	OperandList, Scalar, TrackReport, Value, ValueType,
 };
 use std::{
 	cmp::min,
@@ -182,10 +183,37 @@ fn test_arithmetic_instruction<const OPS_IN: usize, const OPS_OUT: usize>(
 
 	let result_bytes = result_values.iter().fold(0, |acc, v| acc + v.scale());
 
-	for (idx, result_value) in out_idx.iter().zip(result_values.into_iter())
+	let mut expected_events = OneShotTracker::new();
+	expected_events.event(Event::Instruction(state.address, instr.clone()));
+	for _ in 0..OPS_IN
+	{
+		let id = expected_events.new_id();
+		expected_events.event(Event::Id(id, IdEvent::Operand(OperandEvent::Consume)));
+	}
+
+	let result_ops = result_values
+		.into_iter()
+		.map(|v| v.into_operand(&mut expected_events))
+		.collect::<Vec<_>>();
+	for op in &result_ops
+	{
+		expected_events.event(Event::Id(op.id, IdEvent::Operand(OperandEvent::Produce)));
+	}
+
+	for (idx, result_op) in out_idx.iter().zip(result_ops.iter())
 	{
 		// Put expected result in correct expected state list
-		add_to_queue_idx(&mut expected_state, *idx, once(result_value));
+		if 0 == add_to_queue_idx(
+			&mut expected_state,
+			*idx,
+			once(result_op.get_value().clone()),
+		)
+		{
+			expected_events.event(Event::Id(
+				result_op.id,
+				IdEvent::Operand(OperandEvent::Discard),
+			));
+		}
 	}
 
 	// Expected metrics
@@ -203,6 +231,7 @@ fn test_arithmetic_instruction<const OPS_IN: usize, const OPS_OUT: usize>(
 		RepeatingMem::<false>(instr.encode(), 0),
 		&expected_state,
 		&expected_mets,
+		&expected_events,
 	)
 }
 
@@ -679,7 +708,8 @@ fn ensure_right_shift<const OPS_IN: usize>(state: &mut AluTestState<OPS_IN>) -> 
 
 	if !ready.rest.first()?.typ.is_signed_integer()
 	{
-		// Right shift cannot be done using unsigned shift amount, so make it signed
+		// Right shift cannot be done using unsigned shift amount, so make it
+		// signed
 		ready.rest.first_mut()?.typ = ValueType::Int(ready.rest.first()?.typ.power());
 	};
 
@@ -840,8 +870,9 @@ fn test_effective_types(
 	}
 
 	let mut expected_metrics = TrackReport::new();
-	let expected_result = Executor::from_state(&expected_state_start, mem)
-		.step(&mut expected_metrics)
+	let mut expected_events = OneShotTracker::new();
+	let expected_result = Executor::from_state(&expected_state_start, mem, &mut expected_events)
+		.step(&mut expected_metrics, &mut expected_events)
 		.map(|ex| ex.state());
 	expected_metrics.reset_stat(Metric::ConsumedBytes);
 	expected_metrics.add_stat(Metric::ConsumedBytes, v1.typ.scale() + v2.typ.scale());
@@ -863,14 +894,22 @@ fn test_effective_types(
 	}
 
 	let mut actual_metrics = TrackReport::new();
-	let actual_result = Executor::from_state(&test_state, mem)
-		.step(&mut actual_metrics)
+	let mut actual_events = OneShotTracker::new();
+	let actual_result = Executor::from_state(&test_state, mem, &mut actual_events)
+		.step(&mut actual_metrics, &mut actual_events)
 		.map(|ex| ex.state());
 
 	check_expected(
 		actual_result,
 		expected_result,
-		|| test_metrics(&expected_metrics, &actual_metrics),
+		|| {
+			test_metrics(
+				&expected_metrics,
+				&actual_metrics,
+				&expected_events,
+				&actual_events,
+			)
+		},
 		"end state",
 	)
 }
@@ -939,15 +978,51 @@ fn divide_by_0(
 		Alu2OutputVariant::HighNext => (out_low, None, Some(out_high)),
 		Alu2OutputVariant::LowNext => (out_high, None, Some(out_low)),
 	};
-	if let Some(out_next) = out_next.as_ref()
+
+	let queued_values = 1 + tar2.iter().count() + out_next.iter().count();
+
+	let mut expected_events = OneShotTracker::new();
+
+	let tar1_p = tar1.into_operand(&mut expected_events);
+	let tar2_p = tar2.map(|v| v.into_operand(&mut expected_events));
+	let out_next_p = out_next.map(|v| v.into_operand(&mut expected_events));
+
+	once(&tar1_p)
+		.chain(tar2_p.iter())
+		.chain(out_next_p.iter())
+		.for_each(|p| {
+			expected_events.event(Event::Id(p.id, IdEvent::Operand(OperandEvent::Produce)));
+		});
+
+	if let Some(out_next) = out_next_p.as_ref()
 	{
-		add_to_queue_idx(&mut expected_state, 0, once(out_next.clone()));
+		if 0 == add_to_queue_idx(&mut expected_state, 0, once(out_next.get_value().clone()))
+		{
+			expected_events.event(Event::Id(
+				out_next.id,
+				IdEvent::Operand(OperandEvent::Discard),
+			));
+		}
 	}
-	add_to_queue_idx(
+	let added = add_to_queue_idx(
 		&mut expected_state,
 		target.value as usize,
-		once(tar1).chain(tar2.clone().into_iter()),
+		once(tar1_p.get_value().clone()).chain(tar2_p.iter().map(|p| p.get_value().clone())),
 	);
+	if let (Some(tar2_p), true) = (tar2_p, added < 2)
+	{
+		expected_events.event(Event::Id(
+			tar2_p.id,
+			IdEvent::Operand(OperandEvent::Discard),
+		));
+	}
+	if added == 0
+	{
+		expected_events.event(Event::Id(
+			tar1_p.id,
+			IdEvent::Operand(OperandEvent::Discard),
+		));
+	}
 
 	expected_state.address += 2;
 
@@ -959,13 +1034,27 @@ fn divide_by_0(
 	let existing_ops = test_state.frame.op_queue.remove(&0).map_or(vec![], |q| {
 		once(q.first).chain(q.rest.into_iter()).collect()
 	});
+	existing_ops
+		.iter()
+		.take(expected_state.op_list_depth() - 2)
+		.for_each(|_| {
+			let id = expected_events.new_operand_id();
+			expected_events.event(Event::Id(id, IdEvent::Operand(OperandEvent::Discard)));
+		});
 	add_to_queue_idx(
 		&mut test_state,
 		0,
-		[v1.clone(), v0].into_iter().chain(existing_ops.into_iter()),
+		[v1.clone(), v0.clone()]
+			.into_iter()
+			.chain(existing_ops.into_iter()),
 	);
 
-	let queued_values = 1 + tar2.iter().count() + out_next.iter().count();
+	expected_events.event(Event::Instruction(test_state.address, instr.clone()));
+	let v1_p = v1.clone().into_operand(&mut expected_events);
+	let v0_p = v0.into_operand(&mut expected_events);
+	expected_events.event(Event::Id(v1_p.id, IdEvent::Operand(OperandEvent::Consume)));
+	expected_events.event(Event::Id(v0_p.id, IdEvent::Operand(OperandEvent::Consume)));
+
 	test_execution_step(
 		&test_state,
 		RepeatingMem::<false>(instr.encode(), 0),
@@ -978,5 +1067,6 @@ fn divide_by_0(
 			(Metric::InstructionReads, 1),
 		]
 		.into(),
+		&expected_events,
 	)
 }

@@ -1,16 +1,18 @@
 use crate::misc::{
-	add_list_to_queue_idx, add_to_queue_idx, add_value_to_queue_idx, advance_queue, RepeatingMem,
+	add_list_to_queue_idx, add_to_queue_idx, add_value_to_queue_idx, advance_queue, OneShotTracker,
+	RepeatingMem,
 };
 use quickcheck::{Arbitrary, Gen, TestResult};
 use quickcheck_macros::quickcheck;
 use scry_isa::{Alu2Variant, AluVariant, Bits, CallVariant, Instruction, Type};
 use scry_sim::{
 	arbitrary::{LimitedOps, NoCF, SimpleOps},
-	ExecError, ExecState, Executor, Memory, Metric, MetricReporter, MetricTracker, OperandQueue,
-	Scalar, TrackReport, Value, ValueType,
+	Event, EventTracker, ExecError, ExecState, Executor, IdEvent, Memory, Metric, MetricReporter,
+	MetricTracker, OperandEvent, OperandQueue, Scalar, TrackReport, Value, ValueType,
 };
 use std::{
 	borrow::BorrowMut,
+	collections::HashMap,
 	fmt::Debug,
 	iter::{once, repeat},
 };
@@ -23,6 +25,58 @@ mod load;
 mod pick;
 mod stack;
 mod store;
+
+/// Returns the number of operands in the operand list of the given index in the
+/// given queue.
+fn operand_queue_list_count(queue: &OperandQueue, idx: usize) -> usize
+{
+	queue.get(&idx).map_or(0, |list| list.len())
+}
+
+/// Adds the given operand IDs and event types to the tracker.
+/// If the number of events exceeds the given depth in the queue of the given
+/// existing length, will add discard events for the overflowing IDs.
+fn add_events_with_discards(
+	evs: &mut OneShotTracker,
+	ops: Vec<(usize, OperandEvent)>,
+	queue_len: usize,
+	queue_depth: usize,
+)
+{
+	for (idx, (id, ty)) in ops.into_iter().enumerate()
+	{
+		evs.event(Event::Id(id, IdEvent::Operand(ty)));
+		if queue_len + idx >= queue_depth
+		{
+			evs.event(Event::Id(id, IdEvent::Operand(OperandEvent::Discard)));
+		}
+	}
+}
+
+/// Adds discard events to the tracker for each target operand list that
+/// overflows the given depth.
+///
+/// `target_queues` maps a target operand list index in the given queue to the
+/// operand IDs that are going into the list. When the number of operands in a
+/// list reaches the depth, subsequent operands get a discard event.
+pub fn add_discards(
+	evs: &mut OneShotTracker,
+	target_queues: &HashMap<usize, Vec<usize>>,
+	queue: &OperandQueue,
+	queue_depth: usize,
+)
+{
+	for (tar_idx, ops) in target_queues
+	{
+		for (idx, id) in ops.iter().enumerate()
+		{
+			if operand_queue_list_count(queue, *tar_idx) + idx >= queue_depth
+			{
+				evs.event(Event::Id(*id, IdEvent::Operand(OperandEvent::Discard)));
+			}
+		}
+	}
+}
 
 /// Used to generate arbitrary instruction that are supported by the
 /// executor.
@@ -67,13 +121,25 @@ impl Arbitrary for SupportedInstruction
 
 /// Checks that the expected metrics are equal to the actual ones.
 /// If not, prints relevant error
-pub fn test_metrics(expected: &TrackReport, actual: &TrackReport) -> TestResult
+pub fn test_metrics(
+	expected: &TrackReport,
+	actual: &TrackReport,
+	expected_ev: &OneShotTracker,
+	actual_ev: &OneShotTracker,
+) -> TestResult
 {
 	if actual != expected
 	{
 		TestResult::error(format!(
 			"Unexpected step metrics (actual != expected):\n{:?}\n !=\n {:?}",
 			actual, expected
+		))
+	}
+	else if actual_ev != expected_ev
+	{
+		TestResult::error(format!(
+			"Unexpected step events (actual != expected):\n{:?}\n !=\n {:?}",
+			actual_ev, expected_ev
 		))
 	}
 	else
@@ -90,17 +156,27 @@ pub fn test_execution_step<M: Memory + Debug>(
 	start_memory: impl BorrowMut<M> + Debug,
 	expected_state: &ExecState,
 	expected_metrics: &TrackReport,
+	expected_events: &OneShotTracker,
 ) -> TestResult
 {
 	let mut actual_metrics = TrackReport::new();
-	match Executor::from_state(start_state, start_memory).step(&mut actual_metrics)
+	let mut actual_events = OneShotTracker::new();
+	match Executor::from_state(start_state, start_memory, &mut actual_events)
+		.step(&mut actual_metrics, &mut actual_events)
 	{
 		Ok(exec) =>
 		{
 			check_expected(
 				&exec.state(),
 				expected_state,
-				|| test_metrics(expected_metrics, &actual_metrics),
+				|| {
+					test_metrics(
+						expected_metrics,
+						&actual_metrics,
+						&expected_events,
+						&actual_events,
+					)
+				},
 				"end state",
 			)
 		},
@@ -139,12 +215,23 @@ pub fn test_execution_step_exceptions<M: Memory + Debug>(
 	start_state: &ExecState,
 	start_memory: impl BorrowMut<M> + Debug,
 	expected_metrics: &TrackReport,
+	expected_events: &OneShotTracker,
 ) -> TestResult
 {
 	let mut actual_metrics = TrackReport::new();
-	match Executor::from_state(start_state, start_memory).step(&mut actual_metrics)
+	let mut actual_events = OneShotTracker::new();
+	match Executor::from_state(start_state, start_memory, &mut actual_events)
+		.step(&mut actual_metrics, &mut actual_events)
 	{
-		Err(ExecError::Exception(_)) => test_metrics(expected_metrics, &actual_metrics),
+		Err(ExecError::Exception(_)) =>
+		{
+			test_metrics(
+				expected_metrics,
+				&actual_metrics,
+				expected_events,
+				&actual_events,
+			)
+		},
 		result =>
 		{
 			TestResult::error(format!(
@@ -177,6 +264,7 @@ fn test_simple_instruction(
 	instr: Instruction,
 	expected_op_queue: impl FnOnce(&OperandQueue) -> OperandQueue,
 	expected_metrics: impl FnOnce(&OperandQueue) -> TrackReport,
+	expected_events: impl FnOnce(&OperandQueue) -> OneShotTracker,
 ) -> TestResult
 {
 	// Build expected state
@@ -193,12 +281,63 @@ fn test_simple_instruction(
 	assert_eq!(expected_mets.get_stat(Metric::InstructionReads), 0);
 	expected_mets.add_stat(Metric::InstructionReads, 1);
 
+	// Build expected events
+	let mut expected_evs = expected_events(&state.frame.op_queue);
+	expected_evs.event(Event::Instruction(state.address, instr.clone()));
+
 	test_execution_step(
 		&state,
 		RepeatingMem::<true>(instr.encode(), 0),
 		&expected_state,
 		&expected_mets,
+		&expected_evs,
 	)
+}
+
+/// For each operand in the queue at the given index, adds an event of the given
+/// type.
+///
+/// Creates fresh IDs for each operand.
+fn add_operand_events_for_list(
+	evs: &mut OneShotTracker,
+	queue: &OperandQueue,
+	idx: usize,
+	skip: usize,
+	ev_tys: &[OperandEvent],
+)
+{
+	if let Some(list) = queue.get(&idx)
+	{
+		for op in list
+			.iter()
+			.skip(skip)
+			.map(|v| v.clone().into_operand(evs))
+			.collect::<Vec<_>>()
+		{
+			for ev_ty in ev_tys
+			{
+				evs.event(Event::Id(op.id, IdEvent::Operand(*ev_ty)))
+			}
+		}
+	}
+}
+
+/// For each operand in the queue at the given index, produces an event of the
+/// given type.
+///
+/// Creates fresh IDs for each operand.
+fn operand_events_for_list(
+	queue: &OperandQueue,
+	idx: usize,
+	skip: usize,
+	ev_tys: &[OperandEvent],
+) -> OneShotTracker
+{
+	let mut evs = OneShotTracker::new();
+
+	add_operand_events_for_list(&mut evs, queue, idx, skip, ev_tys);
+
+	evs
 }
 
 /// Tests can convert from state to executor back to state without the state
@@ -206,7 +345,7 @@ fn test_simple_instruction(
 #[quickcheck]
 fn import_export_executor(state: ExecState) -> bool
 {
-	let executor = Executor::from_state(&state, RepeatingMem::<true>(0, 0));
+	let executor = Executor::from_state(&state, RepeatingMem::<true>(0, 0), &mut ());
 	let new_state = executor.state();
 
 	new_state == state
@@ -239,14 +378,14 @@ fn max_operands_in_list(
 
 	let out_ref = inst.out_refs()[rand % inst.out_refs().len()];
 
-	// Fill the target operand list with values so that the instruction output to it
-	// is discarded
+	// Fill the target operand list with values so that the instruction output
+	// to it is discarded
 	add_to_queue_idx(&mut state, out_ref + 1, repeat(v));
 	let expected_list = state.frame.op_queue.get(&(out_ref + 1)).unwrap().clone();
 
 	match std::panic::catch_unwind(|| {
-		Executor::from_state(&state, RepeatingMem::<true>(inst.encode(), 0))
-			.step(&mut TrackReport::new())
+		Executor::from_state(&state, RepeatingMem::<true>(inst.encode(), 0), &mut ())
+			.step(&mut (), &mut ())
 	})
 	{
 		Ok(Ok(exec)) =>
@@ -282,6 +421,18 @@ fn instruction_nop(state: NoCF<ExecState>) -> TestResult
 			new_op_q
 		},
 		|_| [].into(),
+		|old_op_queue| {
+			let mut evs = OneShotTracker::new();
+			if let Some(list) = old_op_queue.get(&0)
+			{
+				for _ in list.iter()
+				{
+					let id = evs.new_operand_id();
+					evs.event(Event::Id(id, IdEvent::Operand(OperandEvent::Discard)));
+				}
+			}
+			evs
+		},
 	)
 }
 
@@ -343,7 +494,57 @@ fn instruction_constant(
 			]
 			.into()
 		},
+		|old_op_queue| {
+			let mut evs = OneShotTracker::new();
+
+			let mut ops = vec![(evs.new_operand_id(), OperandEvent::Produce)];
+			if let Some(list) = old_op_queue.get(&0)
+			{
+				ops.extend(
+					list.iter()
+						.map(|_| (evs.new_operand_id(), OperandEvent::Forward)),
+				);
+			}
+
+			add_events_with_discards(
+				&mut evs,
+				ops,
+				operand_queue_list_count(old_op_queue, 1),
+				op_list_depth,
+			);
+
+			evs
+		},
 	)
+}
+
+/// Produces the events for a grow instruction.
+///
+/// The operands at the given ready queue will be assumed to follow some other
+/// operand in the ready queue
+fn grow_events(queue: &OperandQueue, depth: usize) -> OneShotTracker
+{
+	let mut evs = OneShotTracker::new();
+
+	let consume_id = evs.new_operand_id();
+	evs.event(Event::Id(
+		consume_id,
+		IdEvent::Operand(OperandEvent::Consume),
+	));
+
+	let mut ops = vec![(evs.new_operand_id(), OperandEvent::Produce)];
+	if let Some(list) = queue.get(&0)
+	{
+		ops.extend(
+			list.iter()
+				.skip(1)
+				.map(|_| (evs.new_operand_id(), OperandEvent::Forward)),
+		);
+	}
+
+	add_events_with_discards(&mut evs, ops, operand_queue_list_count(queue, 1), depth);
+
+	evs
 }
 
 /// Tests the Grow instruction on values
@@ -397,6 +598,7 @@ fn instruction_grow(
 			]
 			.into()
 		},
+		|q| grow_events(q, op_list_depth),
 	)
 }
 
@@ -464,6 +666,7 @@ fn instruction_grow_nop(
 			]
 			.into()
 		},
+		|q| grow_events(q, op_list_depth),
 	)
 }
 

@@ -227,12 +227,12 @@ impl WeightedArbitrary<usize> for StackFrame
 	{
 		let mut frame = StackFrame {
 			block: WeightedArbitrary::arbitrary_weighted(g, max_addr),
-			base_size: 0,
+			private_size: 0,
 		};
 
 		if frame.block.size > 0
 		{
-			frame.base_size = usize::arbitrary(g) % frame.block.size;
+			frame.private_size = usize::arbitrary(g) % frame.block.size;
 		}
 
 		// make sure is valid frame
@@ -247,11 +247,11 @@ impl WeightedArbitrary<usize> for StackFrame
 		let clone2 = self.clone();
 		Box::new(
 			// Shrink by reducing primary size
-			self.base_size
+			self.private_size
 				.shrink()
 				.map(move |new_size| {
 					let mut clone = clone1.clone();
-					clone.base_size = new_size;
+					clone.private_size = new_size;
 					clone.validate().unwrap();
 					clone
 				})

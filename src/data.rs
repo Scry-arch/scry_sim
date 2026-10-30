@@ -1,5 +1,6 @@
 use crate::{
-	value::Value, CallFrameState, ExecState, Metric, MetricTracker, OperandList, StackFrame,
+	value::Value, CallFrameState, Event, EventTracker, ExecState, IdEvent, Metric, MetricTracker,
+	OperandEvent, OperandList, StackFrame,
 };
 use std::{
 	cell::RefCell,
@@ -33,6 +34,7 @@ pub const MAX_INSTR_INPUTS: usize = 3;
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Operand
 {
+	pub id: usize,
 	op: Rc<RefCell<Value>>,
 }
 impl Operand
@@ -42,12 +44,11 @@ impl Operand
 	{
 		(*self.op).borrow()
 	}
-}
-impl From<Value> for Operand
-{
-	fn from(v: Value) -> Self
+
+	pub fn from_value(v: Value, id: usize) -> Self
 	{
 		Self {
+			id,
 			op: Rc::new(v.into()),
 		}
 	}
@@ -71,12 +72,12 @@ pub struct OperandStack
 }
 impl OperandStack
 {
-	pub fn new(ready_ops: impl Iterator<Item = Value>, more_depth: usize) -> Self
+	pub fn new(ready_ops: impl Iterator<Item = Operand>, more_depth: usize) -> Self
 	{
 		Self {
 			stack: VecDeque::new(),
 			queue: VecDeque::new(),
-			ready: VecDeque::from_iter(ready_ops.map(|v| v.into())),
+			ready: VecDeque::from_iter(ready_ops),
 			more_depth,
 		}
 	}
@@ -94,45 +95,57 @@ impl OperandStack
 	///
 	/// When the iterator is dropped, the queue discards the remaining operands
 	/// at the front of the queue, and moves the next operand list to the front.
-	pub fn ready_iter<'a, T: MetricTracker>(
+	pub fn ready_iter<'a, T: MetricTracker, E: EventTracker>(
 		&'a mut self,
 		tracker: &'a mut T,
+		events: &'a mut E,
 	) -> impl 'a + Iterator<Item = Value>
 	{
-		struct RemoveIter<'b, Ti: MetricTracker>
+		struct RemoveIter<'b, Ti: MetricTracker, Ei: EventTracker>
 		{
 			stack: &'b mut OperandStack,
 			tracker: &'b mut Ti,
+			events: &'b mut Ei,
 		}
-		impl<'b, Ti: MetricTracker> Iterator for RemoveIter<'b, Ti>
+		impl<'b, Ti: MetricTracker, Ei: EventTracker> Iterator for RemoveIter<'b, Ti, Ei>
 		{
 			type Item = Value;
 
 			fn next(&mut self) -> Option<Self::Item>
 			{
-				self.stack.pop_ready(self.tracker)
+				self.stack.pop_ready(self.tracker, self.events)
 			}
 		}
-		impl<'b, Ti: MetricTracker> Drop for RemoveIter<'b, Ti>
+		impl<'b, Ti: MetricTracker, Ei: EventTracker> Drop for RemoveIter<'b, Ti, Ei>
 		{
 			fn drop(&mut self)
 			{
+				self.stack.ready.iter().for_each(|op| {
+					self.events
+						.event(Event::Id(op.id, IdEvent::Operand(OperandEvent::Discard)))
+				});
 				self.stack.ready = self.stack.queue.pop_front().unwrap_or(VecDeque::new());
 			}
 		}
 		RemoveIter {
 			stack: self,
 			tracker,
+			events,
 		}
 	}
 
 	/// Extracts the first operand on the ready queue
-	pub fn pop_ready<T: MetricTracker>(&mut self, tracker: &mut T) -> Option<Value>
+	pub fn pop_ready<T: MetricTracker, E: EventTracker>(
+		&mut self,
+		tracker: &mut T,
+		event_tracker: &mut E,
+	) -> Option<Value>
 	{
 		self.ready.pop_front().and_then(|op: Operand| {
 			let val = op.get_value().clone();
 			tracker.add_stat(Metric::ConsumedOperands, 1);
 			tracker.add_stat(Metric::ConsumedBytes, val.size());
+			event_tracker.event(Event::Id(op.id, IdEvent::Operand(OperandEvent::Consume)));
 			Some(val)
 		})
 	}
@@ -144,22 +157,29 @@ impl OperandStack
 	}
 
 	/// Pushes the given operand to the back of the queue at the given index if
-	/// the queue has not reached its operand limit
+	/// the queue has not reached its operand limit. Returns whether the operand
+	/// was pushed. I.e. returns false if the queue is at its limit
 	///
 	/// Doesn't update any report data
-	fn push_op_unreported(&mut self, mut idx: usize, op: Operand)
+	fn push_op_unreported(&mut self, mut idx: usize, op: Operand) -> bool
 	{
 		if idx == 0
 		{
 			if self.ready.len() < self.op_list_depth()
 			{
 				self.ready.push_back(op);
+				true
+			}
+			else
+			{
+				false
 			}
 		}
 		else
 		{
 			idx -= 1;
-			// Ensures the operand queue is long enough to include the given index.
+			// Ensures the operand queue is long enough to include the given
+			// index.
 			if self.queue.len() <= idx
 			{
 				self.queue.resize_with(idx + 1, || VecDeque::new());
@@ -167,20 +187,36 @@ impl OperandStack
 			if self.queue[idx].len() < self.op_list_depth()
 			{
 				self.queue[idx].push_back(op);
+				true
+			}
+			else
+			{
+				false
 			}
 		}
 	}
 
 	/// Pushes the given operand to the back of the list at the given index.
-	pub fn push_operand(&mut self, idx: usize, op: Operand, tracker: &mut impl MetricTracker)
+	pub fn push_operand(
+		&mut self,
+		idx: usize,
+		op: Operand,
+		tracker: &mut impl MetricTracker,
+		event_tracker: &mut impl EventTracker,
+	)
 	{
 		// We report the operand as queued regardless of whether it actually is.
-		// This ensures that the difference between queued and consumed reflects those
-		// that were discarded because they were put on a full operand list and
-		// therefore dropped.
+		// This ensures that the difference between queued and consumed reflects
+		// those that were discarded because they were put on a full operand
+		// list and therefore dropped.
 		tracker.add_stat(Metric::QueuedValues, 1);
 		tracker.add_stat(Metric::QueuedValueBytes, op.get_value().size());
-		self.push_op_unreported(idx, op);
+		let id = op.id;
+		event_tracker.event(Event::Id(id, IdEvent::Operand(OperandEvent::Produce)));
+		if !self.push_op_unreported(idx, op)
+		{
+			event_tracker.event(Event::Id(id, IdEvent::Operand(OperandEvent::Discard)));
+		}
 	}
 
 	/// Moves the operand found on the operand list with index `src_list_idx`,
@@ -194,6 +230,7 @@ impl OperandStack
 		src_idx: usize,
 		target_idx: usize,
 		tracker: &mut impl MetricTracker,
+		event_tracker: &mut impl EventTracker,
 	)
 	{
 		once(&mut self.ready)
@@ -202,7 +239,12 @@ impl OperandStack
 			.and_then(|list| list.remove(src_idx))
 			.map(|op| {
 				tracker.add_stat(Metric::ReorderedOperands, 1);
-				self.push_op_unreported(target_idx, op);
+				let id = op.id;
+				event_tracker.event(Event::Id(id, IdEvent::Operand(OperandEvent::Forward)));
+				if !self.push_op_unreported(target_idx, op)
+				{
+					event_tracker.event(Event::Id(id, IdEvent::Operand(OperandEvent::Discard)));
+				}
 			});
 	}
 
@@ -213,9 +255,9 @@ impl OperandStack
 		src_idx: usize,
 		dest_idx: usize,
 		tracker: &mut impl MetricTracker,
+		ev_tracker: &mut impl EventTracker,
 	)
 	{
-		let depth = self.op_list_depth();
 		if src_idx == dest_idx
 		{
 			return;
@@ -232,22 +274,28 @@ impl OperandStack
 		.and_then(|list| list.remove(0))
 		.map(|op| {
 			tracker.add_stat(Metric::ReorderedOperands, 1);
+			ev_tracker.event(Event::Id(op.id, IdEvent::Operand(OperandEvent::Forward)));
 			op
 		})
 		{
-			self.push_op_unreported(dest_idx, op);
+			let id = op.id;
+			if !self.push_op_unreported(dest_idx, op)
+			{
+				ev_tracker.event(Event::Id(id, IdEvent::Operand(OperandEvent::Discard)));
+			}
 		}
-		self.queue
-			.get_mut(dest_idx)
-			.iter_mut()
-			.for_each(|list| list.truncate(depth))
 	}
 
 	/// Moves all operands on the ready list to the back of the `dest_idx`
 	/// queue.
-	pub fn reorder_ready(&mut self, dest_idx: usize, tracker: &mut impl MetricTracker)
+	pub fn reorder_ready(
+		&mut self,
+		dest_idx: usize,
+		tracker: &mut impl MetricTracker,
+		events: &mut impl EventTracker,
+	)
 	{
-		self.reorder_list(0, dest_idx, tracker)
+		self.reorder_list(0, dest_idx, tracker, events)
 	}
 
 	/// Pushes the current operand queue onto the queue stack keeping the ready
@@ -331,18 +379,20 @@ impl OperandStack
 				stack_base
 			}
 	}
-}
-/// Constructs an OperandQueue equivalent to an execution state
-impl<'a> From<&'a ExecState> for OperandStack
-{
-	fn from(state: &'a ExecState) -> Self
+
+	/// Constructs an OperandQueue equivalent to an execution state and using
+	/// the given tracker for assigning IDs
+	pub(crate) fn from_exec_state<E: EventTracker>(state: &ExecState, tracker: &mut E) -> Self
 	{
-		let frame_op_queue = |frame: &CallFrameState| {
+		let frame_op_queue = |frame: &CallFrameState, tracker: &mut E| {
 			frame
 				.op_queue
 				.iter()
 				.fold(VecDeque::new(), |mut op_lists, (list_idx, op_list)| {
-					let ops = op_list.iter().cloned().map(|op| op.into());
+					let ops = op_list
+						.iter()
+						.cloned()
+						.map(|op| Operand::from_value(op, tracker.new_operand_id()));
 					if op_lists.len() <= *list_idx
 					{
 						op_lists.resize_with(*list_idx + 1, VecDeque::new);
@@ -351,13 +401,13 @@ impl<'a> From<&'a ExecState> for OperandStack
 					op_lists
 				})
 		};
-		let mut curr_frame_op_queue = frame_op_queue(&state.frame);
+		let mut curr_frame_op_queue = frame_op_queue(&state.frame, tracker);
 		let first_list = curr_frame_op_queue.pop_front().unwrap_or(VecDeque::new());
 		Self {
 			stack: state.frame_stack.clone().into_iter().fold(
 				VecDeque::new(),
 				|mut stack, frame| {
-					stack.push_back(frame_op_queue(&frame));
+					stack.push_back(frame_op_queue(&frame, tracker));
 					stack
 				},
 			),

@@ -1,8 +1,8 @@
 use crate::{
-	executor::{test_execution_step, SupportedInstruction},
+	executor::{add_operand_events_for_list, test_execution_step, SupportedInstruction},
 	misc::{
 		add_to_queue_idx, advance_queue, get_absolute_address, get_relative_address, regress_queue,
-		RepeatingMem,
+		OneShotTracker, RepeatingMem,
 	},
 };
 use quickcheck::TestResult;
@@ -10,9 +10,10 @@ use quickcheck_macros::quickcheck;
 use scry_isa::{BitValue, Bits, CallVariant, Instruction};
 use scry_sim::{
 	arbitrary::{ArbValue, InstrAddr, NoCF},
-	Block, CallFrameState, ControlFlowType, ExecState, Executor, Metric,
+	Block, CallFrameState, ControlEvent, ControlFlowType, Event, EventTracker, ExecState, Executor,
+	IdEvent, Metric,
 	Metric::{ConsumedBytes, ConsumedOperands, IssuedCalls},
-	MetricTracker, OperandList, StackFrame, TrackReport, ValueType,
+	MetricTracker, OperandEvent, OperandList, StackFrame, TrackReport, ValueType,
 };
 use std::collections::HashMap;
 
@@ -32,6 +33,7 @@ fn return_trigger_impl(
 	expected_ready_ops: Option<OperandList>,
 	// The metrics expected after the execution step
 	expected_metrics: TrackReport,
+	expected_events: OneShotTracker,
 ) -> TestResult
 {
 	let instr_encoded = Instruction::encode(&instr);
@@ -50,8 +52,9 @@ fn return_trigger_impl(
 	// want to dictate the order, we insert the expected state into an Executor
 	// and extract it immediately, ensuring the order of reads will follow the
 	// implementation
-	expected_state = Executor::from_state(&expected_state, RepeatingMem::<true>(0, 0)).state();
-	expected_state.frame.stack.block.size += frame.stack.base_size;
+	expected_state =
+		Executor::from_state(&expected_state, RepeatingMem::<true>(0, 0), &mut ()).state();
+	expected_state.frame.stack.block.size += frame.stack.private_size;
 
 	// Construct test state
 	let mut test_state = state.clone();
@@ -66,6 +69,7 @@ fn return_trigger_impl(
 		RepeatingMem::<true>(instr_encoded, 0),
 		&expected_state,
 		&expected_metrics,
+		&expected_events,
 	)
 }
 
@@ -98,6 +102,7 @@ fn return_trigger(
 	// Execute one step on the frame to get the expected result of the next
 	// instruction
 	let mut expected_metrics = TrackReport::new();
+	let mut expected_events = OneShotTracker::new();
 	let expected_ready_ops = match Executor::from_state(
 		&ExecState {
 			frame: frame.clone(),
@@ -106,8 +111,9 @@ fn return_trigger(
 			..state
 		},
 		RepeatingMem::<true>(instr_encoded, 0),
+		&mut expected_events,
 	)
-	.step(&mut expected_metrics)
+	.step(&mut expected_metrics, &mut expected_events)
 	{
 		Ok(exec) =>
 		{
@@ -118,6 +124,8 @@ fn return_trigger(
 		_ => return TestResult::discard(),
 	};
 	expected_metrics.add_stat(Metric::TriggeredReturns, 1);
+	let id = expected_events.new_control_id();
+	expected_events.event(Event::Id(id, IdEvent::ControlTrigger(ControlEvent::Return)));
 
 	return_trigger_impl(
 		NoCF(state),
@@ -125,6 +133,7 @@ fn return_trigger(
 		instr.0,
 		expected_ready_ops,
 		expected_metrics,
+		expected_events,
 	)
 }
 
@@ -132,6 +141,7 @@ fn return_trigger(
 #[quickcheck]
 fn return_immediately(state: NoCF<ExecState>, mut frame: CallFrameState) -> TestResult
 {
+	let addr = state.0.address;
 	// Make sure the new frame adheres to the operand limit
 	frame.op_queue.iter_mut().for_each(|(_, list)| {
 		while list.len() > state.0.op_list_depth()
@@ -144,16 +154,33 @@ fn return_immediately(state: NoCF<ExecState>, mut frame: CallFrameState) -> Test
 	// frame.
 	let expected_ready_ops = frame.op_queue.get(&1).cloned();
 
+	let instr = Instruction::Call(CallVariant::Ret, 0.try_into().unwrap());
+	let mut expected_events = [
+		Event::Instruction(addr, instr.clone()),
+		Event::Id(0, IdEvent::ControlIssue(ControlEvent::Return)),
+		Event::Id(0, IdEvent::ControlTrigger(ControlEvent::Return)),
+	]
+	.into();
+
+	add_operand_events_for_list(
+		&mut expected_events,
+		&frame.op_queue,
+		0,
+		0,
+		&[OperandEvent::Discard],
+	);
+
 	return_trigger_impl(
 		state,
 		frame,
-		Instruction::Call(CallVariant::Ret, 0.try_into().unwrap()),
+		instr,
 		expected_ready_ops,
 		TrackReport::from([
 			(Metric::IssuedReturns, 1),
 			(Metric::TriggeredReturns, 1),
 			(Metric::InstructionReads, 1),
 		]),
+		expected_events.into(),
 	)
 }
 
@@ -166,7 +193,8 @@ fn return_non_trigger(NoCF(state): NoCF<ExecState>, offset: Bits<6, false>) -> T
 		return TestResult::discard();
 	}
 
-	let instr_encoded = Instruction::encode(&Instruction::Call(CallVariant::Ret, offset));
+	let instr = Instruction::Call(CallVariant::Ret, offset);
+	let instr_encoded = Instruction::encode(&instr);
 
 	let mut expected_state = state.clone();
 	// Return discards any operands its given
@@ -181,11 +209,26 @@ fn return_non_trigger(NoCF(state): NoCF<ExecState>, offset: Bits<6, false>) -> T
 	use Metric::*;
 	let expected_metrics = TrackReport::from([(IssuedReturns, 1), (InstructionReads, 1)]);
 
+	let mut expected_events = [
+		Event::Instruction(state.address, instr.clone()),
+		Event::Id(0, IdEvent::ControlIssue(ControlEvent::Return)),
+	]
+	.into();
+
+	add_operand_events_for_list(
+		&mut expected_events,
+		&state.frame.op_queue,
+		0,
+		0,
+		&[OperandEvent::Discard],
+	);
+
 	test_execution_step(
 		&state,
 		RepeatingMem::<true>(instr_encoded, 0),
 		&expected_state,
 		&expected_metrics,
+		&expected_events,
 	)
 }
 
@@ -197,8 +240,8 @@ fn jmp_trigger(
 	branch_target: InstrAddr,
 ) -> TestResult
 {
-	// Skip any test with immediate control flow triggering or trigger before the
-	// target address or where the instruction is a branch
+	// Skip any test with immediate control flow triggering or trigger before
+	// the target address or where the instruction is a branch
 	match instr.0
 	{
 		Instruction::Call(_, offset) =>
@@ -228,14 +271,20 @@ fn jmp_trigger(
 	// Execute one step on the frame to get the expected result of the next
 	// instruction
 	let mut expected_metrics = TrackReport::new();
-	let mut expected_state =
-		match Executor::from_state(&state, RepeatingMem::<true>(instr_encoded, 0))
-			.step(&mut expected_metrics)
-		{
-			Ok(exec) => exec.state(),
-			_ => return TestResult::discard(),
-		};
+	let mut expected_events = OneShotTracker::new();
+	let mut expected_state = match Executor::from_state(
+		&state,
+		RepeatingMem::<true>(instr_encoded, 0),
+		&mut expected_events,
+	)
+	.step(&mut expected_metrics, &mut expected_events)
+	{
+		Ok(exec) => exec.state(),
+		_ => return TestResult::discard(),
+	};
 	expected_metrics.add_stat(Metric::TriggeredBranches, 1);
+	let id = expected_events.new_control_id();
+	expected_events.event(Event::Id(id, IdEvent::ControlTrigger(ControlEvent::Jump)));
 
 	// Move the current address to the branch target
 	expected_state.address = branch_target.0;
@@ -252,6 +301,7 @@ fn jmp_trigger(
 		RepeatingMem::<true>(instr_encoded, 0),
 		&expected_state,
 		&expected_metrics,
+		&expected_events,
 	)
 }
 
@@ -274,7 +324,8 @@ fn jmp_trigger_past_trigger(
 	}
 	let instr_encoded = Instruction::encode(&instr.0);
 
-	// Construct trigger address earlier than the target but after current address
+	// Construct trigger address earlier than the target but after current
+	// address
 	let range = if state.address < branch_target.0
 	{
 		branch_target.0 - state.address
@@ -303,8 +354,8 @@ fn jmp_trigger_past_trigger(
 		.insert(state.address, ControlFlowType::Branch(branch_target.0));
 
 	TestResult::from_bool(
-		Executor::from_state(&test_state, RepeatingMem::<true>(instr_encoded, 0))
-			.step(&mut ())
+		Executor::from_state(&test_state, RepeatingMem::<true>(instr_encoded, 0), &mut ())
+			.step(&mut (), &mut ())
 			.is_err(),
 	)
 }
@@ -347,8 +398,8 @@ fn test_jump(
 		test_state.frame.op_queue.insert(0, ops.clone());
 	}
 
-	// Expected state should be the same as the given one (since we first regressed
-	// it for our test.), except the address
+	// Expected state should be the same as the given one (since we first
+	// regressed it for our test.), except the address
 	let mut expected_state: ExecState = state.clone();
 	if !may_trigger
 	{
@@ -425,6 +476,18 @@ fn test_jump(
 		(Metric::IssuedBranches, jump_taken as usize),
 	]
 	.into();
+
+	let mut expected_events: OneShotTracker =
+		[Event::Instruction(test_state.address, instr.clone())].into();
+	let ctrl_id = expected_events.new_control_id();
+	if jump_taken
+	{
+		expected_events.event(Event::Id(
+			ctrl_id,
+			IdEvent::ControlIssue(ControlEvent::Jump),
+		));
+	}
+
 	if let Some(ops) = &ready_ops
 	{
 		expected_metrics.add_stat(Metric::ConsumedOperands, ops.len());
@@ -434,16 +497,31 @@ fn test_jump(
 				.map(|v| v.get_first().bytes().unwrap().len())
 				.sum(),
 		);
+		ready_ops.map(|ops| {
+			for _ in ops
+			{
+				let id = expected_events.new_operand_id();
+				expected_events.event(Event::Id(id, IdEvent::Operand(OperandEvent::Consume)));
+			}
+		});
 	}
 	if may_trigger
 	{
 		expected_metrics.add_stat(Metric::TriggeredBranches, jump_taken as usize);
+		if jump_taken
+		{
+			expected_events.event(Event::Id(
+				ctrl_id,
+				IdEvent::ControlTrigger(ControlEvent::Jump),
+			));
+		}
 	}
 	test_execution_step(
 		&test_state,
 		RepeatingMem::<true>(Instruction::encode(&instr), 0),
 		&expected_state,
 		&expected_metrics,
+		&expected_events,
 	)
 }
 
@@ -488,19 +566,41 @@ fn test_jump_long(
 {
 	let location_bits = location.value as u32;
 	let lower_6 = location_bits & 0b11_1111;
-	let upper_7 = location_bits >> 6;
+	// The upper 7 bits go in the signed target field, so values with the top
+	// bit set must be given as the negative number with the same encoding
+	let upper_7 = ((location_bits >> 6) as i32)
+		.try_into()
+		.unwrap_or_else(|_| ((location_bits >> 6) as i32 - 128).try_into().unwrap());
+
+	// The executor treats the target as a 32-bit value and calculates the
+	// target address in 32-bit arithmetic, so only test targets where that
+	// cannot overflow (for either jump direction).
+	let target_value = match target
+		.0
+		.get_first()
+		.i128_value()
+		.and_then(|v| i32::try_from(v).ok())
+	{
+		Some(t)
+			if t.checked_neg().and_then(|t| t.checked_mul(2)).is_some()
+				&& t.checked_add(location_bits as i32 + 1)
+					.and_then(|v| v.checked_mul(2))
+					.is_some() =>
+		{
+			t
+		},
+		_ => return TestResult::discard(),
+	};
 	test_jump(
 		state,
 		Instruction::Jump(
-			Bits {
-				value: upper_7 as i32,
-			},
+			upper_7,
 			Bits {
 				value: lower_6 as i32,
 			},
 		),
 		Some(OperandList::new(condition.0, vec![target.0.clone()])),
-		target.0.get_first().i128_value().unwrap(),
+		target_value as i128,
 		location_bits,
 		expect_jump,
 		may_trigger,
@@ -692,23 +792,27 @@ fn call_trigger_impl(
 	// Execute one step on the frame to get the expected result of the next
 	// instruction
 	let mut expected_metrics = TrackReport::new();
-	let mut expected_state =
-		match Executor::from_state(&state, RepeatingMem::<true>(instr_encoded, 0))
-			.step(&mut expected_metrics)
-		{
-			Ok(exec) => exec.state(),
-			_ => return TestResult::discard(),
-		};
+	let mut expected_events = OneShotTracker::new();
+	let mut expected_state = match Executor::from_state(
+		&state,
+		RepeatingMem::<true>(instr_encoded, 0),
+		&mut expected_events,
+	)
+	.step(&mut expected_metrics, &mut expected_events)
+	{
+		Ok(exec) => exec.state(),
+		_ => return TestResult::discard(),
+	};
 	// Add new frame with the ready list being the same as the old ready list
 	let ready_list = expected_state.frame.op_queue.remove(&0);
 	expected_state.frame.op_queue = advance_queue(expected_state.frame.op_queue);
 	// Create expected stack frame
 	let block = Block {
-		address: expected_state.frame.stack.block.address + expected_state.frame.stack.base_size,
-		size: expected_state.frame.stack.block.size - expected_state.frame.stack.base_size,
+		address: expected_state.frame.stack.block.address + expected_state.frame.stack.private_size,
+		size: expected_state.frame.stack.block.size - expected_state.frame.stack.private_size,
 	};
 	let frame_block = StackFrame {
-		base_size: block.size,
+		private_size: block.size,
 		block,
 	};
 	let new_frame = CallFrameState {
@@ -717,7 +821,7 @@ fn call_trigger_impl(
 		op_queue: HashMap::from_iter(ready_list.map(|list| (0, list)).into_iter()),
 		stack: frame_block,
 	};
-	expected_state.frame.stack.block.size = expected_state.frame.stack.base_size;
+	expected_state.frame.stack.block.size = expected_state.frame.stack.private_size;
 
 	expected_state
 		.frame_stack
@@ -727,6 +831,8 @@ fn call_trigger_impl(
 
 	// Add trigger metric
 	expected_metrics.add_stat(Metric::TriggeredCalls, 1);
+	let id = expected_events.new_control_id();
+	expected_events.event(Event::Id(id, IdEvent::ControlTrigger(ControlEvent::Call)));
 
 	// Construct test state
 	let mut test_state = state.clone();
@@ -740,6 +846,7 @@ fn call_trigger_impl(
 		RepeatingMem::<true>(instr_encoded, 0),
 		&expected_state,
 		&expected_metrics,
+		&expected_events,
 	)
 }
 
@@ -751,8 +858,8 @@ fn call_trigger_immediately(
 ) -> TestResult
 {
 	// The semantics of immediately triggering is the same as if
-	// there already was a call issued that triggers now and the next instruction
-	// does nothing.
+	// there already was a call issued that triggers now and the next
+	// instruction does nothing.
 	// Therefore, run that scenario and check that the result is the same
 
 	let mut nop_call_state: ExecState = state.clone();
@@ -777,11 +884,13 @@ fn call_trigger_immediately(
 		),
 	);
 	let mut expected_metrics = TrackReport::new();
+	let mut expected_events = OneShotTracker::new();
 	let expected_state = match Executor::from_state(
 		&nop_call_state,
 		RepeatingMem::<true>(Instruction::NoOp.encode(), 0),
+		&mut expected_events,
 	)
-	.step(&mut expected_metrics)
+	.step(&mut expected_metrics, &mut expected_events)
 	{
 		Ok(exec) => exec.state(),
 		Err(_) => return TestResult::discard(),
@@ -804,14 +913,41 @@ fn call_trigger_immediately(
 			.insert(0, OperandList::new(addr, Vec::new()));
 	}
 
+	let instr = Instruction::Call(CallVariant::Call, 0.try_into().unwrap());
+
+	// Change the instruction event to the call
+	expected_events.events.iter_mut().for_each(|e| {
+		if let Event::Instruction(_, i) = e
+		{
+			*i = instr.clone();
+		}
+	});
+	// Get the trigger ID and reuse for the issue
+	expected_events
+		.events
+		.iter_mut()
+		.find_map(|e| {
+			if let Event::Id(id, IdEvent::ControlTrigger(ControlEvent::Call)) = e
+			{
+				Some(*id)
+			}
+			else
+			{
+				None
+			}
+		})
+		.map(|id| expected_events.event(Event::Id(id, IdEvent::ControlIssue(ControlEvent::Call))));
+
+	// Add consumption of address event
+	let id = expected_events.new_operand_id();
+	expected_events.event(Event::Id(id, IdEvent::Operand(OperandEvent::Consume)));
+
 	test_execution_step(
 		&test_state,
-		RepeatingMem::<true>(
-			Instruction::Call(CallVariant::Call, 0.try_into().unwrap()).encode(),
-			0,
-		),
+		RepeatingMem::<true>(instr.encode(), 0),
 		&expected_state,
 		&expected_metrics,
+		&expected_events,
 	)
 }
 
@@ -829,7 +965,8 @@ fn call_non_trigger(
 		return TestResult::discard();
 	}
 
-	let instr_encoded = Instruction::encode(&Instruction::Call(CallVariant::Call, offset));
+	let instr = Instruction::Call(CallVariant::Call, offset);
+	let instr_encoded = Instruction::encode(&instr);
 	let addr_value = addr.clone();
 
 	let mut expected_state = state.clone();
@@ -880,10 +1017,27 @@ fn call_non_trigger(
 			.insert(0, OperandList::new(addr_value, Vec::new()));
 	}
 
+	let mut expected_events = [
+		Event::Instruction(state.address, instr.clone()),
+		Event::Id(0, IdEvent::ControlIssue(ControlEvent::Call)),
+		Event::Id(1, IdEvent::Operand(OperandEvent::Consume)),
+	]
+	.into();
+	// Any operands other than the address (not in the initial state) are
+	// discarded
+	add_operand_events_for_list(
+		&mut expected_events,
+		&state.frame.op_queue,
+		0,
+		0,
+		&[OperandEvent::Discard],
+	);
+
 	test_execution_step(
 		&test_state,
 		RepeatingMem::<true>(instr_encoded, 0),
 		&expected_state,
 		&expected_metrics,
+		&expected_events,
 	)
 }

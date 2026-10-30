@@ -5,7 +5,7 @@ use crate::{
 	},
 	misc::{
 		get_absolute_address, get_indexed_address, get_relative_address, regress_queue,
-		RepeatingMem,
+		OneShotTracker, RepeatingMem,
 	},
 };
 use byteorder::{ByteOrder, LittleEndian};
@@ -14,7 +14,8 @@ use quickcheck_macros::quickcheck;
 use scry_isa::Instruction;
 use scry_sim::{
 	arbitrary::{ArbScalarVal, ArbValue, NoCF},
-	BlockedMemory, ExecState, Memory, Metric, OperandList, Value, ValueType,
+	BlockedMemory, Event, EventTracker, ExecState, IdEvent, Memory, Metric, OperandEvent,
+	OperandList, Scalar, Value, ValueType,
 };
 use std::cmp::max;
 
@@ -71,25 +72,35 @@ fn test_store_instruction<const ADDR_OPS: usize>(
 	let mut mem = BlockedMemory::new(store_mem_vec.into_iter(), store_address);
 
 	// Initialize instruction memory
+	let instr = if is_stack
+	{
+		Instruction::StoreStack((idx as i32).try_into().unwrap())
+	}
+	else
+	{
+		Instruction::Store
+	};
 	let mut encoded_bytes = [0u8; 2];
-	LittleEndian::write_u16(
-		&mut encoded_bytes,
-		if is_stack
-		{
-			Instruction::StoreStack((idx as i32).try_into().unwrap())
-		}
-		else
-		{
-			Instruction::Store
-		}
-		.encode(),
-	);
+	LittleEndian::write_u16(&mut encoded_bytes, instr.encode());
 	mem.add_block(encoded_bytes.into_iter(), state.address);
 
 	let test_state = clone_with_front_operands(&state, to_store.clone(), address_operands.clone());
 
 	let mut expected_state = state.clone();
 	expected_state.address += 2;
+
+	let mut evs = OneShotTracker::new();
+	evs.event(Event::Instruction(test_state.address, instr));
+	for _ in 0..(ADDR_OPS + 1)
+	{
+		let id = evs.new_operand_id();
+		evs.event(Event::Id(id, IdEvent::Operand(OperandEvent::Consume)));
+	}
+	evs.event(Event::Store(
+		store_address,
+		if is_stack { Some(idx) } else { None },
+		to_store.scale() as u8,
+	));
 
 	let step_result = test_execution_step::<BlockedMemory>(
 		&test_state,
@@ -111,6 +122,7 @@ fn test_store_instruction<const ADDR_OPS: usize>(
 			(Metric::StackWriteBytes, is_stack as usize * to_store.size()),
 		]
 		.into(),
+		&evs,
 	);
 
 	// Check the stored value was actually stored in memory
@@ -251,6 +263,16 @@ fn store_indexed(
 	)
 }
 
+fn nop_store_events(addr: usize) -> OneShotTracker
+{
+	[
+		Event::Instruction(addr, Instruction::Store),
+		Event::Id(0, IdEvent::Operand(OperandEvent::Consume)),
+		Event::Id(1, IdEvent::Operand(OperandEvent::Consume)),
+	]
+	.into()
+}
+
 /// Tests the store instruction does nothing if the address is Nan
 #[quickcheck]
 fn store_nan_addr(
@@ -281,6 +303,7 @@ fn store_nan_addr(
 			),
 		]
 		.into(),
+		&nop_store_events(state.address),
 	)
 }
 
@@ -289,6 +312,12 @@ fn store_nan_addr(
 fn store_nan_value(NoCF(state): NoCF<ExecState>, address: Value, to_store: ValueType)
 	-> TestResult
 {
+	// Make sure the address is not a NaR, that is caught before the NaN value
+	if matches!(address.get_first(), Scalar::Nar(_))
+	{
+		return TestResult::discard();
+	}
+
 	let test_state =
 		clone_with_front_operands(&state, Value::new_nan_typed(to_store), [address.clone()]);
 
@@ -305,6 +334,7 @@ fn store_nan_value(NoCF(state): NoCF<ExecState>, address: Value, to_store: Value
 			(Metric::ConsumedBytes, address.scale() + to_store.scale()),
 		]
 		.into(),
+		&nop_store_events(state.address),
 	)
 }
 
@@ -335,6 +365,7 @@ fn store_nar_addr(
 			),
 		]
 		.into(),
+		&nop_store_events(state.address),
 	)
 }
 
@@ -362,6 +393,7 @@ fn store_nar_value(
 			(Metric::ConsumedBytes, address.scale() + to_store.scale()),
 		]
 		.into(),
+		&nop_store_events(state.address),
 	)
 }
 
@@ -377,13 +409,19 @@ fn store_missing_addr(
 	state.frame.op_queue = regress_queue(state.frame.op_queue);
 	let test_state = clone_with_front_operands(&state, to_store.0.clone(), []);
 
+	let instr = Instruction::Store;
 	test_execution_step_exceptions(
 		&test_state,
-		RepeatingMem::<false>(Instruction::Store.encode(), 0),
+		RepeatingMem::<false>(instr.encode(), 0),
 		&[
 			(Metric::InstructionReads, 1),
 			(Metric::ConsumedOperands, 1),
 			(Metric::ConsumedBytes, to_store.0.scale()),
+		]
+		.into(),
+		&[
+			Event::Instruction(state.address, instr),
+			Event::Id(0, IdEvent::Operand(OperandEvent::Consume)),
 		]
 		.into(),
 	)
@@ -393,13 +431,15 @@ fn store_missing_addr(
 #[quickcheck]
 fn store_missing_operands(NoCF(mut state): NoCF<ExecState>) -> TestResult
 {
-	// Regress the operand queue so that the ready list can be empty
+	// Regress the operand queue so that the ready list is empty
 	state.frame.op_queue = regress_queue(state.frame.op_queue);
 
+	let instr = Instruction::Store;
 	test_execution_step_exceptions(
 		&state,
-		RepeatingMem::<false>(Instruction::Store.encode(), 0),
+		RepeatingMem::<false>(instr.encode(), 0),
 		&[(Metric::InstructionReads, 1)].into(),
+		&[Event::Instruction(state.address, instr)].into(),
 	)
 }
 

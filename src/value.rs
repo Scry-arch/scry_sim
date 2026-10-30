@@ -1,3 +1,4 @@
+use crate::{data::Operand, EventTracker};
 use byteorder::{ByteOrder, LittleEndian};
 use duplicate::duplicate_item;
 use num_traits::PrimInt;
@@ -405,6 +406,11 @@ impl Value
 	pub fn get_first_mut(&mut self) -> &mut Scalar
 	{
 		&mut self.first
+	}
+
+	pub fn into_operand(self, tracker: &mut impl EventTracker) -> Operand
+	{
+		Operand::from_value(self, tracker.new_operand_id())
 	}
 }
 impl<N: PrimInt> From<N> for Value

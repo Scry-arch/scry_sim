@@ -1,6 +1,6 @@
 use crate::{
 	executor::test_execution_step,
-	misc::{add_to_queue_idx, regress_queue, RepeatingMem},
+	misc::{add_to_queue_idx, regress_queue, OneShotTracker, RepeatingMem},
 };
 use duplicate::duplicate_item;
 use quickcheck::TestResult;
@@ -8,7 +8,8 @@ use quickcheck_macros::quickcheck;
 use scry_isa::{Bits, Instruction};
 use scry_sim::{
 	arbitrary::{ArbValue, NoCF},
-	ExecState, Metric, OperandList, Scalar, Value, ValueType,
+	Event, EventTracker, ExecState, IdEvent, Metric, OperandEvent, OperandList, Scalar, Value,
+	ValueType,
 };
 use std::iter::once;
 
@@ -68,12 +69,25 @@ fn name(
 
 	let target_value = Value::singleton::<to_typ>(Scalar::Val(target_bytes.into_boxed_slice()));
 
+	let mut expected_events = OneShotTracker::new();
+	let target_op = target_value.into_operand(&mut expected_events);
+	expected_events.event(Event::Id(
+		target_op.id,
+		IdEvent::Operand(OperandEvent::Produce),
+	));
+
 	let mut expected_state = state.clone();
-	add_to_queue_idx(
+	if 0 == add_to_queue_idx(
 		&mut expected_state,
 		out_off.value as usize,
-		once(target_value),
-	);
+		once(target_op.get_value().clone()),
+	)
+	{
+		expected_events.event(Event::Id(
+			target_op.id,
+			IdEvent::Operand(OperandEvent::Discard),
+		));
+	}
 
 	expected_state.address += 2;
 
@@ -82,13 +96,17 @@ fn name(
 		.frame
 		.op_queue
 		.insert(0, OperandList::new(to_cast.clone(), vec![]));
+	let to_cast_id = expected_events.new_operand_id();
+	expected_events.event(Event::Id(
+		to_cast_id,
+		IdEvent::Operand(OperandEvent::Consume),
+	));
 
+	let instr = Instruction::Cast(typ_encoding.try_into().unwrap(), out_off);
+	expected_events.event(Event::Instruction(state.address, instr.clone()));
 	test_execution_step(
 		&state,
-		RepeatingMem::<true>(
-			Instruction::Cast(typ_encoding.try_into().unwrap(), out_off).encode(),
-			0,
-		),
+		RepeatingMem::<true>(instr.encode(), 0),
 		&expected_state,
 		&([
 			(Metric::ConsumedBytes, to_cast_bytes.len()),
@@ -98,5 +116,6 @@ fn name(
 			(Metric::InstructionReads, 1),
 		]
 		.into()),
+		&expected_events,
 	)
 }

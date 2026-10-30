@@ -1,7 +1,8 @@
 use crate::{
 	data::{OperandStack, ProgramStack},
 	metrics::MetricTracker,
-	CallFrameState, ControlFlowType, ExecError, ExecState, Metric,
+	CallFrameState, ControlEvent, ControlFlowType, Event, EventTracker, ExecError, ExecState,
+	IdEvent, Metric,
 };
 use std::collections::{HashMap, VecDeque};
 
@@ -16,8 +17,8 @@ struct CallFrame
 	branches: HashMap<
 		// Location (when to branch)
 		usize,
-		// Branch type including potential target
-		ControlFlowType,
+		// ID and type of branch including potential target
+		(usize, ControlFlowType),
 	>,
 }
 impl CallFrame
@@ -25,16 +26,22 @@ impl CallFrame
 	pub fn set_state(&self, to_set: &mut CallFrameState)
 	{
 		to_set.ret_addr = self.ret_addr;
-		to_set.branches = self.branches.clone();
+		to_set.branches = self
+			.branches
+			.iter()
+			.map(|(loc, (_, ty))| (*loc, *ty))
+			.collect();
 	}
-}
-impl<'a> From<&'a CallFrameState> for CallFrame
-{
-	fn from(state: &'a CallFrameState) -> Self
+
+	pub fn from_state(state: &CallFrameState, events: &mut impl EventTracker) -> Self
 	{
 		Self {
 			ret_addr: state.ret_addr,
-			branches: state.branches.clone(),
+			branches: state
+				.branches
+				.iter()
+				.map(|(loc, ty)| (*loc, (events.new_control_id(), *ty)))
+				.collect(),
 		}
 	}
 }
@@ -63,6 +70,21 @@ impl ControlFlow
 		}
 	}
 
+	pub(crate) fn from_state(state: &ExecState, events: &mut impl EventTracker) -> Self
+	{
+		Self {
+			next_addr: state.address,
+			call_frame: CallFrame::from_state(&state.frame, events),
+			call_stack: state.frame_stack.clone().into_iter().fold(
+				VecDeque::new(),
+				|mut stack, frame| {
+					stack.push_back(CallFrame::from_state(&frame, events));
+					stack
+				},
+			),
+		}
+	}
+
 	/// Computes the address of the next instruction to execute
 	///
 	/// The given operand and program stacks are suitably updated if a call or
@@ -75,9 +97,10 @@ impl ControlFlow
 		op_stack: &mut OperandStack,
 		prog_stack: &mut ProgramStack,
 		tracker: &mut impl MetricTracker,
+		event_tracker: &mut impl EventTracker,
 	) -> Result<bool, ExecError>
 	{
-		if let Some(cft) = self.call_frame.branches.remove(&self.next_addr)
+		if let Some((id, cft)) = self.call_frame.branches.remove(&self.next_addr)
 		{
 			use ControlFlowType::*;
 			match cft
@@ -95,6 +118,7 @@ impl ControlFlow
 					}
 					self.next_addr = tar;
 					tracker.add_stat(Metric::TriggeredBranches, 1);
+					event_tracker.event(Event::Id(id, IdEvent::ControlTrigger(ControlEvent::Jump)))
 				},
 				Call(tar) =>
 				{
@@ -111,6 +135,7 @@ impl ControlFlow
 					);
 					self.call_stack.push_front(old_frame);
 					tracker.add_stat(Metric::TriggeredCalls, 1);
+					event_tracker.event(Event::Id(id, IdEvent::ControlTrigger(ControlEvent::Call)))
 				},
 				Return =>
 				{
@@ -136,6 +161,8 @@ impl ControlFlow
 						return Ok(false);
 					};
 					tracker.add_stat(Metric::TriggeredReturns, 1);
+					event_tracker
+						.event(Event::Id(id, IdEvent::ControlTrigger(ControlEvent::Return)))
 				},
 			}
 		}
@@ -154,12 +181,15 @@ impl ControlFlow
 		location_addr: usize,
 		target_addr: usize,
 		tracker: &mut impl MetricTracker,
+		event_tracker: &mut impl EventTracker,
 	)
 	{
+		let id = event_tracker.new_control_id();
 		self.call_frame
 			.branches
-			.insert(location_addr, ControlFlowType::Branch(target_addr));
+			.insert(location_addr, (id, ControlFlowType::Branch(target_addr)));
 		tracker.add_stat(Metric::IssuedBranches, 1);
+		event_tracker.event(Event::Id(id, IdEvent::ControlIssue(ControlEvent::Jump)));
 	}
 
 	/// Issue a branch to trigger at the given location targeting the given
@@ -169,21 +199,31 @@ impl ControlFlow
 		location_addr: usize,
 		target_addr: usize,
 		tracker: &mut impl MetricTracker,
+		event_tracker: &mut impl EventTracker,
 	)
 	{
+		let id = event_tracker.new_control_id();
 		self.call_frame
 			.branches
-			.insert(location_addr, ControlFlowType::Call(target_addr));
+			.insert(location_addr, (id, ControlFlowType::Call(target_addr)));
 		tracker.add_stat(Metric::IssuedCalls, 1);
+		event_tracker.event(Event::Id(id, IdEvent::ControlIssue(ControlEvent::Call)));
 	}
 
 	/// Issue a return to trigger at the given location
-	pub fn ret(&mut self, location_addr: usize, tracker: &mut impl MetricTracker)
+	pub fn ret(
+		&mut self,
+		location_addr: usize,
+		tracker: &mut impl MetricTracker,
+		event_tracker: &mut impl EventTracker,
+	)
 	{
+		let id = event_tracker.new_control_id();
 		self.call_frame
 			.branches
-			.insert(location_addr, ControlFlowType::Return);
+			.insert(location_addr, (id, ControlFlowType::Return));
 		tracker.add_stat(Metric::IssuedReturns, 1);
+		event_tracker.event(Event::Id(id, IdEvent::ControlIssue(ControlEvent::Return)))
 	}
 
 	/// Sets the given call frame states' return address and pending control
@@ -213,23 +253,5 @@ impl ControlFlow
 			.iter()
 			.enumerate()
 			.for_each(|(i, f)| set_idx(to_set, i + 1, f));
-	}
-}
-/// Constructions a ControlFlow equivalent to an execution state
-impl<'a> From<&'a ExecState> for ControlFlow
-{
-	fn from(state: &'a ExecState) -> Self
-	{
-		Self {
-			next_addr: state.address,
-			call_frame: (&state.frame).into(),
-			call_stack: state.frame_stack.clone().into_iter().fold(
-				VecDeque::new(),
-				|mut stack, frame| {
-					stack.push_back((&frame).into());
-					stack
-				},
-			),
-		}
 	}
 }
