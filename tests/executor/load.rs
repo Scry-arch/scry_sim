@@ -144,7 +144,7 @@ fn test_load(
 	evs.event(Event::Instruction(test_state.address, instruction));
 	for _ in 0..load_operands.len()
 	{
-		let id = evs.new_operand_id();
+		let id = evs.new_id();
 		evs.event(Event::Id(id, IdEvent::Operand(OperandEvent::Consume)));
 	}
 	evs.event(Event::Load(
@@ -152,7 +152,7 @@ fn test_load(
 		output_offset.map_or(Some(addr), |_| None),
 		loaded_val.0.get_first().bytes().unwrap().len() as u8,
 	));
-	let id = evs.new_operand_id();
+	let id = evs.new_id();
 	evs.event(Event::Id(id, IdEvent::Operand(OperandEvent::Produce)));
 
 	test_execution_step(&test_state, test_mem, &expected_state, &evs)

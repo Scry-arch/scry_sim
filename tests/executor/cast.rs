@@ -95,7 +95,7 @@ fn name(
 		.frame
 		.op_queue
 		.insert(0, OperandList::new(to_cast.clone(), vec![]));
-	let to_cast_id = expected_events.new_operand_id();
+	let to_cast_id = expected_events.new_id();
 	expected_events.event(Event::Id(
 		to_cast_id,
 		IdEvent::Operand(OperandEvent::Consume),

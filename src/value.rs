@@ -410,7 +410,7 @@ impl Value
 
 	pub fn into_operand(self, tracker: &mut impl EventTracker) -> Operand
 	{
-		Operand::from_value(self, tracker.new_operand_id())
+		Operand::from_value(self, tracker.new_id())
 	}
 }
 impl<N: PrimInt> From<N> for Value

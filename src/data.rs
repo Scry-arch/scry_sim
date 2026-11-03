@@ -365,7 +365,7 @@ impl OperandStack
 					let ops = op_list
 						.iter()
 						.cloned()
-						.map(|op| Operand::from_value(op, tracker.new_operand_id()));
+						.map(|op| Operand::from_value(op, tracker.new_id()));
 					if op_lists.len() <= *list_idx
 					{
 						op_lists.resize_with(*list_idx + 1, VecDeque::new);

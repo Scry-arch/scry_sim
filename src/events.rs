@@ -85,10 +85,17 @@ pub enum Event
 /// `()`).
 pub trait EventTracker
 {
-	fn new_operand_id(&mut self) -> usize;
+	/// Returns a new ID for use in an `IdEvent`.
+	///
+	/// It is implementation-defined whether the IDs are unique.
+	/// The given ID will be used in creating an `IdEvent`.
+	/// If uniquely identifying IdEvents is required, the implementator must
+	/// ensure only unique IDs are returned.
+	fn new_id(&mut self) -> usize;
 
-	fn new_control_id(&mut self) -> usize;
-
+	/// Reports an event.
+	///
+	/// The events are reported without a meaningful order.
 	fn event(&mut self, event: Event);
 }
 
@@ -96,12 +103,7 @@ pub trait EventTracker
 /// tracking is needed.
 impl EventTracker for ()
 {
-	fn new_operand_id(&mut self) -> usize
-	{
-		0
-	}
-
-	fn new_control_id(&mut self) -> usize
+	fn new_id(&mut self) -> usize
 	{
 		0
 	}

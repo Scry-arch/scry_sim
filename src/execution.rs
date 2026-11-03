@@ -188,7 +188,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 						.reorder_ready(tar1.value() as usize + 1, event_tracker);
 
 					ops.iter_mut().for_each(|op| {
-						op.id = event_tracker.new_operand_id();
+						op.id = event_tracker.new_id();
 					});
 
 					// Produce new operands for the second target
@@ -204,7 +204,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 						let mut ops_next = ops.clone();
 						for op in ops_next.iter_mut()
 						{
-							op.id = event_tracker.new_operand_id();
+							op.id = event_tracker.new_id();
 						}
 
 						for op in ops_next

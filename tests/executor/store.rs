@@ -93,7 +93,7 @@ fn test_store_instruction<const ADDR_OPS: usize>(
 	evs.event(Event::Instruction(test_state.address, instr));
 	for _ in 0..(ADDR_OPS + 1)
 	{
-		let id = evs.new_operand_id();
+		let id = evs.new_id();
 		evs.event(Event::Id(id, IdEvent::Operand(OperandEvent::Consume)));
 	}
 	evs.event(Event::Store(

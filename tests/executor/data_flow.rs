@@ -73,7 +73,7 @@ fn duplicate(
 				{
 					for (_, op) in ops.iter()
 					{
-						let op_id = if new_ids { evs.new_operand_id() } else { op.id };
+						let op_id = if new_ids { evs.new_id() } else { op.id };
 
 						evs.event(Event::Id(op_id, IdEvent::Operand(ty)));
 						target_queues

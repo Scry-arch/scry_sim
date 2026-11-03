@@ -387,7 +387,7 @@ fn instruction_nop(state: NoCF<ExecState>) -> TestResult
 			{
 				for _ in list.iter()
 				{
-					let id = evs.new_operand_id();
+					let id = evs.new_id();
 					evs.event(Event::Id(id, IdEvent::Operand(OperandEvent::Discard)));
 				}
 			}
@@ -448,13 +448,10 @@ fn instruction_constant(
 		|old_op_queue| {
 			let mut evs = OneShotTracker::new();
 
-			let mut ops = vec![(evs.new_operand_id(), OperandEvent::Produce)];
+			let mut ops = vec![(evs.new_id(), OperandEvent::Produce)];
 			if let Some(list) = old_op_queue.get(&0)
 			{
-				ops.extend(
-					list.iter()
-						.map(|_| (evs.new_operand_id(), OperandEvent::Forward)),
-				);
+				ops.extend(list.iter().map(|_| (evs.new_id(), OperandEvent::Forward)));
 			}
 
 			add_events_with_discards(
@@ -477,19 +474,19 @@ fn grow_events(queue: &OperandQueue, depth: usize) -> OneShotTracker
 {
 	let mut evs = OneShotTracker::new();
 
-	let consume_id = evs.new_operand_id();
+	let consume_id = evs.new_id();
 	evs.event(Event::Id(
 		consume_id,
 		IdEvent::Operand(OperandEvent::Consume),
 	));
 
-	let mut ops = vec![(evs.new_operand_id(), OperandEvent::Produce)];
+	let mut ops = vec![(evs.new_id(), OperandEvent::Produce)];
 	if let Some(list) = queue.get(&0)
 	{
 		ops.extend(
 			list.iter()
 				.skip(1)
-				.map(|_| (evs.new_operand_id(), OperandEvent::Forward)),
+				.map(|_| (evs.new_id(), OperandEvent::Forward)),
 		);
 	}
 

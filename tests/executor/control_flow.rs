@@ -117,7 +117,7 @@ fn return_trigger(
 		},
 		_ => return TestResult::discard(),
 	};
-	let id = expected_events.new_control_id();
+	let id = expected_events.new_id();
 	expected_events.event(Event::Id(id, IdEvent::ControlTrigger(ControlEvent::Return)));
 
 	return_trigger_impl(
@@ -264,7 +264,7 @@ fn jmp_trigger(
 		Ok(exec) => exec.state(),
 		_ => return TestResult::discard(),
 	};
-	let id = expected_events.new_control_id();
+	let id = expected_events.new_id();
 	expected_events.event(Event::Id(id, IdEvent::ControlTrigger(ControlEvent::Jump)));
 
 	// Move the current address to the branch target
@@ -453,7 +453,7 @@ fn test_jump(
 
 	let mut expected_events: OneShotTracker =
 		[Event::Instruction(test_state.address, instr.clone())].into();
-	let ctrl_id = expected_events.new_control_id();
+	let ctrl_id = expected_events.new_id();
 	if jump_taken
 	{
 		expected_events.event(Event::Id(
@@ -465,7 +465,7 @@ fn test_jump(
 	ready_ops.map(|ops| {
 		for _ in ops
 		{
-			let id = expected_events.new_operand_id();
+			let id = expected_events.new_id();
 			expected_events.event(Event::Id(id, IdEvent::Operand(OperandEvent::Consume)));
 		}
 	});
@@ -792,7 +792,7 @@ fn call_trigger_impl(
 	expected_state.address = call_target.0;
 
 	// Add trigger event
-	let id = expected_events.new_control_id();
+	let id = expected_events.new_id();
 	expected_events.event(Event::Id(id, IdEvent::ControlTrigger(ControlEvent::Call)));
 
 	// Construct test state
@@ -895,7 +895,7 @@ fn call_trigger_immediately(
 		.map(|id| expected_events.event(Event::Id(id, IdEvent::ControlIssue(ControlEvent::Call))));
 
 	// Add consumption of address event
-	let id = expected_events.new_operand_id();
+	let id = expected_events.new_id();
 	expected_events.event(Event::Id(id, IdEvent::Operand(OperandEvent::Consume)));
 
 	test_execution_step(

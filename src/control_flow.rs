@@ -39,7 +39,7 @@ impl CallFrame
 			branches: state
 				.branches
 				.iter()
-				.map(|(loc, ty)| (*loc, (events.new_control_id(), *ty)))
+				.map(|(loc, ty)| (*loc, (events.new_id(), *ty)))
 				.collect(),
 		}
 	}
@@ -178,7 +178,7 @@ impl ControlFlow
 		event_tracker: &mut impl EventTracker,
 	)
 	{
-		let id = event_tracker.new_control_id();
+		let id = event_tracker.new_id();
 		self.call_frame
 			.branches
 			.insert(location_addr, (id, ControlFlowType::Branch(target_addr)));
@@ -194,7 +194,7 @@ impl ControlFlow
 		event_tracker: &mut impl EventTracker,
 	)
 	{
-		let id = event_tracker.new_control_id();
+		let id = event_tracker.new_id();
 		self.call_frame
 			.branches
 			.insert(location_addr, (id, ControlFlowType::Call(target_addr)));
@@ -204,7 +204,7 @@ impl ControlFlow
 	/// Issue a return to trigger at the given location
 	pub fn ret(&mut self, location_addr: usize, event_tracker: &mut impl EventTracker)
 	{
-		let id = event_tracker.new_control_id();
+		let id = event_tracker.new_id();
 		self.call_frame
 			.branches
 			.insert(location_addr, (id, ControlFlowType::Return));

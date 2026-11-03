@@ -1012,7 +1012,7 @@ fn divide_by_0(
 		.iter()
 		.take(expected_state.op_list_depth() - 2)
 		.for_each(|_| {
-			let id = expected_events.new_operand_id();
+			let id = expected_events.new_id();
 			expected_events.event(Event::Id(id, IdEvent::Operand(OperandEvent::Discard)));
 		});
 	add_to_queue_idx(

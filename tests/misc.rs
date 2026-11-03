@@ -157,12 +157,7 @@ fn one_shot_tracker_self_equivalence()
 
 impl EventTracker for OneShotTracker
 {
-	fn new_operand_id(&mut self) -> usize
-	{
-		self.new_id()
-	}
-
-	fn new_control_id(&mut self) -> usize
+	fn new_id(&mut self) -> usize
 	{
 		self.new_id()
 	}
