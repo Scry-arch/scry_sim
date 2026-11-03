@@ -99,16 +99,16 @@ pub type OperandQueue = HashMap<usize, OperandList>;
 /// set of blocks in memory. We store eack block's base address and size in a
 /// sorted list.
 ///
-/// The stack frame is also divided into 2 parts: The primary and secondary
-/// frames. We store the size of the primary frame, which may span multiple
-/// blocks, while the size of the secondary frame would be what is left.
+/// The stack frame is also divided into 2 parts: The private and shared
+/// frames. We store the size of the private frame, which may span multiple
+/// blocks, while the size of the shared frame would be what is left.
 #[derive(Debug, Eq, PartialEq, Clone, Default)]
 pub struct StackFrame
 {
 	/// Memory block comprising the stack.
 	pub block: Block,
 
-	/// The size of the primary stack frame in bytes.
+	/// The size of the private stack frame in bytes.
 	pub private_size: usize,
 }
 impl StackFrame
@@ -119,7 +119,7 @@ impl StackFrame
 	{
 		if self.block.size < self.private_size
 		{
-			return Err("Primary stack frame is larger than the whole stack frame");
+			return Err("private stack frame is larger than the whole stack frame");
 		}
 
 		if self.block.address.checked_add(self.block.size).is_none()
@@ -130,55 +130,22 @@ impl StackFrame
 		Ok(())
 	}
 
-	/// The size of the secondary stack frame.
-	pub fn secondary_size(&self) -> usize
+	/// The size of the shared stack frame.
+	pub fn shared_size(&self) -> usize
 	{
 		self.block.size - self.private_size
 	}
 
-	/// Returns whether the primary stack frame can be increased by the given
-	/// amount in bytes
-	///
-	/// Increasing the primary frame decreases the secondary frame by an equal
-	/// amount.
-	pub fn can_increase_primary(&self, amount: usize) -> bool
-	{
-		(self.private_size + amount) >= self.block.size
-	}
-
-	/// Increases the size of the primary frame by the given amount.
-	///
-	/// Increasing the primary frame decreases the secondary frame by an equal
-	/// amount.
-	pub fn increase_primary(&mut self, amount: usize)
-	{
-		assert!(self.can_increase_primary(amount));
-		self.private_size += amount;
-	}
-
-	/// Increases the size of the primary frame by the given amount.
-	///
-	/// Increasing the primary frame decreases the secondary frame by an equal
-	/// amount.
-	pub fn decrease_primary(&mut self, amount: usize)
-	{
-		assert!(
-			amount <= self.private_size,
-			"Cannot decrease primary stack by more than its size."
-		);
-		self.private_size += amount;
-	}
-
 	/// Increases the size of the stack.
 	///
-	/// If `primary=true`, then the added size is reserved to the primary stack.
-	/// Otherwise, to the secondary.
-	pub fn add_block(&mut self, amount: usize, primary: bool)
+	/// If `private=true`, then the added size is reserved to the private stack.
+	/// Otherwise, to the shared.
+	pub fn add_block(&mut self, amount: usize, private: bool)
 	{
 		assert!(amount > 0);
 		self.block.size += amount;
 
-		if primary
+		if private
 		{
 			self.private_size += amount;
 		}
@@ -186,8 +153,8 @@ impl StackFrame
 
 	/// Releases the given number of bytes from the stack frame.
 	///
-	/// If the resulting total stack size is less than the primary stack size
-	/// (before the call), then the primary size is decreased to fit.
+	/// If the resulting total stack size is less than the private stack size
+	/// (before the call), then the private size is decreased to fit.
 	pub fn release_bytes(&mut self, amount: usize)
 	{
 		assert!(amount > 0);
@@ -229,7 +196,19 @@ impl StackFrame
 	/// Returns the base address of the stack frame
 	pub fn get_base_address(&self) -> usize
 	{
-		self.get_address(0, 0, true).unwrap()
+		self.block.address
+	}
+
+	/// Returns the address of the stack frame split
+	pub fn get_split_address(&self) -> usize
+	{
+		self.get_base_address() + self.private_size
+	}
+
+	/// Returns the address of the stack frame top
+	pub fn get_top_address(&self) -> usize
+	{
+		self.get_base_address() + self.block.size
 	}
 
 	/// Returns the stack frame that would result from performing a call from
@@ -240,18 +219,18 @@ impl StackFrame
 		let new_block = Self {
 			block: Block {
 				address: new_stack_base,
-				size: self.secondary_size(),
+				size: self.shared_size(),
 			},
-			private_size: self.secondary_size(),
+			private_size: self.shared_size(),
 		};
 
-		self.block.size -= self.secondary_size();
 		new_block
 	}
 
 	/// Updates this stack frame based on a return from the given stack frame.
 	pub fn frame_return(&mut self, callee_frame: StackFrame)
 	{
+		self.block.size = self.private_size;
 		self.block.size += callee_frame.private_size;
 	}
 }

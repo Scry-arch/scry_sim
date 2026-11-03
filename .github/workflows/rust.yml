@@ -21,7 +21,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        rust-version: ['1.90.0', stable, nightly]
+        rust-version: ['1.98.1', stable, nightly]
     env:
       QUICKCHECK_GENERATOR_SIZE: 100 
       QUICKCHECK_MIN_TESTS_PASSED: 1000
@@ -33,7 +33,7 @@ jobs:
         uses: ./.github/actions/run-test-groups
         with:
           rust-version: ${{ matrix.rust-version }}
-          minimal-versions: ${{ matrix.rust-version == '1.90.0' }}
+          minimal-versions: ${{ matrix.rust-version == '1.98.1' }}
   
   deny-warnings:
     name: Deny Warnings
@@ -50,7 +50,7 @@ jobs:
     name: Rustfmt
     runs-on: ubuntu-latest
     env:
-      RUSTV: nightly-2025-10-13
+      RUSTV: nightly-2026-10-27
     steps:
       - uses: actions/checkout@v4
       - name: Install

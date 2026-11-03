@@ -11,7 +11,7 @@ use scry_isa::{BitValue, Bits, CallVariant, Instruction};
 use scry_sim::{
 	arbitrary::{ArbValue, InstrAddr, NoCF},
 	Block, CallFrameState, ControlEvent, ControlFlowType, Event, EventTracker, ExecState, Executor,
-	IdEvent, OperandEvent, OperandList, StackFrame, ValueType,
+	IdEvent, OperandEvent, OperandList, StackEvent, StackFrame, ValueType,
 };
 use std::collections::HashMap;
 
@@ -26,8 +26,9 @@ fn return_trigger_impl(
 	mut frame: CallFrameState,
 	// The next instruction to be executed
 	instr: Instruction,
-	// Operands expected to be at the end of the ready list after the return trigger.
-	// They should be following any operands that were already there from before the call.
+	// Operands expected to be at the end of the ready list after the return
+	// trigger. They should be following any operands that were already there
+	// from before the call.
 	expected_ready_ops: Option<OperandList>,
 	expected_events: OneShotTracker,
 ) -> TestResult
@@ -50,6 +51,8 @@ fn return_trigger_impl(
 	// implementation
 	expected_state =
 		Executor::from_state(&expected_state, RepeatingMem::<true>(0, 0), &mut ()).state();
+	expected_state.frame.stack.block.size -=
+		state.frame.stack.block.size - state.frame.stack.private_size;
 	expected_state.frame.stack.block.size += frame.stack.private_size;
 
 	// Construct test state
@@ -66,6 +69,25 @@ fn return_trigger_impl(
 		&expected_state,
 		&expected_events,
 	)
+}
+
+fn return_stack_events(
+	events: &mut impl EventTracker,
+	test_state: &ExecState,
+	callee_frame: &CallFrameState,
+)
+{
+	events.event(Event::Stack(
+		StackEvent::Base,
+		test_state.frame.stack.get_base_address(),
+	));
+	let caller_split_addr =
+		test_state.frame.stack.get_base_address() + test_state.frame.stack.private_size;
+	events.event(Event::Stack(StackEvent::Split, caller_split_addr));
+	events.event(Event::Stack(
+		StackEvent::Top,
+		caller_split_addr + callee_frame.stack.private_size,
+	));
 }
 
 /// Test the triggering of a return that was previously issued.
@@ -120,6 +142,8 @@ fn return_trigger(
 	let id = expected_events.new_id();
 	expected_events.event(Event::Id(id, IdEvent::ControlTrigger(ControlEvent::Return)));
 
+	return_stack_events(&mut expected_events, &state, &frame);
+
 	return_trigger_impl(
 		NoCF(state),
 		frame,
@@ -147,12 +171,15 @@ fn return_immediately(state: NoCF<ExecState>, mut frame: CallFrameState) -> Test
 	let expected_ready_ops = frame.op_queue.get(&1).cloned();
 
 	let instr = Instruction::Call(CallVariant::Ret, 0.try_into().unwrap());
+
 	let mut expected_events = [
 		Event::Instruction(addr, instr.clone()),
 		Event::Id(0, IdEvent::ControlIssue(ControlEvent::Return)),
 		Event::Id(0, IdEvent::ControlTrigger(ControlEvent::Return)),
 	]
 	.into();
+
+	return_stack_events(&mut expected_events, &state.0, &frame);
 
 	add_operand_events_for_list(
 		&mut expected_events,
@@ -770,7 +797,7 @@ fn call_trigger_impl(
 	expected_state.frame.op_queue = advance_queue(expected_state.frame.op_queue);
 	// Create expected stack frame
 	let block = Block {
-		address: expected_state.frame.stack.block.address + expected_state.frame.stack.private_size,
+		address: expected_state.frame.stack.get_split_address(),
 		size: expected_state.frame.stack.block.size - expected_state.frame.stack.private_size,
 	};
 	let frame_block = StackFrame {
@@ -783,7 +810,6 @@ fn call_trigger_impl(
 		op_queue: HashMap::from_iter(ready_list.map(|list| (0, list)).into_iter()),
 		stack: frame_block,
 	};
-	expected_state.frame.stack.block.size = expected_state.frame.stack.private_size;
 
 	expected_state
 		.frame_stack
@@ -794,6 +820,19 @@ fn call_trigger_impl(
 	// Add trigger event
 	let id = expected_events.new_id();
 	expected_events.event(Event::Id(id, IdEvent::ControlTrigger(ControlEvent::Call)));
+
+	expected_events.event(Event::Stack(
+		StackEvent::Base,
+		state.frame.stack.get_split_address(),
+	));
+	expected_events.event(Event::Stack(
+		StackEvent::Split,
+		state.frame.stack.get_top_address(),
+	));
+	expected_events.event(Event::Stack(
+		StackEvent::Top,
+		state.frame.stack.get_top_address(),
+	));
 
 	// Construct test state
 	let mut test_state = state.clone();

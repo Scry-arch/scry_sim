@@ -448,7 +448,7 @@ fn instruction_constant(
 		|old_op_queue| {
 			let mut evs = OneShotTracker::new();
 
-			let mut ops = vec![(evs.new_id(), OperandEvent::Produce)];
+			let mut ops = vec![(evs.new_id(), OperandEvent::Produce(typ))];
 			if let Some(list) = old_op_queue.get(&0)
 			{
 				ops.extend(list.iter().map(|_| (evs.new_id(), OperandEvent::Forward)));
@@ -480,9 +480,10 @@ fn grow_events(queue: &OperandQueue, depth: usize) -> OneShotTracker
 		IdEvent::Operand(OperandEvent::Consume),
 	));
 
-	let mut ops = vec![(evs.new_id(), OperandEvent::Produce)];
+	let mut ops = vec![];
 	if let Some(list) = queue.get(&0)
 	{
+		ops.push((evs.new_id(), OperandEvent::Produce(list.first.typ.into())));
 		ops.extend(
 			list.iter()
 				.skip(1)

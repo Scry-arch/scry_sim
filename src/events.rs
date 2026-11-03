@@ -9,7 +9,7 @@ use scry_isa::Instruction;
 pub enum OperandEvent
 {
 	Consume,
-	Produce,
+	Produce(scry_isa::Type),
 	Discard,
 	Forward,
 }
@@ -50,6 +50,16 @@ pub enum IdEvent
 	ControlTrigger(ControlEvent),
 }
 
+/// Specified which part of the stack has changed address
+#[non_exhaustive]
+#[derive(PartialEq, Eq, Clone, Debug, Hash)]
+pub enum StackEvent
+{
+	Base,
+	Split,
+	Top,
+}
+
 /// Simulation events.
 ///
 /// Simulation is divided into steps.
@@ -72,8 +82,8 @@ pub enum Event
 	/// Bytes stored to memory (Effective address, Stack index, number of bytes)
 	Store(usize, Option<usize>, u8),
 
-	/// Change of the position of the stack (The split?, new address)
-	Stack(bool, usize),
+	/// Change of the position of the stack (base/split/stack, new address)
+	Stack(StackEvent, usize),
 
 	/// An event connected to and ID (ID, event)
 	Id(usize, IdEvent),

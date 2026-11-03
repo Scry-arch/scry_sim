@@ -355,25 +355,30 @@ impl WeightedArbitrary<(usize, usize)> for CallFrameState
 						let branch_clone2 = branch_clone1.clone();
 						let branch_clone3 = branch_clone1.clone();
 						// Shrink trigger address
-						InstrAddr(addr).shrink_weighted(max_addr).filter_map(move|shrunk|{
-						let mut clone = branch_clone1.clone();
-						if clone.branches.insert(shrunk.0, typ).is_none() {
-							Some(clone)
-						} else {
-							// Discard if branch triggers collide
-							None
-						}
-					})
-					.chain({
-						// Shrink trigger type
-						typ.shrink_weighted(max_addr).map(move|shrunk|{
-							let mut clone = branch_clone2.clone();
-							clone.branches.insert(addr, shrunk);
-							clone
-						})
-					})
-					// Shrink by removing the branch
-					.chain(once(branch_clone3))
+						InstrAddr(addr)
+							.shrink_weighted(max_addr)
+							.filter_map(move |shrunk| {
+								let mut clone = branch_clone1.clone();
+								if clone.branches.insert(shrunk.0, typ).is_none()
+								{
+									Some(clone)
+								}
+								else
+								{
+									// Discard if branch triggers collide
+									None
+								}
+							})
+							.chain({
+								// Shrink trigger type
+								typ.shrink_weighted(max_addr).map(move |shrunk| {
+									let mut clone = branch_clone2.clone();
+									clone.branches.insert(addr, shrunk);
+									clone
+								})
+							})
+							// Shrink by removing the branch
+							.chain(once(branch_clone3))
 					}),
 				)
 				.chain(op_queue.into_iter().flat_map(move |(idx, list)| {
@@ -434,24 +439,29 @@ impl WeightedArbitrary<(usize, usize)> for CallFrameState
 							// Shrink operand values
 
 							// Shrink first value
-							clone3.op_queue[&idx].first.shrink().map(move|shrunk| {
-							let mut clone = queue_clone1.clone();
-							clone.op_queue.get_mut(&idx).unwrap().first = shrunk;
-							clone
-						})
-						// Shrink the rest
-						.chain({
-							let clone3 = clone3.clone();
-							(1..list_len).flat_map(move|list_idx| {
-								let queue_clone2 = queue_clone2.clone();
-								clone3.op_queue[&idx].rest[list_idx-1].shrink().map(move|shrunk| {
-									let mut clone = queue_clone2.clone();
-									clone.op_queue.get_mut(&idx).unwrap().rest[list_idx-1] = shrunk;
+							clone3.op_queue[&idx]
+								.first
+								.shrink()
+								.map(move |shrunk| {
+									let mut clone = queue_clone1.clone();
+									clone.op_queue.get_mut(&idx).unwrap().first = shrunk;
 									clone
 								})
-							})
-						}
-						),
+								// Shrink the rest
+								.chain({
+									let clone3 = clone3.clone();
+									(1..list_len).flat_map(move |list_idx| {
+										let queue_clone2 = queue_clone2.clone();
+										clone3.op_queue[&idx].rest[list_idx - 1].shrink().map(
+											move |shrunk| {
+												let mut clone = queue_clone2.clone();
+												clone.op_queue.get_mut(&idx).unwrap().rest
+													[list_idx - 1] = shrunk;
+												clone
+											},
+										)
+									})
+								}),
 						)
 				}))
 				.chain(
@@ -485,8 +495,8 @@ impl Arbitrary for ExecState
 		let addr_space = u8::arbitrary(g) % 3;
 		let mut result = Self {
 			addr_space,
-			// Ensure that the address may be increased by 2 (after executing an instruction)
-			// without causing overflow.
+			// Ensure that the address may be increased by 2 (after executing an
+			// instruction) without causing overflow.
 			// Also ensure address precedes all branch trigger locations
 			address: 0,
 			frame: CallFrameState {

@@ -60,20 +60,26 @@ fn duplicate(
 					.enumerate()
 					.collect::<Vec<_>>();
 
-				let mut targets = vec![
-					(tar1_idx, false, OperandEvent::Forward),
-					(tar2_idx, true, OperandEvent::Produce),
-				];
+				let mut targets = vec![(tar1_idx, false, true), (tar2_idx, true, false)];
 				if dup_next
 				{
-					targets.push((1, true, OperandEvent::Produce));
+					targets.push((1, true, false));
 				}
 
-				for (tar_idx, new_ids, ty) in targets
+				for (tar_idx, new_ids, forward) in targets
 				{
 					for (_, op) in ops.iter()
 					{
 						let op_id = if new_ids { evs.new_id() } else { op.id };
+
+						let ty = if forward
+						{
+							OperandEvent::Forward
+						}
+						else
+						{
+							OperandEvent::Produce(op.get_value().typ.into())
+						};
 
 						evs.event(Event::Id(op_id, IdEvent::Operand(ty)));
 						target_queues

@@ -1,7 +1,7 @@
 use byteorder::{ByteOrder, LittleEndian};
 use duplicate::duplicate_item;
 use quickcheck_macros::quickcheck;
-use scry_isa::Instruction;
+use scry_isa::{Instruction, Type};
 use scry_sim::{
 	Event, EventTracker, ExecState, IdEvent, MemError, Memory, OperandEvent, OperandList,
 	OperandQueue, Scalar, Value, ValueType,
@@ -147,7 +147,7 @@ fn one_shot_tracker_self_equivalence()
 			Event::Instruction(0, Instruction::NoOp),
 			Event::Id(0, IdEvent::Operand(OperandEvent::Consume)),
 			Event::Id(1, IdEvent::Operand(OperandEvent::Consume)),
-			Event::Id(2, IdEvent::Operand(OperandEvent::Produce)),
+			Event::Id(2, IdEvent::Operand(OperandEvent::Produce(Type::Int(0)))),
 		],
 		next_id: 3,
 	};

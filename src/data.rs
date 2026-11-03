@@ -194,7 +194,10 @@ impl OperandStack
 		// actually queued. If it is put on a full operand list and therefore
 		// dropped, a discard event is additionally reported.
 		let id = op.id;
-		event_tracker.event(Event::Id(id, IdEvent::Operand(OperandEvent::Produce)));
+		event_tracker.event(Event::Id(
+			id,
+			IdEvent::Operand(OperandEvent::Produce(op.get_value().typ.into())),
+		));
 		if !self.push_op_unreported(idx, op)
 		{
 			event_tracker.event(Event::Id(id, IdEvent::Operand(OperandEvent::Discard)));

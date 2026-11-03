@@ -29,8 +29,8 @@ fn test_store_instruction<const ADDR_OPS: usize>(
 	to_store: &Value,
 	// Initial value of all non-instruction memory bytes
 	init_mem_bytes: u8,
-	// The absolute address that should be the result of the given address operands.
-	// If stack store, this is the index
+	// The absolute address that should be the result of the given address
+	// operands. If stack store, this is the index
 	store_address: usize,
 	// If stack store
 	is_stack: bool,
@@ -98,7 +98,14 @@ fn test_store_instruction<const ADDR_OPS: usize>(
 	}
 	evs.event(Event::Store(
 		store_address,
-		if is_stack { Some(idx) } else { None },
+		if is_stack
+		{
+			Some(idx * to_store.scale())
+		}
+		else
+		{
+			None
+		},
 		to_store.scale() as u8,
 	));
 

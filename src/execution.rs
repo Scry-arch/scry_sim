@@ -3,7 +3,7 @@ use crate::{
 	data::{Operand, OperandStack, ProgramStack},
 	memory::Memory,
 	value::Value,
-	Event, EventTracker, ExecState, Scalar, ValueType, MAX_INSTR_INPUTS,
+	Event, EventTracker, ExecState, Scalar, StackEvent, ValueType, MAX_INSTR_INPUTS,
 };
 use byteorder::{ByteOrder, LittleEndian};
 use duplicate::duplicate_item;
@@ -341,7 +341,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 					self.perform_load(read_typ, effective_address, 0, event_tracker);
 					event_tracker.event(Event::Load(
 						effective_address,
-						Some(idx),
+						Some(idx * read_typ.scale()),
 						read_typ.scale() as u8,
 					));
 				},
@@ -439,11 +439,12 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 					}
 					if split_original != self.get_stack_split()
 					{
-						event_tracker.event(Event::Stack(true, self.get_stack_split()));
+						event_tracker
+							.event(Event::Stack(StackEvent::Split, self.get_stack_split()));
 					}
 					if top_original != self.get_stack_top()
 					{
-						event_tracker.event(Event::Stack(false, self.get_stack_top()));
+						event_tracker.event(Event::Stack(StackEvent::Top, self.get_stack_top()));
 					}
 
 					self.discard_ready_list(event_tracker);
@@ -600,7 +601,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 					.map(|_| {
 						event_tracker.event(Event::Store(
 							effective_address,
-							stack_idx,
+							stack_idx.map(|idx| idx * to_store.scale()),
 							to_store.size() as u8,
 						));
 					})

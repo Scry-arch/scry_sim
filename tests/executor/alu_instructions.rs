@@ -82,12 +82,14 @@ fn test_arithmetic_instruction<const OPS_IN: usize, const OPS_OUT: usize>(
 
 	if out_idx.iter().any(|idx| {
 		state
-		.frame
-		.op_queue
-		.get(&(idx + 1))
-		// Ensure there is room on the list for the needed number of operands
-		.filter(|op_list| op_list.rest.len() > (3-min(3, out_idx.iter().filter(|i| *i == idx).count())))
-		.is_some()
+			.frame
+			.op_queue
+			.get(&(idx + 1))
+			// Ensure there is room on the list for the needed number of operands
+			.filter(|op_list| {
+				op_list.rest.len() > (3 - min(3, out_idx.iter().filter(|i| *i == idx).count()))
+			})
+			.is_some()
 	})
 	{
 		// Target operand list is full, so can't push results to it
@@ -195,7 +197,10 @@ fn test_arithmetic_instruction<const OPS_IN: usize, const OPS_OUT: usize>(
 		.collect::<Vec<_>>();
 	for op in &result_ops
 	{
-		expected_events.event(Event::Id(op.id, IdEvent::Operand(OperandEvent::Produce)));
+		expected_events.event(Event::Id(
+			op.id,
+			IdEvent::Operand(OperandEvent::Produce(op.get_value().typ.into())),
+		));
 	}
 
 	for (idx, result_op) in out_idx.iter().zip(result_ops.iter())
@@ -965,7 +970,10 @@ fn divide_by_0(
 		.chain(tar2_p.iter())
 		.chain(out_next_p.iter())
 		.for_each(|p| {
-			expected_events.event(Event::Id(p.id, IdEvent::Operand(OperandEvent::Produce)));
+			expected_events.event(Event::Id(
+				p.id,
+				IdEvent::Operand(OperandEvent::Produce(p.get_value().typ.into())),
+			));
 		});
 
 	if let Some(out_next) = out_next_p.as_ref()

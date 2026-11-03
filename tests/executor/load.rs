@@ -149,11 +149,14 @@ fn test_load(
 	}
 	evs.event(Event::Load(
 		effective_address,
-		output_offset.map_or(Some(addr), |_| None),
+		output_offset.map_or_else(|| Some(addr * loaded_val.0.scale()), |_| None),
 		loaded_val.0.get_first().bytes().unwrap().len() as u8,
 	));
 	let id = evs.new_id();
-	evs.event(Event::Id(id, IdEvent::Operand(OperandEvent::Produce)));
+	evs.event(Event::Id(
+		id,
+		IdEvent::Operand(OperandEvent::Produce(loaded_val.0.typ.into())),
+	));
 
 	test_execution_step(&test_state, test_mem, &expected_state, &evs)
 }

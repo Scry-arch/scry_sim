@@ -72,7 +72,7 @@ fn name(
 	let target_op = target_value.into_operand(&mut expected_events);
 	expected_events.event(Event::Id(
 		target_op.id,
-		IdEvent::Operand(OperandEvent::Produce),
+		IdEvent::Operand(OperandEvent::Produce(target_op.get_value().typ.into())),
 	));
 
 	let mut expected_state = state.clone();

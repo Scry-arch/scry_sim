@@ -8,7 +8,7 @@ use scry_isa::{Bits, Instruction};
 use scry_sim::{
 	arbitrary::{LimitedOps, NoCF},
 	BlockedMemory, CallFrameState, Event, EventTracker, ExecState, IdEvent, OperandEvent, Scalar,
-	Value, ValueType,
+	StackEvent, Value, ValueType,
 };
 use std::iter::once;
 
@@ -33,11 +33,11 @@ fn stack_change_events(
 ) -> OneShotTracker
 {
 	let split_event = Event::Stack(
-		true,
+		StackEvent::Split,
 		expected_frame.stack.block.address + expected_frame.stack.private_size,
 	);
 	let top_event = Event::Stack(
-		false,
+		StackEvent::Top,
 		expected_frame.stack.block.address + expected_frame.stack.block.size,
 	);
 
@@ -228,7 +228,10 @@ fn stack_address_indexed_static(
 
 	let mut expected_events: OneShotTracker = [
 		Event::Instruction(test_state.address, instruction),
-		Event::Id(0, IdEvent::Operand(OperandEvent::Produce)),
+		Event::Id(
+			0,
+			IdEvent::Operand(OperandEvent::Produce(result_type.into())),
+		),
 	]
 	.into();
 

@@ -1,7 +1,7 @@
 use crate::{
 	data::{OperandStack, ProgramStack},
 	CallFrameState, ControlEvent, ControlFlowType, Event, EventTracker, ExecError, ExecState,
-	IdEvent,
+	IdEvent, StackEvent,
 };
 use std::collections::{HashMap, VecDeque};
 
@@ -131,7 +131,19 @@ impl ControlFlow
 						},
 					);
 					self.call_stack.push_front(old_frame);
-					event_tracker.event(Event::Id(id, IdEvent::ControlTrigger(ControlEvent::Call)))
+					event_tracker.event(Event::Id(id, IdEvent::ControlTrigger(ControlEvent::Call)));
+					event_tracker.event(Event::Stack(
+						StackEvent::Base,
+						prog_stack.top().get_base_address(),
+					));
+					event_tracker.event(Event::Stack(
+						StackEvent::Split,
+						prog_stack.top().get_split_address(),
+					));
+					event_tracker.event(Event::Stack(
+						StackEvent::Top,
+						prog_stack.top().get_top_address(),
+					));
 				},
 				Return =>
 				{
@@ -157,7 +169,19 @@ impl ControlFlow
 						return Ok(false);
 					};
 					event_tracker
-						.event(Event::Id(id, IdEvent::ControlTrigger(ControlEvent::Return)))
+						.event(Event::Id(id, IdEvent::ControlTrigger(ControlEvent::Return)));
+					event_tracker.event(Event::Stack(
+						StackEvent::Base,
+						prog_stack.top().get_base_address(),
+					));
+					event_tracker.event(Event::Stack(
+						StackEvent::Split,
+						prog_stack.top().get_split_address(),
+					));
+					event_tracker.event(Event::Stack(
+						StackEvent::Top,
+						prog_stack.top().get_top_address(),
+					));
 				},
 			}
 		}
