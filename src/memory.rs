@@ -130,10 +130,7 @@ impl From<usize> for MemBlock
 {
 	fn from(size: usize) -> Self
 	{
-		Self {
-			data: vec![0; size],
-			initialized: BitVec::repeat(false, size),
-		}
+		Self::new_zeroed(size, false)
 	}
 }
 
@@ -166,6 +163,14 @@ impl From<Vec<u8>> for MemBlock
 
 impl MemBlock
 {
+	fn new_zeroed(size: usize, initialized: bool) -> Self
+	{
+		Self {
+			data: vec![0; size],
+			initialized: BitVec::repeat(initialized, size),
+		}
+	}
+
 	/// Appends the given blocks memory at the end of this block's.
 	#[allow(dead_code)]
 	fn append<T>(&mut self, other: T)
@@ -290,7 +295,7 @@ impl BlockedMemory
 	{
 		self.assert_non_overlapping(offset, size);
 
-		self.blocks.push((offset, MemBlock::from(size)));
+		self.blocks.push((offset, MemBlock::new_zeroed(size, true)));
 		self.sort_blocks();
 	}
 
