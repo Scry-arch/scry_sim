@@ -49,7 +49,7 @@ fn duplicate(
 			new_op_q
 		},
 		|old_op_queue| {
-			let mut evs = OneShotTracker::new();
+			let mut evs = OneShotTracker::new(true);
 			let mut target_queues = HashMap::new();
 
 			if let Some(list) = old_op_queue.get(&0)
@@ -142,7 +142,7 @@ fn echo(
 			new_op_q
 		},
 		|old_op_queue| {
-			let mut evs = OneShotTracker::new();
+			let mut evs = OneShotTracker::new(true);
 			let mut target_queues = HashMap::new();
 
 			if let Some(list) = old_op_queue.get(&0)
@@ -206,7 +206,7 @@ fn echo_long(state: NoCF<ExecState>, target: Bits<10, false>) -> TestResult
 		|old_op_queue| {
 			let list_count = |idx| old_op_queue.get(&idx).map_or(0, |list| list.len());
 
-			let mut evs = OneShotTracker::new();
+			let mut evs = OneShotTracker::new(true);
 
 			if let Some(list) = old_op_queue.get(&0)
 			{

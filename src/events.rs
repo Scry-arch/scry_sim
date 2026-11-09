@@ -107,6 +107,9 @@ pub trait EventTracker
 	///
 	/// The events are reported without a meaningful order.
 	fn event(&mut self, event: Event);
+
+	/// Called when an execution step has completed.
+	fn step(&mut self);
 }
 
 /// Placeholder event tracker that doesn't track anything, for when no
@@ -119,4 +122,37 @@ impl EventTracker for ()
 	}
 
 	fn event(&mut self, _: Event) {}
+
+	fn step(&mut self) {}
+}
+
+impl<T: EventTracker> EventTracker for Option<T>
+{
+	fn new_id(&mut self) -> usize
+	{
+		if let Some(t) = self
+		{
+			t.new_id()
+		}
+		else
+		{
+			0
+		}
+	}
+
+	fn event(&mut self, event: Event)
+	{
+		if let Some(t) = self
+		{
+			t.event(event);
+		}
+	}
+
+	fn step(&mut self)
+	{
+		if let Some(t) = self
+		{
+			t.step()
+		}
+	}
 }

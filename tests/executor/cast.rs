@@ -68,7 +68,7 @@ fn name(
 
 	let target_value = Value::singleton::<to_typ>(Scalar::Val(target_bytes.into_boxed_slice()));
 
-	let mut expected_events = OneShotTracker::new();
+	let mut expected_events = OneShotTracker::new(true);
 	let target_op = target_value.into_operand(&mut expected_events);
 	expected_events.event(Event::Id(
 		target_op.id,

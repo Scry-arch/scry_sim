@@ -118,7 +118,7 @@ fn return_trigger(
 
 	// Execute one step on the frame to get the expected result of the next
 	// instruction
-	let mut expected_events = OneShotTracker::new();
+	let mut expected_events = OneShotTracker::new(true);
 	let expected_ready_ops = match Executor::from_state(
 		&ExecState {
 			frame: frame.clone(),
@@ -280,7 +280,7 @@ fn jmp_trigger(
 
 	// Execute one step on the frame to get the expected result of the next
 	// instruction
-	let mut expected_events = OneShotTracker::new();
+	let mut expected_events = OneShotTracker::new(true);
 	let mut expected_state = match Executor::from_state(
 		&state,
 		RepeatingMem::<true>(instr_encoded, 0),
@@ -781,7 +781,7 @@ fn call_trigger_impl(
 
 	// Execute one step on the frame to get the expected result of the next
 	// instruction
-	let mut expected_events = OneShotTracker::new();
+	let mut expected_events = OneShotTracker::new(true);
 	let mut expected_state = match Executor::from_state(
 		&state,
 		RepeatingMem::<true>(instr_encoded, 0),
@@ -882,7 +882,7 @@ fn call_trigger_immediately(
 			},
 		),
 	);
-	let mut expected_events = OneShotTracker::new();
+	let mut expected_events = OneShotTracker::new(true);
 	let expected_state = match Executor::from_state(
 		&nop_call_state,
 		RepeatingMem::<true>(Instruction::NoOp.encode(), 0),

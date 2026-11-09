@@ -140,7 +140,7 @@ fn test_load(
 		effective_address,
 	);
 
-	let mut evs = OneShotTracker::new();
+	let mut evs = OneShotTracker::new(true);
 	evs.event(Event::Instruction(test_state.address, instruction));
 	for _ in 0..load_operands.len()
 	{

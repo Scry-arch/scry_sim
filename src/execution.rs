@@ -545,6 +545,7 @@ impl<M: Memory, B: BorrowMut<M>> Executor<M, B>
 			.control
 			.next_addr(&mut self.operands, &mut self.stack, event_tracker)?
 		{
+			event_tracker.step();
 			Ok(self)
 		}
 		else

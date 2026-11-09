@@ -146,7 +146,10 @@ pub fn test_execution_step<M: Memory + Debug>(
 	expected_events: &OneShotTracker,
 ) -> TestResult
 {
-	let mut actual_events = OneShotTracker::new();
+	// Always require the expected events to include the step
+	assert!(expected_events.step);
+
+	let mut actual_events = OneShotTracker::new(false);
 	match Executor::from_state(start_state, start_memory, &mut actual_events)
 		.step(&mut actual_events)
 	{
@@ -196,7 +199,7 @@ pub fn test_execution_step_exceptions<M: Memory + Debug>(
 	expected_events: &OneShotTracker,
 ) -> TestResult
 {
-	let mut actual_events = OneShotTracker::new();
+	let mut actual_events = OneShotTracker::new(false);
 	match Executor::from_state(start_state, start_memory, &mut actual_events)
 		.step(&mut actual_events)
 	{
@@ -295,7 +298,7 @@ fn operand_events_for_list(
 	ev_tys: &[OperandEvent],
 ) -> OneShotTracker
 {
-	let mut evs = OneShotTracker::new();
+	let mut evs = OneShotTracker::new(true);
 
 	add_operand_events_for_list(&mut evs, queue, idx, skip, ev_tys);
 
@@ -382,7 +385,7 @@ fn instruction_nop(state: NoCF<ExecState>) -> TestResult
 			new_op_q
 		},
 		|old_op_queue| {
-			let mut evs = OneShotTracker::new();
+			let mut evs = OneShotTracker::new(true);
 			if let Some(list) = old_op_queue.get(&0)
 			{
 				for _ in list.iter()
@@ -446,7 +449,7 @@ fn instruction_constant(
 			new_op_q
 		},
 		|old_op_queue| {
-			let mut evs = OneShotTracker::new();
+			let mut evs = OneShotTracker::new(true);
 
 			let mut ops = vec![(evs.new_id(), OperandEvent::Produce(typ))];
 			if let Some(list) = old_op_queue.get(&0)
@@ -472,7 +475,7 @@ fn instruction_constant(
 /// operand in the ready queue
 fn grow_events(queue: &OperandQueue, depth: usize) -> OneShotTracker
 {
-	let mut evs = OneShotTracker::new();
+	let mut evs = OneShotTracker::new(true);
 
 	let consume_id = evs.new_id();
 	evs.event(Event::Id(

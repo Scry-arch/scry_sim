@@ -183,7 +183,7 @@ fn test_arithmetic_instruction<const OPS_IN: usize, const OPS_OUT: usize>(
 		.unwrap();
 	}
 
-	let mut expected_events = OneShotTracker::new();
+	let mut expected_events = OneShotTracker::new(true);
 	expected_events.event(Event::Instruction(state.address, instr.clone()));
 	for _ in 0..OPS_IN
 	{
@@ -861,7 +861,7 @@ fn test_effective_types(
 			.insert(0, OperandList::new(v1_ext, vec![v2_ext]));
 	}
 
-	let mut expected_events = OneShotTracker::new();
+	let mut expected_events = OneShotTracker::new(true);
 	let expected_result = Executor::from_state(&expected_state_start, mem, &mut expected_events)
 		.step(&mut expected_events)
 		.map(|ex| ex.state());
@@ -882,7 +882,7 @@ fn test_effective_types(
 			.insert(0, OperandList::new(v1, vec![v2]));
 	}
 
-	let mut actual_events = OneShotTracker::new();
+	let mut actual_events = OneShotTracker::new(false);
 	let actual_result = Executor::from_state(&test_state, mem, &mut actual_events)
 		.step(&mut actual_events)
 		.map(|ex| ex.state());
@@ -960,7 +960,7 @@ fn divide_by_0(
 		Alu2OutputVariant::LowNext => (out_high, None, Some(out_low)),
 	};
 
-	let mut expected_events = OneShotTracker::new();
+	let mut expected_events = OneShotTracker::new(true);
 
 	let tar1_p = tar1.into_operand(&mut expected_events);
 	let tar2_p = tar2.map(|v| v.into_operand(&mut expected_events));

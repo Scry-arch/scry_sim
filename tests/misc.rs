@@ -17,6 +17,9 @@ pub struct OneShotTracker
 {
 	pub events: Vec<Event>,
 	pub next_id: usize,
+
+	/// Whether a step was reported
+	pub step: bool,
 }
 
 fn vec_eq_unordered<T: PartialEq + Clone>(v1: &Vec<T>, v2: &Vec<T>) -> bool
@@ -39,11 +42,12 @@ fn vec_eq_unordered<T: PartialEq + Clone>(v1: &Vec<T>, v2: &Vec<T>) -> bool
 
 impl OneShotTracker
 {
-	pub fn new() -> OneShotTracker
+	pub fn new(step: bool) -> OneShotTracker
 	{
 		Self {
 			events: vec![],
 			next_id: 0,
+			step,
 		}
 	}
 
@@ -61,7 +65,7 @@ impl OneShotTracker
 	/// can be found between self's and other's IDs
 	pub fn equivalent(&self, other: &Self) -> bool
 	{
-		if self.events.len() != other.events.len()
+		if self.events.len() != other.events.len() || self.step != other.step
 		{
 			return false;
 		}
@@ -135,7 +139,12 @@ impl<F: IntoIterator<Item = Event>> From<F> for OneShotTracker
 			}
 		});
 
-		Self { events, next_id }
+		// Step set to true so that we don't have to set it for each test
+		Self {
+			events,
+			next_id,
+			step: true,
+		}
 	}
 }
 
@@ -150,6 +159,7 @@ fn one_shot_tracker_self_equivalence()
 			Event::Id(2, IdEvent::Operand(OperandEvent::Produce(Type::Int(0)))),
 		],
 		next_id: 3,
+		step: true,
 	};
 
 	assert_eq!(x, x);
@@ -165,6 +175,11 @@ impl EventTracker for OneShotTracker
 	fn event(&mut self, event: Event)
 	{
 		self.events.push(event);
+	}
+
+	fn step(&mut self)
+	{
+		self.step = true;
 	}
 }
 

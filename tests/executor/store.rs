@@ -89,7 +89,7 @@ fn test_store_instruction<const ADDR_OPS: usize>(
 	let mut expected_state = state.clone();
 	expected_state.address += 2;
 
-	let mut evs = OneShotTracker::new();
+	let mut evs = OneShotTracker::new(true);
 	evs.event(Event::Instruction(test_state.address, instr));
 	for _ in 0..(ADDR_OPS + 1)
 	{
@@ -325,10 +325,12 @@ fn store_nar_addr(
 		[Value::new_nar_typed(address_type, payload)],
 	);
 
+	let mut tracker = nop_store_events(state.address);
+	tracker.step = false;
 	test_execution_step_exceptions(
 		&test_state,
 		RepeatingMem::<false>(Instruction::Store.encode(), 0),
-		&nop_store_events(state.address),
+		&tracker,
 	)
 }
 
@@ -347,10 +349,12 @@ fn store_nar_value(
 		[address.clone()],
 	);
 
+	let mut tracker = nop_store_events(state.address);
+	tracker.step = false;
 	test_execution_step_exceptions(
 		&test_state,
 		RepeatingMem::<false>(Instruction::Store.encode(), 0),
-		&nop_store_events(state.address),
+		&tracker,
 	)
 }
 
@@ -367,14 +371,16 @@ fn store_missing_addr(
 	let test_state = clone_with_front_operands(&state, to_store.0.clone(), []);
 
 	let instr = Instruction::Store;
+	let mut tracker: OneShotTracker = [
+		Event::Instruction(state.address, instr.clone()),
+		Event::Id(0, IdEvent::Operand(OperandEvent::Consume)),
+	]
+	.into();
+	tracker.step = false;
 	test_execution_step_exceptions(
 		&test_state,
 		RepeatingMem::<false>(instr.encode(), 0),
-		&[
-			Event::Instruction(state.address, instr),
-			Event::Id(0, IdEvent::Operand(OperandEvent::Consume)),
-		]
-		.into(),
+		&tracker,
 	)
 }
 
@@ -386,11 +392,9 @@ fn store_missing_operands(NoCF(mut state): NoCF<ExecState>) -> TestResult
 	state.frame.op_queue = regress_queue(state.frame.op_queue);
 
 	let instr = Instruction::Store;
-	test_execution_step_exceptions(
-		&state,
-		RepeatingMem::<false>(instr.encode(), 0),
-		&[Event::Instruction(state.address, instr)].into(),
-	)
+	let mut tracker: OneShotTracker = [Event::Instruction(state.address, instr.clone())].into();
+	tracker.step = false;
+	test_execution_step_exceptions(&state, RepeatingMem::<false>(instr.encode(), 0), &tracker)
 }
 
 /// Tests the store stack without extra operands
